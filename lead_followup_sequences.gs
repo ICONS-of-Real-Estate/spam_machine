@@ -341,12 +341,18 @@ function buildFollowUpSystemPrompt() {
   try {
     const doc = DocumentApp.openById(CONFIG.SOP_DOC_ID);
     const fullText = doc.getBody().getText();
-    const marker = fullText.match(/^##\s*FOLLOW-UP DRAFTING\s*$/im);
+    // Match the heading even if it has trailing parenthetical text, matching
+    // the Doc's real style (e.g. "## Tone (confirmed from real usage)"). The
+    // heading still must START with exactly "## FOLLOW-UP DRAFTING".
+    const marker = fullText.match(/^##\s*FOLLOW-UP DRAFTING\b[^\n]*$/im);
     if (marker) {
       const rest = fullText.slice(fullText.indexOf(marker[0]) + marker[0].length);
       const nextHeading = rest.search(/^##\s+\S/m);
       const section = (nextHeading === -1 ? rest : rest.slice(0, nextHeading)).trim();
-      if (section.length > 200) return section;
+      if (section.length > 200) {
+        Logger.log('Follow-up SOP: loaded "## FOLLOW-UP DRAFTING" section from Doc (' + section.length + ' chars).');
+        return section;
+      }
       Logger.log('WARNING: "## FOLLOW-UP DRAFTING" SOP section suspiciously short (' + section.length + ' chars). Using fallback prompt.');
     } else {
       Logger.log('WARNING: no "## FOLLOW-UP DRAFTING" section found in SOP Doc. Using fallback prompt.');
