@@ -318,6 +318,168 @@ function buildSchedulingNote(originalMessageDate) {
     '. Consider timing this send to land around the same time of day rather than sending immediately.]\n\n';
 }
 
+// ---------- CONTEXT-AWARE FOLLOW-UP DRAFTING (15 Aug 2026) ----------
+//
+// Replaces the static HUB_GUEST_TEMPLATES strings, which Joana was rewriting
+// from scratch on nearly every send (7/7 real examples in Goodness's feedback
+// doc). Root cause: a fixed template has zero awareness of WHY the lead
+// declined, so it re-pitched people who had said "not for me," ignored stated
+// reasons (income, admin role, retiring), and never hyperlinked the show.
+//
+// classifyAndDraftFollowUp() mirrors the classifyAndDraft() pattern in
+// Code.gs: one Claude call that both classifies the lead's situation and
+// drafts the appropriate reply for it. The system prompt comes from the
+// "## FOLLOW-UP DRAFTING" section of the same live SOP Doc the main drafter
+// reads (editable there, version history included), with a hardcoded
+// fallback below if that section is ever missing. Uses the existing
+// CONFIG.MODEL and ANTHROPIC_API_KEY -- no new infrastructure.
+//
+// Hub Guest only for now. Podcast Sales stays on PODCAST_SALES_TEMPLATES
+// until the Follow-Up Learning Log shows whether Joana rewrites those too.
+
+function buildFollowUpSystemPrompt() {
+  try {
+    const doc = DocumentApp.openById(CONFIG.SOP_DOC_ID);
+    const fullText = doc.getBody().getText();
+    const marker = fullText.match(/^##\s*FOLLOW-UP DRAFTING\s*$/im);
+    if (marker) {
+      const rest = fullText.slice(fullText.indexOf(marker[0]) + marker[0].length);
+      const nextHeading = rest.search(/^##\s+\S/m);
+      const section = (nextHeading === -1 ? rest : rest.slice(0, nextHeading)).trim();
+      if (section.length > 200) return section;
+      Logger.log('WARNING: "## FOLLOW-UP DRAFTING" SOP section suspiciously short (' + section.length + ' chars). Using fallback prompt.');
+    } else {
+      Logger.log('WARNING: no "## FOLLOW-UP DRAFTING" section found in SOP Doc. Using fallback prompt.');
+    }
+  } catch (e) {
+    Logger.log('WARNING: could not read SOP Doc for follow-up prompt, using fallback: ' + e);
+  }
+
+  return `You are drafting follow-up emails for Joana Peixe, Podcast Network Manager at Icons of Real Estate. She invited a real estate agent to be a guest on a state-specific podcast; you are writing the follow-up a few working days later. Never mention you are an AI. Warm, brief, first-name only, low-pressure. Plain text only -- no markdown; paste any link as a raw URL.
+
+The one thing you must NEVER do is send a generic "just following up, can we book you?" nudge to a lead who already told you why they passed. Read what they actually said and respond to that:
+- Reason with a real counter ("not for me", "too new"): counter ONCE, warmly and substantively, then close low-pressure.
+- Wrong fit for the offer (e.g. administrative role): thank them, agree it doesn't fit, ask for a referral to the right person.
+- Life/business hardship (e.g. income): pure empathy, no pitch at all, door left open.
+- Leaving the industry: pivot to the affiliate/referral program instead of the guest pitch.
+- Never replied at all: a gentle "floating this back to the top of your inbox, no pressure" bump with the show link.
+- Clear hard decline / told you to stop: do not draft (return action "stop").
+When referencing the show, ALWAYS include the exact show URL given to you, verbatim, as a raw URL. STEP 2 is always the final message: short, gracious, the invite stands, no new asks.`;
+}
+
+// One Claude call per follow-up draft. Classifies the lead's situation from
+// the actual thread, then drafts the right shape of reply for it -- counter,
+// referral-ask, empathy close, affiliate pivot, gentle bump, or nothing at all.
+// Returns { action: 'draft'|'stop', leadState, draftBody } or null on failure
+// (caller leaves the row at _SCHEDULE so it retries on the next daily run).
+function classifyAndDraftFollowUp(apiKey, systemPrompt, ctx) {
+  // ctx: { name, email, state, showName, showLink, step, thread }
+  const messages = ctx.thread.getMessages();
+  const threadContext = buildThreadContext(messages);
+
+  // Isolate the lead's own most recent words -- that is what the draft must
+  // respond to. Null means they never replied (pure bump case).
+  let lastLeadText = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const sender = extractEmail(messages[i].getFrom());
+    if (!isInternal(sender)) {
+      lastLeadText = extractProspectFreshReplyText(messages[i]).slice(0, 1500);
+      break;
+    }
+  }
+
+  const stepBlock = ctx.step === 1
+    ? 'This is STEP 1 of 2 -- the first follow-up after the guest invite.'
+    : 'This is STEP 2 of 2 -- the FINAL message this lead will ever receive in this cadence. Regardless of their situation: short, gracious, no new asks, the invite stands. The only exception is a hard decline, which gets action "stop" instead.';
+
+  const userPrompt = `LEAD FIRST NAME: ${ctx.name || 'there'}
+SHOW NAME: ${ctx.showName}
+SHOW URL (use verbatim, as a raw URL, whenever you reference the show or guest spot): ${ctx.showLink}
+LEAD'S STATE: ${ctx.state || 'unknown'}
+JOANA'S ZOOM LINK (only if a quick call is the natural next step, e.g. countering an objection from an engaged lead): ${CONFIG.BOOKING_LINK_URL}
+
+${stepBlock}
+
+LEAD'S MOST RECENT MESSAGE:
+${lastLeadText ? lastLeadText : '(the lead has never replied -- this is a no-response bump)'}
+
+FULL THREAD (oldest to newest):
+${threadContext}
+
+Return ONLY a JSON object, no markdown fences, no preamble, with this exact shape:
+{
+  "lead_state": "objection_counter | wrong_fit | life_circumstance | leaving_industry | guest_ok | no_response | hard_decline",
+  "action": "draft | stop",
+  "reasoning": "one sentence",
+  "draft_body": "the full plain-text follow-up in Joana's voice -- no subject line, no markdown, links as raw URLs, one warm closing line"
+}
+
+Set action to "stop" ONLY for a clear hard decline or an explicit request to stop contacting them (draft_body can be empty in that case). Everything else gets action "draft".`;
+
+  const payload = {
+    model: CONFIG.MODEL,
+    max_tokens: 2000,
+    system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+    messages: [{ role: 'user', content: userPrompt }],
+  };
+
+  const response = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  });
+
+  if (response.getResponseCode() !== 200) {
+    Logger.log('classifyAndDraftFollowUp -- Claude API error: ' + response.getContentText());
+    return null;
+  }
+
+  const data = JSON.parse(response.getContentText('UTF-8'));
+  const textBlock = data.content.find(c => c.type === 'text');
+  if (!textBlock) {
+    Logger.log('classifyAndDraftFollowUp -- no text block in response, stop_reason: ' + data.stop_reason);
+    return null;
+  }
+
+  let parsed;
+  try {
+    const cleaned = textBlock.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+    parsed = JSON.parse(cleaned);
+  } catch (e) {
+    Logger.log('classifyAndDraftFollowUp -- failed to parse JSON: ' + textBlock.text);
+    return null;
+  }
+
+  return {
+    action: parsed.action === 'stop' ? 'stop' : 'draft',
+    leadState: parsed.lead_state || 'unknown',
+    draftBody: (parsed.draft_body || '').trim(),
+  };
+}
+
+// ---------- MANUAL TEST HELPER (no draft created, safe to run anytime) ----------
+// Paste a real thread ID from the Hub Guest queue to see exactly what Claude
+// would draft for it (classification + body) WITHOUT touching Gmail. Use this
+// to sanity-check prompt edits before letting runLeadFollowUpCycle() draft
+// for real.
+function testFollowUpDraftForThread(threadId, step) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
+  if (!apiKey) { Logger.log('ANTHROPIC_API_KEY not set.'); return; }
+  const thread = GmailApp.getThreadById(threadId);
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const row = ss.getSheetByName(HUB_GUEST_QUEUE_TAB).getDataRange().getValues()
+    .find(r => r[0] === threadId);
+  if (!row) { Logger.log('Thread ' + threadId + ' not found in Hub Guest queue.'); return; }
+  const result = classifyAndDraftFollowUp(apiKey, buildFollowUpSystemPrompt(), {
+    name: row[1], email: row[2], state: row[3], showName: row[4], showLink: row[5],
+    step: step || 1, thread: thread,
+  });
+  Logger.log('TEST RESULT for ' + row[1] + ' <' + row[2] + '>:');
+  Logger.log(JSON.stringify(result, null, 2));
+}
+
 // ---------- EDIT-TRACKING ----------
 
 function logFollowUpLearning(cadence, name, email, step, draftedText, sentText) {
@@ -339,10 +501,12 @@ const PODCAST_SALES_TEMPLATES = {
   1: "Hi {{name}}, Just wanted to follow up on my last note -- were you able to take a look at hosting your own podcast? Happy to jump on a quick call whenever works for you: [book a 15-minute Zoom Call here](BOOKING_LINK)"
 };
 
-const HUB_GUEST_TEMPLATES = {
-  1: "Hi {{name}}, Just following up on my last note -- are we able to book you as a guest on {{show}}? Would love to get something on the calendar whenever works for you!",
-  2: "Hi {{name}}, I don't want to keep bugging you about this, so this will be my last note -- if being a guest on {{show}} ever sounds interesting down the road, the invite always stands. Wishing you continued success!"
-};
+// REMOVED (15 Aug 2026): HUB_GUEST_TEMPLATES deleted. The Hub Guest cadence no
+// longer uses static {{name}}/{{show}} strings -- Joana was rewriting nearly
+// every one from scratch (7/7 real examples in Goodness's feedback doc) because
+// a fixed template has zero awareness of WHY the lead declined. Hub Guest
+// follow-up bodies are now drafted per-lead by classifyAndDraftFollowUp()
+// below. Podcast Sales keeps its static template for now.
 
 // ---------- MAIN ENTRY POINT ----------
 
@@ -762,6 +926,9 @@ function advanceHubGuestFollowUps() {
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const queueTab = ss.getSheetByName(HUB_GUEST_QUEUE_TAB);
   const bensTab = ss.getSheetByName(BENS_CALL_LIST_TAB_V2);
+  const followUpApiKey = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
+  const followUpSystemPrompt = buildFollowUpSystemPrompt();
+  let followUpKeyWarned = false;
   const data = queueTab.getDataRange().getValues();
   let advanced = 0;
   let completed = 0;
@@ -806,9 +973,35 @@ function advanceHubGuestFollowUps() {
       const nextStep = currentStep + 1;
       if (nextStep > 2) continue;
 
+      if (!followUpApiKey) {
+        if (!followUpKeyWarned) {
+          Logger.log('advanceHubGuestFollowUps -- ANTHROPIC_API_KEY not set in Script Properties. No Hub Guest follow-ups can be drafted; rows left at _SCHEDULE. Fix the key and they will draft on the next run.');
+          followUpKeyWarned = true;
+        }
+        continue;
+      }
+
+      const followUp = classifyAndDraftFollowUp(followUpApiKey, followUpSystemPrompt, {
+        name: name, email: email, state: state, showName: showName, showLink: showLink,
+        step: nextStep, thread: thread
+      });
+
+      if (!followUp) {
+        Logger.log('advanceHubGuestFollowUps -- Claude drafting failed for ' + threadId + ' (' + name + ') -- left at _SCHEDULE, will retry on the next run.');
+        continue;
+      }
+
+      if (followUp.action === 'stop') {
+        queueTab.getRange(r + 1, 10).setValue('STOPPED');
+        Logger.log('advanceHubGuestFollowUps -- STOPPED (Claude read the thread as a hard decline, lead_state=' + followUp.leadState + '): ' + threadId + ' (' + name + ', ' + email + '). No follow-up drafted.');
+        stopped++;
+        continue;
+      }
+
+      Logger.log('advanceHubGuestFollowUps -- Claude drafted for ' + threadId + ' (' + name + '), lead_state=' + followUp.leadState + ', step ' + nextStep);
+
       const note = buildSchedulingNote(new Date(originalReplyTime));
-      const template = HUB_GUEST_TEMPLATES[nextStep];
-      const plainBody = template.replace('{{name}}', name || 'there').replace(/{{show}}/g, showName);
+      const plainBody = followUp.draftBody;
       const fullDraftText = note + plainBody + buildQuotedHistoryForReply(thread);
 
       GmailApp.createDraft(email, thread.getFirstMessageSubject().replace(/^(fwd:\s*)+/i, '').trim(), fullDraftText, { cc: CONFIG.NETWORK_CC_ON_REPLY });
