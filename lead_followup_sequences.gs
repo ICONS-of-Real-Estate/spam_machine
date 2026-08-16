@@ -92,6 +92,14 @@ const FOLLOWUP_DEEP_DIVE_LOOKBACK_DAYS = 270;
 // scattered through the code.
 const FOLLOWUP_DRAFT_CAP = 100;
 
+// DAILY CREATION CAP (15 Aug 2026, per Kris): in addition to the total
+// pending-approval ceiling above, cap how many NEW follow-up drafts get
+// created per Pacific day across both cadences -- so Goodness gets a
+// processable batch of ~100 each day rather than an unbounded flood. The
+// counter lives in Script Properties and self-resets each Pacific day.
+// Adjust here, same as the total cap.
+const FOLLOWUP_DAILY_DRAFT_CAP = 100;
+
 // SAFETY NET (14 Aug 2026, real incident): a lead (Treye Bird) who clearly
 // declined ("I'm sorry i haven't responded earlier. I'm not interested,
 // but thank you for reaching out.") still got a Podcast Sales follow-up
@@ -751,6 +759,103 @@ function countActiveApprovalDrafts() {
   return count;
 }
 
+// ---------- DAILY DRAFT-CREATION CAP (15 Aug 2026) ----------
+
+// How many follow-up drafts have already been created today (Pacific).
+// Self-resets: if the stored date isn't today, the count is effectively 0.
+function getFollowUpDraftsCreatedToday() {
+  const props = PropertiesService.getScriptProperties();
+  const storedDate = props.getProperty('FOLLOWUP_DRAFTS_CREATED_DATE');
+  if (storedDate !== todayPacificDateString()) return 0;
+  return parseInt(props.getProperty('FOLLOWUP_DRAFTS_CREATED_COUNT') || '0', 10);
+}
+
+function incrementFollowUpDraftsCreatedToday() {
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty('FOLLOWUP_DRAFTS_CREATED_DATE', todayPacificDateString());
+  props.setProperty('FOLLOWUP_DRAFTS_CREATED_COUNT', String(getFollowUpDraftsCreatedToday() + 1));
+}
+
+// ---------- ONE-OFF WIPE + REDRAFT (15 Aug 2026, per Kris) ----------
+// Deletes the ~450 bad follow-up drafts (static-template era) sitting in
+// Goodness's Drafts folder, so they can be redrafted fresh by the new
+// context-aware classifyAndDraftFollowUp(). DESTRUCTIVE and irreversible.
+//
+// Safety:
+//   - DRY-RUN BY DEFAULT: with applyDeletions=false (the default) it only
+//     LOGS what it would delete, deleting nothing. Run that first, read the
+//     log, then run with true to actually delete.
+//   - ONLY touches a Gmail draft if its recipient matches a lead currently
+//     sitting at an "_APPROVAL" status in one of the two follow-up queues.
+//     Any other draft in her folder is left alone.
+//   - After deleting, calls reconcileFollowUpDrafts() so every affected row
+//     resets from "_APPROVAL" back to "_SCHEDULE" (due now) and redrafts on
+//     the next runLeadFollowUpCycle() -- respecting both FOLLOWUP_DRAFT_CAP
+//     and FOLLOWUP_DAILY_DRAFT_CAP, so the refill is ~100/day, not 450 at once.
+function wipeFollowUpQueueDrafts(applyDeletions) {
+  const apply = applyDeletions === true;
+  Logger.log('wipeFollowUpQueueDrafts -- mode: ' + (apply ? 'APPLY (will delete)' : 'DRY RUN (nothing deleted)'));
+
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+
+  // Collect the set of lead emails that have a live follow-up draft pending.
+  const queueEmails = new Set();
+  [
+    { tabName: PODCAST_SALES_QUEUE_TAB, statusCol: 7, emailCol: 3 },
+    { tabName: HUB_GUEST_QUEUE_TAB, statusCol: 10, emailCol: 3 }
+  ].forEach(cfg => {
+    const tab = ss.getSheetByName(cfg.tabName);
+    if (!tab) return;
+    const data = tab.getDataRange().getValues();
+    for (let r = 1; r < data.length; r++) {
+      const status = data[r][cfg.statusCol - 1];
+      if (status && String(status).indexOf('_APPROVAL') > -1) {
+        const email = String(data[r][cfg.emailCol - 1] || '').toLowerCase().trim();
+        if (email) queueEmails.add(email);
+      }
+    }
+  });
+  Logger.log('wipeFollowUpQueueDrafts -- ' + queueEmails.size + ' unique lead email(s) pending approval across both queues.');
+
+  // Scan Gmail drafts; match only those whose recipient is a queued lead.
+  let matched = 0;
+  let deleted = 0;
+  let failed = 0;
+  const drafts = GmailApp.getDrafts();
+  drafts.forEach(d => {
+    let msg;
+    try { msg = d.getMessage(); } catch (e) { return; } // draft being edited/deleted concurrently
+    const to = (msg.getTo() || '').toLowerCase();
+    let isQueueDraft = false;
+    queueEmails.forEach(email => { if (to.indexOf(email) !== -1) isQueueDraft = true; });
+    if (!isQueueDraft) return;
+
+    matched++;
+    if (apply) {
+      try {
+        d.deleteDraft();
+        deleted++;
+      } catch (e) {
+        failed++;
+        Logger.log('wipeFollowUpQueueDrafts -- FAILED to delete draft to ' + to + ': ' + e);
+      }
+    } else {
+      Logger.log('wipeFollowUpQueueDrafts -- [DRY RUN] would delete draft to: ' + to);
+    }
+  });
+
+  Logger.log('wipeFollowUpQueueDrafts -- matched ' + matched + ' queue draft(s) in Gmail. ' +
+    (apply ? ('Deleted ' + deleted + ', failed ' + failed + '.') : 'DRY RUN -- nothing deleted. Re-run wipeFollowUpQueueDrafts(true) to actually delete.'));
+
+  // Reset the queue rows so they redraft fresh. Safe in dry-run too: rows
+  // with a still-live draft are left alone by reconcileFollowUpDrafts, so
+  // this only resets rows whose draft is already gone.
+  if (apply) {
+    reconcileFollowUpDrafts();
+    Logger.log('wipeFollowUpQueueDrafts -- queues reconciled. Affected rows reset to _SCHEDULE (due now) and will redraft on the next runLeadFollowUpCycle(), capped at ' + FOLLOWUP_DAILY_DRAFT_CAP + '/day and ' + FOLLOWUP_DRAFT_CAP + ' total pending.');
+  }
+}
+
 // ---------- FIND ALL LEADS (registration only, never drafts) ----------
 
 // Run this to see the TRUE full scale of leads needing follow-up, without
@@ -829,6 +934,7 @@ function advancePodcastSalesFollowUps() {
   let capSkipped = 0;
   let declineStopped = 0;
   let currentDraftCount = countActiveApprovalDrafts(); // live running count, checked before every new draft
+  let dailyCreated = getFollowUpDraftsCreatedToday(); // per-Pacific-day creation counter, checked alongside the total cap
 
   for (let r = 1; r < data.length; r++) {
     const row = data[r];
@@ -871,6 +977,12 @@ function advancePodcastSalesFollowUps() {
         continue;
       }
 
+      if (dailyCreated >= FOLLOWUP_DAILY_DRAFT_CAP) {
+        Logger.log('advancePodcastSalesFollowUps -- DAILY CAP REACHED (' + FOLLOWUP_DAILY_DRAFT_CAP + ' drafts created today) -- skipping ' + threadId + ' (' + name + '), left at _SCHEDULE, drafts tomorrow.');
+        capSkipped++;
+        continue;
+      }
+
       const nextStep = currentStep + 1;
       if (nextStep > 2) continue;
 
@@ -904,6 +1016,8 @@ function advancePodcastSalesFollowUps() {
       Logger.log('advancePodcastSalesFollowUps -- ADVANCED: ' + threadId + ' (' + name + ', ' + email + ') Step ' + currentStep + ' -> ' + nextStep + ', draft created, now AWAITING_STEP_' + nextStep + '_APPROVAL');
       advanced++;
       currentDraftCount++;
+      dailyCreated++;
+      incrementFollowUpDraftsCreatedToday();
       continue;
     }
 
@@ -941,6 +1055,7 @@ function advanceHubGuestFollowUps() {
   let stopped = 0;
   let capSkipped = 0;
   let currentDraftCount = countActiveApprovalDrafts(); // shared cap counted across BOTH cadences
+  let dailyCreated = getFollowUpDraftsCreatedToday(); // per-Pacific-day creation counter, shared across both cadences
 
   for (let r = 1; r < data.length; r++) {
     const row = data[r];
@@ -972,6 +1087,12 @@ function advanceHubGuestFollowUps() {
 
       if (currentDraftCount >= FOLLOWUP_DRAFT_CAP) {
         Logger.log('advanceHubGuestFollowUps -- CAP REACHED (' + FOLLOWUP_DRAFT_CAP + ' active drafts) -- skipping draft for ' + threadId + ' (' + name + '), left at _SCHEDULE, will draft on a future run once room opens.');
+        capSkipped++;
+        continue;
+      }
+
+      if (dailyCreated >= FOLLOWUP_DAILY_DRAFT_CAP) {
+        Logger.log('advanceHubGuestFollowUps -- DAILY CAP REACHED (' + FOLLOWUP_DAILY_DRAFT_CAP + ' drafts created today) -- skipping ' + threadId + ' (' + name + '), left at _SCHEDULE, drafts tomorrow.');
         capSkipped++;
         continue;
       }
@@ -1019,6 +1140,8 @@ function advanceHubGuestFollowUps() {
       Logger.log('advanceHubGuestFollowUps -- ADVANCED: ' + threadId + ' (' + name + ', ' + email + ') Step ' + currentStep + ' -> ' + nextStep + ', draft created, now AWAITING_STEP_' + nextStep + '_APPROVAL');
       advanced++;
       currentDraftCount++;
+      dailyCreated++;
+      incrementFollowUpDraftsCreatedToday();
       continue;
     }
 

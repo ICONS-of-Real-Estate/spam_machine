@@ -776,11 +776,43 @@ Set "priority" to true ONLY when the prospect shows clear, immediate buying inte
   };
 }
 
+// CACHED (15 Aug 2026): this used to re-fetch the live SOP Doc on EVERY
+// runReplyDrafter run (every 5 minutes). Kris only edits the Doc about once a
+// day (after reviewing Goodness's feedback), so that was ~288 Doc fetches a
+// day for a doc that changes once. Now cached in CacheService for
+// SOP_CACHE_TTL_SECONDS. A same-day Doc edit is picked up on the next run
+// after the cache expires (max ~6h stale), or immediately via
+// clearSopCache(). This is the in-memory prompt cache; the separate
+// cache_control: ephemeral on the Anthropic API call (which saves input-token
+// cost on the long system prompt) is untouched by this change.
+const SOP_CACHE_KEY = 'SOP_FULL_TEXT';
+const SOP_CACHE_TTL_SECONDS = 6 * 60 * 60; // 6 hours (CacheService max)
+
+function clearSopCache() {
+  CacheService.getScriptCache().remove(SOP_CACHE_KEY);
+  Logger.log('SOP cache cleared -- next buildSystemPrompt() call re-fetches the Doc fresh.');
+}
+
 function buildSystemPrompt() {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get(SOP_CACHE_KEY);
+  if (cached && cached.trim().length > 200) {
+    Logger.log('SOP loaded from cache (' + cached.length + ' chars).');
+    return cached;
+  }
+
   try {
     const doc = DocumentApp.openById(CONFIG.SOP_DOC_ID);
     const text = doc.getBody().getText();
     if (text && text.trim().length > 200) {
+      try {
+        cache.put(SOP_CACHE_KEY, text, SOP_CACHE_TTL_SECONDS);
+        Logger.log('SOP fetched from Doc and cached (' + text.length + ' chars).');
+      } catch (cacheErr) {
+        // Cache put can fail if the value exceeds CacheService's ~100KB/key
+        // limit -- not fatal, just skip caching and return the text.
+        Logger.log('SOP fetched but too large to cache (' + text.length + ' chars), returning uncached: ' + cacheErr);
+      }
       return text;
     }
     Logger.log('WARNING: SOP Doc came back suspiciously short (' + text.length + ' chars). Using fallback prompt -- check the Doc.');
