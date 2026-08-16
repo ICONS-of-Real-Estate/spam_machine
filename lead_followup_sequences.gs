@@ -949,10 +949,19 @@ function wipeScriptMadeDrafts(applyDeletions) {
   let deleted = 0;
   let failed = 0;
   let remaining = 0;
+
+  Logger.log('wipeScriptMadeDrafts -- fetching draft list from Gmail (this can take a moment on a full folder)...');
   const drafts = GmailApp.getDrafts();
-  Logger.log('wipeScriptMadeDrafts -- scanning ' + drafts.length + ' total draft(s) in this Gmail account...');
+  Logger.log('wipeScriptMadeDrafts -- got ' + drafts.length + ' total draft(s). Now scanning each one\'s body for the script signature...');
 
   for (let i = 0; i < drafts.length; i++) {
+    // Heartbeat every 25 SCANNED (not just matched) so a long scan shows
+    // constant movement instead of looking frozen.
+    if (i > 0 && i % 25 === 0) {
+      const elapsedSec = Math.round((Date.now() - startMs) / 1000);
+      Logger.log('wipeScriptMadeDrafts -- scanned ' + i + '/' + drafts.length + ' drafts, ' + elapsedSec + 's elapsed, matched ' + matched + ' script-made so far, deleted ' + deleted + '...');
+    }
+
     const d = drafts[i];
     let msg;
     try { msg = d.getMessage(); } catch (e) { continue; } // being edited/deleted concurrently
@@ -962,12 +971,9 @@ function wipeScriptMadeDrafts(applyDeletions) {
     if (body.indexOf(SCHEDULING_NOTE_SIGNATURE) === -1) continue; // not script-made -- leave it (this is what protects Joana's drafts)
 
     matched++;
-    if (matched % 10 === 0) {
-      Logger.log('wipeScriptMadeDrafts -- progress: matched ' + matched + ' script-made draft(s) so far, deleted ' + deleted + '...');
-    }
 
     if (!apply) {
-      Logger.log('wipeScriptMadeDrafts -- [DRY RUN] would delete script-made draft to: ' + (msg.getTo() || '').toLowerCase());
+      Logger.log('wipeScriptMadeDrafts -- [DRY RUN] MATCH script-made draft to: ' + (msg.getTo() || '').toLowerCase());
       continue;
     }
 
@@ -979,11 +985,15 @@ function wipeScriptMadeDrafts(applyDeletions) {
     try {
       d.deleteDraft();
       deleted++;
+      Logger.log('wipeScriptMadeDrafts -- DELETED draft to: ' + (msg.getTo() || '').toLowerCase() + ' (' + deleted + ' deleted this run)');
     } catch (e) {
       failed++;
       Logger.log('wipeScriptMadeDrafts -- FAILED to delete draft: ' + e);
     }
   }
+
+  const totalSec = Math.round((Date.now() - startMs) / 1000);
+  Logger.log('wipeScriptMadeDrafts -- scan complete: ' + drafts.length + ' drafts scanned in ' + totalSec + 's.');
 
   Logger.log('wipeScriptMadeDrafts -- matched ' + matched + ' script-made draft(s). ' +
     (apply
