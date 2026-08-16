@@ -43,72 +43,78 @@ function setupAllTriggers() {
   });
   Logger.log('Removed ' + deletedCount + ' existing trigger(s) for these functions before recreating.');
 
+  // NOTE ON TIMEZONES: every .atHour()/.everyDays() trigger fires in the
+  // SCRIPT's timezone, which is Europe/Paris (see "timeZone" in
+  // appsscript.json) -- NOT the viewer's local timezone and NOT Pacific.
+  // So "6 AM" below means 6 AM in Paris. The only trigger without a clock
+  // time is runReplyDrafter (an interval trigger).
+  const TZ = 'Europe/Paris';
+
   ScriptApp.newTrigger('runReplyDrafter')
     .timeBased()
     .everyMinutes(5)
     .create();
-  Logger.log('Created: runReplyDrafter, every 30 minutes.');
+  Logger.log('Created: runReplyDrafter, every 5 minutes (interval, no fixed clock time).');
 
   ScriptApp.newTrigger('runLearningLoop')
     .timeBased()
     .everyDays(1)
     .atHour(6)
     .create();
-  Logger.log('Created: runLearningLoop, daily around 6 AM.');
+  Logger.log('Created: runLearningLoop, daily around 6 AM ' + TZ + '.');
 
   ScriptApp.newTrigger('generateSopSuggestions')
     .timeBased()
     .onWeekDay(ScriptApp.WeekDay.MONDAY)
     .atHour(7)
     .create();
-  Logger.log('Created: generateSopSuggestions, weekly on Monday around 7 AM.');
+  Logger.log('Created: generateSopSuggestions, weekly on Monday around 7 AM ' + TZ + '.');
 
   ScriptApp.newTrigger('runMissedLeadsAudit')
     .timeBased()
     .everyDays(1)
     .atHour(8)
     .create();
-  Logger.log('Created: runMissedLeadsAudit, daily around 8 AM.');
+  Logger.log('Created: runMissedLeadsAudit, daily around 8 AM ' + TZ + '.');
 
-  // 6 AM (script timezone = Europe/Paris, see appsscript.json) so the day's
-  // batch of ~100 follow-up drafts is READY before Goodness starts her
-  // European workday, rather than drafting right as she sits down at 9 AM.
+  // 6 AM so the day's batch of ~100 follow-up drafts is READY before Goodness
+  // starts her European workday, rather than drafting right as she sits down.
   ScriptApp.newTrigger('runLeadFollowUpCycle')
     .timeBased()
     .everyDays(1)
     .atHour(6)
     .create();
-  Logger.log('Created: runLeadFollowUpCycle, daily around 6 AM (Europe/Paris).');
+  Logger.log('Created: runLeadFollowUpCycle, daily around 6 AM ' + TZ + ' (batch ready before Goodness starts).');
 
   // Runs after Goodness's workday so the day's edits are captured before it
-  // batches them into SOP suggestions. 8 PM Europe/Paris.
+  // batches them into SOP suggestions.
   ScriptApp.newTrigger('summarizeFollowUpLearning')
     .timeBased()
     .everyDays(1)
     .atHour(20)
     .create();
-  Logger.log('Created: summarizeFollowUpLearning, daily around 8 PM (Europe/Paris).');
+  Logger.log('Created: summarizeFollowUpLearning, daily around 8 PM ' + TZ + ' (after Goodness\'s workday).');
 
   ScriptApp.newTrigger('runDailyReport')
     .timeBased()
     .everyDays(1)
     .atHour(7)
     .create();
-  Logger.log('Created: runDailyReport, daily around 7 AM (emails Kris, Tomas, Joana).');
+  Logger.log('Created: runDailyReport, daily around 7 AM ' + TZ + ' (emails Kris, Tomas, Joana).');
 
   ScriptApp.newTrigger('runWeekendDeepMissedLeadsAudit')
     .timeBased()
     .onWeekDay(ScriptApp.WeekDay.SATURDAY)
     .atHour(8)
     .create();
-  Logger.log('Created: runWeekendDeepMissedLeadsAudit, weekly on Saturday around 8 AM (looks back 180 days).');
+  Logger.log('Created: runWeekendDeepMissedLeadsAudit, weekly on Saturday around 8 AM ' + TZ + ' (looks back 180 days).');
 
   ScriptApp.newTrigger('runStalledBookingsAudit')
     .timeBased()
     .onWeekDay(ScriptApp.WeekDay.SATURDAY)
     .atHour(8)
     .create();
-  Logger.log('Created: runStalledBookingsAudit, weekly on Saturday around 8 AM (looks back 180 days).');
+  Logger.log('Created: runStalledBookingsAudit, weekly on Saturday around 8 AM ' + TZ + ' (looks back 180 days).');
 
-  Logger.log('All 8 triggers created. Check the Triggers page (clock icon) to confirm.');
+  Logger.log('All ' + functionsToSchedule.length + ' triggers created, all clock times in ' + TZ + '. Check the Triggers page (clock icon) to confirm.');
 }
