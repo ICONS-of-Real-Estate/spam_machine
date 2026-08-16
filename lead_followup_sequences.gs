@@ -868,6 +868,7 @@ function wipeFollowUpQueueDrafts(applyDeletions) {
   let failed = 0;
   let remaining = 0;
   const drafts = GmailApp.getDrafts();
+  Logger.log('wipeFollowUpQueueDrafts -- scanning ' + drafts.length + ' total draft(s) in this Gmail account for matches...');
   for (let i = 0; i < drafts.length; i++) {
     const d = drafts[i];
     let msg;
@@ -878,6 +879,11 @@ function wipeFollowUpQueueDrafts(applyDeletions) {
     if (!isQueueDraft) continue;
 
     matched++;
+    // Heartbeat every 10 matches so the log shows progress instead of looking
+    // frozen during a multi-minute batch.
+    if (matched % 10 === 0) {
+      Logger.log('wipeFollowUpQueueDrafts -- progress: matched ' + matched + ' so far, deleted ' + deleted + '...');
+    }
 
     if (!apply) {
       Logger.log('wipeFollowUpQueueDrafts -- [DRY RUN] would delete draft to: ' + to);
@@ -912,6 +918,47 @@ function wipeFollowUpQueueDrafts(applyDeletions) {
   if (apply && remaining === 0) {
     reconcileFollowUpDrafts();
     Logger.log('wipeFollowUpQueueDrafts -- queues reconciled. Affected rows reset to _SCHEDULE (due now) and will redraft on the next runLeadFollowUpCycle(), capped at ' + FOLLOWUP_DAILY_DRAFT_CAP + '/day and ' + FOLLOWUP_DRAFT_CAP + ' total pending.');
+  }
+}
+
+// Quick read-only status check: how many drafts in THIS Gmail account belong
+// to queued leads, and how many total drafts the account has. Run this under
+// Joana's account to watch the wipe progress between batches. If "total
+// drafts" is ~0, you're on the wrong account (the 450 are in Joana's).
+function countFollowUpDraftsRemaining() {
+  const account = getRunningAccountEmail();
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const queueEmails = new Set();
+  [
+    { tabName: PODCAST_SALES_QUEUE_TAB, statusCol: 7, emailCol: 3 },
+    { tabName: HUB_GUEST_QUEUE_TAB, statusCol: 10, emailCol: 3 }
+  ].forEach(cfg => {
+    const tab = ss.getSheetByName(cfg.tabName);
+    if (!tab) return;
+    const data = tab.getDataRange().getValues();
+    for (let r = 1; r < data.length; r++) {
+      const status = data[r][cfg.statusCol - 1];
+      if (status && String(status).indexOf('_APPROVAL') > -1) {
+        const email = String(data[r][cfg.emailCol - 1] || '').toLowerCase().trim();
+        if (email) queueEmails.add(email);
+      }
+    }
+  });
+
+  const drafts = GmailApp.getDrafts();
+  let matched = 0;
+  drafts.forEach(d => {
+    let msg;
+    try { msg = d.getMessage(); } catch (e) { return; }
+    const to = (msg.getTo() || '').toLowerCase();
+    let isQueueDraft = false;
+    queueEmails.forEach(email => { if (to.indexOf(email) !== -1) isQueueDraft = true; });
+    if (isQueueDraft) matched++;
+  });
+
+  Logger.log('countFollowUpDraftsRemaining -- running as "' + (account || 'UNKNOWN') + '". This account has ' + drafts.length + ' total draft(s); ' + matched + ' of them belong to follow-up queue leads and would be wiped.');
+  if (drafts.length === 0) {
+    Logger.log('countFollowUpDraftsRemaining -- 0 total drafts means you are very likely NOT on Joana\'s account. The 450 drafts live in joana@iconsofrealestate.com\'s Gmail. Switch accounts and re-run.');
   }
 }
 
