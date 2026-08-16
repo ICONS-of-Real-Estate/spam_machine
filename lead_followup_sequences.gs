@@ -868,8 +868,15 @@ function wipeFollowUpQueueDrafts(applyDeletions) {
   let failed = 0;
   let remaining = 0;
   const drafts = GmailApp.getDrafts();
-  Logger.log('wipeFollowUpQueueDrafts -- scanning ' + drafts.length + ' total draft(s) in this Gmail account for matches...');
+  Logger.log('wipeFollowUpQueueDrafts -- got ' + drafts.length + ' total draft(s). Now scanning each recipient against the queue lead list...');
   for (let i = 0; i < drafts.length; i++) {
+    // Heartbeat every 25 SCANNED (not just matched) so a long scan shows
+    // constant movement instead of looking frozen.
+    if (i > 0 && i % 25 === 0) {
+      const elapsedSec = Math.round((Date.now() - startMs) / 1000);
+      Logger.log('wipeFollowUpQueueDrafts -- scanned ' + i + '/' + drafts.length + ' drafts, ' + elapsedSec + 's elapsed, matched ' + matched + ' so far, deleted ' + deleted + '...');
+    }
+
     const d = drafts[i];
     let msg;
     try { msg = d.getMessage(); } catch (e) { continue; } // draft being edited/deleted concurrently
@@ -879,11 +886,6 @@ function wipeFollowUpQueueDrafts(applyDeletions) {
     if (!isQueueDraft) continue;
 
     matched++;
-    // Heartbeat every 10 matches so the log shows progress instead of looking
-    // frozen during a multi-minute batch.
-    if (matched % 10 === 0) {
-      Logger.log('wipeFollowUpQueueDrafts -- progress: matched ' + matched + ' so far, deleted ' + deleted + '...');
-    }
 
     if (!apply) {
       Logger.log('wipeFollowUpQueueDrafts -- [DRY RUN] would delete draft to: ' + to);
@@ -900,12 +902,14 @@ function wipeFollowUpQueueDrafts(applyDeletions) {
     try {
       d.deleteDraft();
       deleted++;
+      Logger.log('wipeFollowUpQueueDrafts -- DELETED draft to: ' + to + ' (' + deleted + ' this run)');
     } catch (e) {
       failed++;
       Logger.log('wipeFollowUpQueueDrafts -- FAILED to delete draft to ' + to + ': ' + e);
     }
   }
 
+  Logger.log('wipeFollowUpQueueDrafts -- scan complete: ' + drafts.length + ' drafts scanned.');
   Logger.log('wipeFollowUpQueueDrafts -- matched ' + matched + ' queue draft(s) in Gmail. ' +
     (apply
       ? ('Deleted ' + deleted + ' this run, failed ' + failed + ', still remaining ' + remaining + '. ' +
