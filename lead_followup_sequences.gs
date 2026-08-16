@@ -524,7 +524,41 @@ const PODCAST_SALES_TEMPLATES = {
 
 // ---------- MAIN ENTRY POINT ----------
 
+// ---------- WRONG-ACCOUNT GUARD (15 Aug 2026, real incident) ----------
+// Kris accidentally ran a follow-up function under his own account
+// (kris@iconsofrealestate.com) instead of Joana's. The whole system is bound
+// to Joana's inbox -- drafts must be created in HER Gmail, against HER
+// threads -- so running as anyone else silently reads/drafts the wrong
+// mailbox. This is the exact "wrong account" trap the migration handoff
+// warned about. Guard: entry points call assertRunningAsJoana() first and
+// bail out (with a clear log of which account was actually detected) when it
+// isn't her. getActiveUser() can return blank for privacy reasons, so we fall
+// back to getEffectiveUser() (the account the script runs as).
+const EXPECTED_RUN_ACCOUNT = 'joana@iconsofrealestate.com';
+
+function getRunningAccountEmail() {
+  try {
+    const active = Session.getActiveUser().getEmail();
+    if (active) return active.toLowerCase();
+  } catch (e) { /* fall through to effective user */ }
+  try {
+    return (Session.getEffectiveUser().getEmail() || '').toLowerCase();
+  } catch (e) {
+    return '';
+  }
+}
+
+// Returns true if running as Joana; otherwise logs a loud warning and returns
+// false so the caller exits before touching Gmail or the queues.
+function assertRunningAsJoana(callerName) {
+  const account = getRunningAccountEmail();
+  if (account === EXPECTED_RUN_ACCOUNT) return true;
+  Logger.log('ABORT (' + callerName + '): running as "' + (account || 'UNKNOWN') + '" but this system must run as ' + EXPECTED_RUN_ACCOUNT + ' (the inbox it drafts from). No action taken. Re-run under Joana\'s account.');
+  return false;
+}
+
 function runLeadFollowUpCycle() {
+  if (!assertRunningAsJoana('runLeadFollowUpCycle')) return;
   ensureFollowUpTabsExistV2();
   registerNewPodcastSalesLeads();
   registerNewHubGuestInvites();
@@ -534,6 +568,7 @@ function runLeadFollowUpCycle() {
 }
 
 function runFollowUpDeepDiveBackfill() {
+  if (!assertRunningAsJoana('runFollowUpDeepDiveBackfill')) return;
   ensureFollowUpTabsExistV2();
   registerNewPodcastSalesLeads(FOLLOWUP_DEEP_DIVE_LOOKBACK_DAYS);
   registerNewHubGuestInvites(FOLLOWUP_DEEP_DIVE_LOOKBACK_DAYS);
@@ -793,6 +828,7 @@ function incrementFollowUpDraftsCreatedToday() {
 //     the next runLeadFollowUpCycle() -- respecting both FOLLOWUP_DRAFT_CAP
 //     and FOLLOWUP_DAILY_DRAFT_CAP, so the refill is ~100/day, not 450 at once.
 function wipeFollowUpQueueDrafts(applyDeletions) {
+  if (!assertRunningAsJoana('wipeFollowUpQueueDrafts')) return;
   const apply = applyDeletions === true;
   Logger.log('wipeFollowUpQueueDrafts -- mode: ' + (apply ? 'APPLY (will delete)' : 'DRY RUN (nothing deleted)'));
 
