@@ -853,40 +853,63 @@ function wipeFollowUpQueueDrafts(applyDeletions) {
   });
   Logger.log('wipeFollowUpQueueDrafts -- ' + queueEmails.size + ' unique lead email(s) pending approval across both queues.');
 
-  // Scan Gmail drafts; match only those whose recipient is a queued lead.
+  // BATCHED + RESUMABLE (15 Aug 2026): the first version tried to delete all
+  // ~276 drafts in one Apps Script execution and blew past the ~6-minute
+  // runtime limit ("Lost connection to the server"). Now it deletes at most
+  // WIPE_BATCH_SIZE drafts per run and stops well before the time limit, so
+  // you just run it repeatedly until the log says 0 remaining. Each run is
+  // independent and idempotent -- already-deleted drafts simply aren't found.
+  const WIPE_BATCH_SIZE = 100;
+  const MAX_RUNTIME_MS = 4.5 * 60 * 1000; // bail before the ~6-min limit
+  const startMs = Date.now();
+
   let matched = 0;
   let deleted = 0;
   let failed = 0;
+  let remaining = 0;
   const drafts = GmailApp.getDrafts();
-  drafts.forEach(d => {
+  for (let i = 0; i < drafts.length; i++) {
+    const d = drafts[i];
     let msg;
-    try { msg = d.getMessage(); } catch (e) { return; } // draft being edited/deleted concurrently
+    try { msg = d.getMessage(); } catch (e) { continue; } // draft being edited/deleted concurrently
     const to = (msg.getTo() || '').toLowerCase();
     let isQueueDraft = false;
     queueEmails.forEach(email => { if (to.indexOf(email) !== -1) isQueueDraft = true; });
-    if (!isQueueDraft) return;
+    if (!isQueueDraft) continue;
 
     matched++;
-    if (apply) {
-      try {
-        d.deleteDraft();
-        deleted++;
-      } catch (e) {
-        failed++;
-        Logger.log('wipeFollowUpQueueDrafts -- FAILED to delete draft to ' + to + ': ' + e);
-      }
-    } else {
+
+    if (!apply) {
       Logger.log('wipeFollowUpQueueDrafts -- [DRY RUN] would delete draft to: ' + to);
+      continue;
     }
-  });
+
+    // Stop deleting once we hit the batch cap or the time budget; count the
+    // rest as remaining so the log tells you to re-run.
+    if (deleted >= WIPE_BATCH_SIZE || (Date.now() - startMs) > MAX_RUNTIME_MS) {
+      remaining++;
+      continue;
+    }
+
+    try {
+      d.deleteDraft();
+      deleted++;
+    } catch (e) {
+      failed++;
+      Logger.log('wipeFollowUpQueueDrafts -- FAILED to delete draft to ' + to + ': ' + e);
+    }
+  }
 
   Logger.log('wipeFollowUpQueueDrafts -- matched ' + matched + ' queue draft(s) in Gmail. ' +
-    (apply ? ('Deleted ' + deleted + ', failed ' + failed + '.') : 'DRY RUN -- nothing deleted. Re-run wipeFollowUpQueueDrafts(true) to actually delete.'));
+    (apply
+      ? ('Deleted ' + deleted + ' this run, failed ' + failed + ', still remaining ' + remaining + '. ' +
+         (remaining > 0 ? 'RE-RUN wipeFollowUpQueueDrafts(true) to delete the next batch.' : 'All matched drafts deleted.'))
+      : 'DRY RUN -- nothing deleted. Re-run wipeFollowUpQueueDrafts(true) to actually delete.'));
 
-  // Reset the queue rows so they redraft fresh. Safe in dry-run too: rows
-  // with a still-live draft are left alone by reconcileFollowUpDrafts, so
-  // this only resets rows whose draft is already gone.
-  if (apply) {
+  // Only reconcile once everything matched is gone; reconciling early would
+  // reset rows whose drafts still exist (reconcileFollowUpDrafts leaves those
+  // alone anyway, so this is just avoiding wasted work).
+  if (apply && remaining === 0) {
     reconcileFollowUpDrafts();
     Logger.log('wipeFollowUpQueueDrafts -- queues reconciled. Affected rows reset to _SCHEDULE (due now) and will redraft on the next runLeadFollowUpCycle(), capped at ' + FOLLOWUP_DAILY_DRAFT_CAP + '/day and ' + FOLLOWUP_DRAFT_CAP + ' total pending.');
   }
