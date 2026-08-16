@@ -560,6 +560,13 @@ function assertRunningAsJoana(callerName) {
 function runLeadFollowUpCycle() {
   if (!assertRunningAsJoana('runLeadFollowUpCycle')) return;
   ensureFollowUpTabsExistV2();
+  // SELF-HEAL (15 Aug 2026): reconcile BEFORE registering/advancing, so any
+  // row stuck at "_APPROVAL" whose draft was deleted (manually or via a wipe)
+  // resets to "_SCHEDULE" and gets redrafted this same cycle instead of
+  // waiting forever. Closes the phantom-row gap the handoff flagged -- a
+  // deleted draft used to leave its queue row permanently stuck. Runs every
+  // cycle now, not just by hand.
+  reconcileFollowUpDrafts();
   registerNewPodcastSalesLeads();
   registerNewHubGuestInvites();
   advancePodcastSalesFollowUps();
