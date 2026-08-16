@@ -921,6 +921,84 @@ function wipeFollowUpQueueDrafts(applyDeletions) {
   }
 }
 
+// ---------- WIPE ALL SCRIPT-MADE DRAFTS (15 Aug 2026, per Kris) ----------
+// Kris's requirement: delete EVERY draft the script created, but leave any
+// draft Joana wrote by hand strictly alone. Queue membership is the WRONG
+// signal for this -- it misses script drafts whose queue row already moved
+// past _APPROVAL, and it could catch a manual draft Joana happened to address
+// to a lead. The reliable discriminator is the scheduling note that
+// buildSchedulingNote() prepends to every script-made follow-up draft:
+//   "[SCHEDULING NOTE FOR JOANA -- DELETE THIS LINE BEFORE SENDING:"
+// Joana's hand-written drafts never contain that line. So this wipes by BODY
+// SIGNATURE, not queue membership.
+//
+// DESTRUCTIVE + irreversible. DRY-RUN BY DEFAULT (applyDeletions=false logs
+// only). Batched + resumable like the queue wipe. Run under Joana's account.
+const SCHEDULING_NOTE_SIGNATURE = '[SCHEDULING NOTE FOR JOANA';
+
+function wipeScriptMadeDrafts(applyDeletions) {
+  if (!assertRunningAsJoana('wipeScriptMadeDrafts')) return;
+  const apply = applyDeletions === true;
+  Logger.log('wipeScriptMadeDrafts -- mode: ' + (apply ? 'APPLY (will delete)' : 'DRY RUN (nothing deleted)') + '. Matching drafts by body signature "' + SCHEDULING_NOTE_SIGNATURE + '", NOT by queue membership. Joana-written drafts (no signature) are left alone.');
+
+  const WIPE_BATCH_SIZE = 100;
+  const MAX_RUNTIME_MS = 4.5 * 60 * 1000; // bail before the ~6-min limit
+  const startMs = Date.now();
+
+  let matched = 0;
+  let deleted = 0;
+  let failed = 0;
+  let remaining = 0;
+  const drafts = GmailApp.getDrafts();
+  Logger.log('wipeScriptMadeDrafts -- scanning ' + drafts.length + ' total draft(s) in this Gmail account...');
+
+  for (let i = 0; i < drafts.length; i++) {
+    const d = drafts[i];
+    let msg;
+    try { msg = d.getMessage(); } catch (e) { continue; } // being edited/deleted concurrently
+
+    let body = '';
+    try { body = msg.getPlainBody() || ''; } catch (e) { continue; }
+    if (body.indexOf(SCHEDULING_NOTE_SIGNATURE) === -1) continue; // not script-made -- leave it (this is what protects Joana's drafts)
+
+    matched++;
+    if (matched % 10 === 0) {
+      Logger.log('wipeScriptMadeDrafts -- progress: matched ' + matched + ' script-made draft(s) so far, deleted ' + deleted + '...');
+    }
+
+    if (!apply) {
+      Logger.log('wipeScriptMadeDrafts -- [DRY RUN] would delete script-made draft to: ' + (msg.getTo() || '').toLowerCase());
+      continue;
+    }
+
+    if (deleted >= WIPE_BATCH_SIZE || (Date.now() - startMs) > MAX_RUNTIME_MS) {
+      remaining++;
+      continue;
+    }
+
+    try {
+      d.deleteDraft();
+      deleted++;
+    } catch (e) {
+      failed++;
+      Logger.log('wipeScriptMadeDrafts -- FAILED to delete draft: ' + e);
+    }
+  }
+
+  Logger.log('wipeScriptMadeDrafts -- matched ' + matched + ' script-made draft(s). ' +
+    (apply
+      ? ('Deleted ' + deleted + ' this run, failed ' + failed + ', still remaining ' + remaining + '. ' +
+         (remaining > 0 ? 'RE-RUN wipeScriptMadeDrafts(true) for the next batch.' : 'All script-made drafts deleted.'))
+      : 'DRY RUN -- nothing deleted. Re-run wipeScriptMadeDrafts(true) to actually delete.'));
+
+  // Reconcile queues once nothing script-made is left, so affected rows reset
+  // to _SCHEDULE and redraft with the new code.
+  if (apply && remaining === 0) {
+    reconcileFollowUpDrafts();
+    Logger.log('wipeScriptMadeDrafts -- queues reconciled (rows reset to _SCHEDULE, redraft on next cycle, capped at ' + FOLLOWUP_DAILY_DRAFT_CAP + '/day).');
+  }
+}
+
 // Quick read-only status check: how many drafts in THIS Gmail account belong
 // to queued leads, and how many total drafts the account has. Run this under
 // Joana's account to watch the wipe progress between batches. If "total
