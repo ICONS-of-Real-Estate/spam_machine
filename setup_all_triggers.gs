@@ -9,7 +9,8 @@
  *   - runLearningLoop          -- daily
  *   - generateSopSuggestions   -- weekly (Monday)
  *   - runMissedLeadsAudit      -- daily
- *   - runGuestBookingFollowUpCycle -- daily
+ *   - runLeadFollowUpCycle     -- daily (6 AM Europe/Paris -- batch ready before Goodness starts)
+ *   - summarizeFollowUpLearning -- daily (8 PM Europe/Paris -- turns the day's edits into SOP suggestions)
  *   - runDailyReport           -- daily (emails Kris, Tomas, Joana)
  *
  * Must be run under the account that should own these triggers (Joana's,
@@ -24,6 +25,7 @@ function setupAllTriggers() {
     'generateSopSuggestions',
     'runMissedLeadsAudit',
     'runLeadFollowUpCycle',
+    'summarizeFollowUpLearning',
     'runDailyReport',
     'runWeekendDeepMissedLeadsAudit',
     'runStalledBookingsAudit'
@@ -68,12 +70,24 @@ function setupAllTriggers() {
     .create();
   Logger.log('Created: runMissedLeadsAudit, daily around 8 AM.');
 
+  // 6 AM (script timezone = Europe/Paris, see appsscript.json) so the day's
+  // batch of ~100 follow-up drafts is READY before Goodness starts her
+  // European workday, rather than drafting right as she sits down at 9 AM.
   ScriptApp.newTrigger('runLeadFollowUpCycle')
     .timeBased()
     .everyDays(1)
-    .atHour(9)
+    .atHour(6)
     .create();
-  Logger.log('Created: runLeadFollowUpCycle, daily around 9 AM.');
+  Logger.log('Created: runLeadFollowUpCycle, daily around 6 AM (Europe/Paris).');
+
+  // Runs after Goodness's workday so the day's edits are captured before it
+  // batches them into SOP suggestions. 8 PM Europe/Paris.
+  ScriptApp.newTrigger('summarizeFollowUpLearning')
+    .timeBased()
+    .everyDays(1)
+    .atHour(20)
+    .create();
+  Logger.log('Created: summarizeFollowUpLearning, daily around 8 PM (Europe/Paris).');
 
   ScriptApp.newTrigger('runDailyReport')
     .timeBased()

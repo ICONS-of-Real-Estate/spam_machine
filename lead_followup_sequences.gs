@@ -803,18 +803,27 @@ function countActiveApprovalDrafts() {
 
 // ---------- DAILY DRAFT-CREATION CAP (15 Aug 2026) ----------
 
-// How many follow-up drafts have already been created today (Pacific).
+// The daily cap is anchored to the timezone Goodness actually works in, NOT
+// the quota-guard's Pacific day. Goodness processes drafts on a European
+// workday, so "100 per day" should mean "100 per European day" -- otherwise
+// the counter rolls over mid-afternoon her time (midnight Pacific = ~8-9 AM
+// Europe) and the daily batch logic drifts off her real workday.
+function todayFollowUpDateString() {
+  return Utilities.formatDate(new Date(), 'Europe/Paris', 'yyyy-MM-dd');
+}
+
+// How many follow-up drafts have already been created today (Europe/Paris).
 // Self-resets: if the stored date isn't today, the count is effectively 0.
 function getFollowUpDraftsCreatedToday() {
   const props = PropertiesService.getScriptProperties();
   const storedDate = props.getProperty('FOLLOWUP_DRAFTS_CREATED_DATE');
-  if (storedDate !== todayPacificDateString()) return 0;
+  if (storedDate !== todayFollowUpDateString()) return 0;
   return parseInt(props.getProperty('FOLLOWUP_DRAFTS_CREATED_COUNT') || '0', 10);
 }
 
 function incrementFollowUpDraftsCreatedToday() {
   const props = PropertiesService.getScriptProperties();
-  props.setProperty('FOLLOWUP_DRAFTS_CREATED_DATE', todayPacificDateString());
+  props.setProperty('FOLLOWUP_DRAFTS_CREATED_DATE', todayFollowUpDateString());
   props.setProperty('FOLLOWUP_DRAFTS_CREATED_COUNT', String(getFollowUpDraftsCreatedToday() + 1));
 }
 
@@ -1020,12 +1029,141 @@ function wipeScriptMadeDrafts(applyDeletions) {
   }
 }
 
+// ---------- FOLLOW-UP LEARNING DIGEST (15 Aug 2026, per Kris) ----------
+// The follow-up system's equivalent of learning_loop.gs's
+// generateSopSuggestions(), but reading the FOLLOW-UP LEARNING LOG (which the
+// main reply-drafter's learning loop never touches) and targeting the SOP's
+// "## FOLLOW-UP DRAFTING" section specifically.
+//
+// Goodness processes each day's batch of follow-up drafts; whenever she edits
+// one before sending, logFollowUpLearning() has already recorded the drafted
+// vs. sent text with Was Edited = true. This function batches those edited
+// examples, asks Claude to find the repeated patterns in what she changed,
+// and writes SPECIFIC proposed edits to the FOLLOW-UP DRAFTING section into
+// the shared "SOP Suggestions" tab -- as PROPOSALS ONLY, never auto-applied.
+// Kris reviews and merges the real ones into the live SOP Doc by hand (and
+// then runs clearSopCache() so the next run picks the edit up immediately).
+// Deliberately unsupervised-rewrite-free, same as the main learning loop.
+//
+// Run daily (e.g. after Goodness finishes her batch). Safe to re-run:
+// reviewed rows are marked so they aren't re-batched.
+function summarizeFollowUpLearning() {
+  const props = PropertiesService.getScriptProperties();
+  const apiKey = props.getProperty('ANTHROPIC_API_KEY');
+  if (!apiKey) {
+    Logger.log('summarizeFollowUpLearning -- ANTHROPIC_API_KEY not set, skipping.');
+    return;
+  }
+
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const logTab = ss.getSheetByName(FOLLOWUP_LEARNING_LOG_TAB);
+  let suggestionsTab = ss.getSheetByName('SOP Suggestions');
+  if (!logTab) {
+    Logger.log('summarizeFollowUpLearning -- "' + FOLLOWUP_LEARNING_LOG_TAB + '" tab not found, nothing to review yet.');
+    return;
+  }
+  if (!suggestionsTab) {
+    suggestionsTab = ss.insertSheet('SOP Suggestions');
+    suggestionsTab.appendRow(['Generated At', 'Based On N Edits', 'Suggested Change', 'Status (pending/approved/rejected)']);
+  }
+
+  const rows = logTab.getDataRange().getValues();
+  if (rows.length <= 1) {
+    Logger.log('summarizeFollowUpLearning -- Learning Log has no data rows yet.');
+    return;
+  }
+  const headers = rows[0];
+  const wasEditedCol = headers.indexOf('Was Edited');
+  const cadenceCol = headers.indexOf('Cadence');
+  const stepCol = headers.indexOf('Step');
+  const draftedCol = headers.indexOf('Drafted Text');
+  const sentCol = headers.indexOf('Sent Text');
+  const reviewedCol = headers.indexOf('Reviewed For SOP'); // may not exist yet on this tab
+
+  const edits = [];
+  const rowIndexesToMark = [];
+  for (let i = 1; i < rows.length; i++) {
+    const wasEdited = rows[i][wasEditedCol] === true || String(rows[i][wasEditedCol]).toLowerCase() === 'true';
+    const alreadyReviewed = reviewedCol !== -1 && (rows[i][reviewedCol] === true || String(rows[i][reviewedCol]).toLowerCase() === 'true');
+    if (!wasEdited || alreadyReviewed) continue;
+    edits.push({
+      cadence: rows[i][cadenceCol],
+      step: rows[i][stepCol],
+      drafted: rows[i][draftedCol],
+      sent: rows[i][sentCol]
+    });
+    rowIndexesToMark.push(i + 1); // 1-indexed sheet row, plus header
+  }
+
+  if (edits.length === 0) {
+    Logger.log('summarizeFollowUpLearning -- no new edited follow-up examples to review.');
+    return;
+  }
+
+  const examplesText = edits
+    .map((e, idx) => `EXAMPLE ${idx + 1} (cadence: ${e.cadence}, step: ${e.step})\n--- AI DRAFTED ---\n${e.drafted}\n--- GOODNESS ACTUALLY SENT ---\n${e.sent}`)
+    .join('\n\n');
+
+  const systemPrompt = `You review edited email follow-up drafts to find patterns in how a human editor changes AI-drafted follow-up emails, and propose specific, concrete updates to the "## FOLLOW-UP DRAFTING" section of the SOP that produced them. You are NOT rewriting the SOP yourself -- you propose changes for a human to review and approve. Be specific: quote the actual phrasing pattern repeated across edits, don't generalize vaguely. If the edits show no clear repeated pattern (all one-off stylistic tweaks with no common thread), say so plainly rather than inventing a pattern.`;
+
+  const userPrompt = `Here are ${edits.length} examples of AI-drafted follow-up emails versus what the human editor actually sent:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested changes to the FOLLOW-UP DRAFTING section. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
+
+  const response = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+    payload: JSON.stringify({ model: CONFIG.MODEL, max_tokens: 2000, system: systemPrompt, messages: [{ role: 'user', content: userPrompt }] }),
+    muteHttpExceptions: true,
+  });
+
+  if (response.getResponseCode() !== 200) {
+    Logger.log('summarizeFollowUpLearning -- Claude API error: ' + response.getContentText());
+    return;
+  }
+
+  const data = JSON.parse(response.getContentText('UTF-8'));
+  const textBlock = data.content.find(c => c.type === 'text');
+  if (!textBlock) {
+    Logger.log('summarizeFollowUpLearning -- no text block in Claude response.');
+    return;
+  }
+
+  let suggestions;
+  try {
+    suggestions = JSON.parse(textBlock.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim());
+  } catch (e) {
+    Logger.log('summarizeFollowUpLearning -- failed to parse suggestions JSON: ' + textBlock.text);
+    return;
+  }
+
+  suggestions.forEach(s => {
+    suggestionsTab.appendRow([
+      new Date(),
+      edits.length,
+      '[FOLLOW-UP][' + s.confidence + '] ' + s.pattern_observed + ' -> ' + s.suggested_change,
+      'pending'
+    ]);
+  });
+
+  // Mark these rows reviewed so they don't get re-batched. Add the column if
+  // the Follow-Up Learning Log doesn't have it yet.
+  let reviewedColIndex = reviewedCol;
+  if (reviewedColIndex === -1) {
+    logTab.getRange(1, headers.length + 1).setValue('Reviewed For SOP');
+    reviewedColIndex = headers.length;
+  }
+  rowIndexesToMark.forEach(rowNum => {
+    logTab.getRange(rowNum, reviewedColIndex + 1).setValue(true);
+  });
+
+  Logger.log('summarizeFollowUpLearning -- generated ' + suggestions.length + ' FOLLOW-UP SOP suggestion(s) from ' + edits.length + ' edited example(s). Review them in the "SOP Suggestions" tab.');
+}
+
 // Quick read-only status check: how many drafts in THIS Gmail account belong
 // to queued leads, and how many total drafts the account has. Run this under
 // Joana's account to watch the wipe progress between batches. If "total
 // drafts" is ~0, you're on the wrong account (the 450 are in Joana's).
-function countFollowUpDraftsRemaining() {
-  const account = getRunningAccountEmail();
+function countFollowUpDraftsRemaining() {  const account = getRunningAccountEmail();
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const queueEmails = new Set();
   [
