@@ -115,6 +115,15 @@ const CONFIG = {
   STATE_DIRECTORY_SHEET_ID: '1ULIpgYPJEhK68OespSm7yO8fzSP0OU8Y_cStb4sUHKM',
 
   MAX_THREADS_PER_RUN: 50,
+
+  // ADDED (17 Aug 2026, real incident): after Montell/Mariann/Mumu got
+  // genuinely-interested replies drafted as declines (classifyAndDraft()
+  // sometimes disagreeing with the SOP's own no_decline guidance on
+  // ambiguous replies), Kris asked to cap draft creation at 5 per run so
+  // each small batch can get reviewed before more go out. This bounds
+  // actual DRAFTS CREATED, separate from MAX_THREADS_PER_RUN above (which
+  // just bounds how many threads get scanned/considered).
+  MAX_DRAFTS_PER_RUN: 5,
   MODEL: 'claude-sonnet-5', // switched from claude-sonnet-4-6 (25 Jul 2026) -- same tier fit for
   // this task (classification + template-following drafts), currently cheaper at $2/$10 per
   // MTok vs 4.6's $3/$15, during intro pricing through 31 Aug 2026. Reverts to $3/$15 after
@@ -266,6 +275,7 @@ function runReplyDrafterInner() {
   Logger.log('DIAGNOSTIC -- threads found: ' + threads.length);
 
   let processed = 0;
+  let draftsCreated = 0;
 
   // FIX (13 Aug 2026): GmailApp.getDraftMessages() can lag behind drafts
   // created earlier in this SAME execution (a propagation gap in Apps
@@ -279,6 +289,10 @@ function runReplyDrafterInner() {
 
   for (const thread of threads) {
     if (processed >= CONFIG.MAX_THREADS_PER_RUN) break;
+    if (draftsCreated >= CONFIG.MAX_DRAFTS_PER_RUN) {
+      Logger.log('Reached MAX_DRAFTS_PER_RUN (' + CONFIG.MAX_DRAFTS_PER_RUN + ') -- stopping this run so the batch can be reviewed. Remaining threads will be picked up on the next run.');
+      break;
+    }
 
     const messages = thread.getMessages();
     const lastMsg = messages[messages.length - 1];
@@ -378,6 +392,7 @@ function runReplyDrafterInner() {
       });
       var draftLink = 'https://mail.google.com/mail/u/0/#all/' + createdDraft.getMessage().getId();
       draftedThisRun.add(leadEmail.toLowerCase());
+      draftsCreated++;
     } catch (e) {
       Logger.log('Draft creation failed for ' + subject + ': ' + e);
       continue;
@@ -403,7 +418,7 @@ function runReplyDrafterInner() {
     processed++;
   }
 
-  Logger.log('Run complete. Threads processed: ' + processed);
+  Logger.log('Run complete. Threads processed: ' + processed + ', drafts created: ' + draftsCreated);
 }
 
 function logDraftToSheet(threadId, subject, prospectEmail, category, needsRouting, draftText, draftLink) {
