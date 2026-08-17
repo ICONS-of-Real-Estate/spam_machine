@@ -102,6 +102,13 @@ const CONFIG = {
   // threads (a) stop reappearing in the search every run, and (b) stay
   // honestly distinguishable from real AI drafts for anyone auditing later.
   LABEL_ALREADY_ANSWERED_BY_TEAM: 'AI-Skipped-AlreadyAnsweredByTeam',
+
+  // ADDED (17 Aug 2026, real incident): a thread whose first-message subject
+  // doesn't match SUBJECT_PATTERN is NOT podcast outreach at all (a
+  // newsletter, a Zoom scheduling thread, random spam) and never will be --
+  // that fact can't change. Labeling it stops both the repeated Gmail API
+  // cost of re-fetching it every run AND its repeated appearance in the log.
+  LABEL_SUBJECT_MISMATCH: 'AI-Skipped-NotPodcastOutreach',
   LABEL_PRIORITY: '0. PRIORITY - Reply First', // ADDED 13 Aug 2026 -- label already exists in Gmail
 
   // Only ever act on threads CC'd to the network group -- this is the
@@ -221,7 +228,7 @@ function setup() {
     }
   });
 
-  [CONFIG.LABEL_AI_DRAFTED, CONFIG.LABEL_NEEDS_ROUTING, CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM].forEach(name => {
+  [CONFIG.LABEL_AI_DRAFTED, CONFIG.LABEL_NEEDS_ROUTING, CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM, CONFIG.LABEL_SUBJECT_MISMATCH].forEach(name => {
     if (!GmailApp.getUserLabelByName(name)) {
       GmailApp.createLabel(name);
       Logger.log('Created internal tracking label: ' + name);
@@ -317,6 +324,7 @@ function runReplyDrafterInner() {
   const labelDrafted = GmailApp.getUserLabelByName(CONFIG.LABEL_AI_DRAFTED);
   const labelNeedsRouting = GmailApp.getUserLabelByName(CONFIG.LABEL_NEEDS_ROUTING);
   const labelAlreadyAnsweredByTeam = getOrWarnLabel(CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM);
+  const labelSubjectMismatch = getOrWarnLabel(CONFIG.LABEL_SUBJECT_MISMATCH);
 
   const systemPrompt = buildSystemPrompt();
   const stateDirectory = loadStateDirectory();
@@ -331,7 +339,7 @@ function runReplyDrafterInner() {
   // gap but only EMAILS an alert, it never drafts. 180d matches the
   // furthest missed-leads lookback (runWeekendDeepMissedLeadsAudit), so
   // nothing genuinely reachable by either system falls in a gap between them.
-  const searchQuery = '(' + addressClauses + ') newer_than:180d -label:"' + CONFIG.LABEL_AI_DRAFTED + '" -label:"' + CONFIG.LABEL_STOP + '" -label:"' + CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM + '"';
+  const searchQuery = '(' + addressClauses + ') newer_than:180d -label:"' + CONFIG.LABEL_AI_DRAFTED + '" -label:"' + CONFIG.LABEL_STOP + '" -label:"' + CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM + '" -label:"' + CONFIG.LABEL_SUBJECT_MISMATCH + '"';
 
   Logger.log('DIAGNOSTIC -- search query: ' + searchQuery);
 
@@ -384,14 +392,26 @@ function runReplyDrafterInner() {
         break pagination;
       }
 
-    const messages = thread.getMessages();
-    const lastMsg = lastNonDraftMessage_(messages) || messages[messages.length - 1];
+    // PERMANENT (17 Aug 2026, real incident): checked BEFORE
+    // thread.getMessages() specifically. getFirstMessageSubject() is cheap
+    // thread-level metadata; getMessages() is the expensive full-body fetch
+    // that caused the original Gmail quota exhaustion incident. Most of the
+    // 180-day-widened backlog is unrelated newsletters/spam/Zoom-scheduling
+    // threads that happen to hit the CC criteria -- there's no reason to pay
+    // that cost for them at all, this run or any future one. A thread's
+    // first-message subject can never change, so a mismatch here is a
+    // permanent fact (unlike "already answered" or "not CC'd", which
+    // describe the thread's CURRENT state and could flip with new
+    // activity) -- safe to label and exclude from the search permanently.
     const subject = thread.getFirstMessageSubject();
-
     if (!CONFIG.SUBJECT_PATTERN.test(subject)) {
-      Logger.log('DIAGNOSTIC -- skipped (subject pattern): ' + subject);
+      if (labelSubjectMismatch) thread.addLabel(labelSubjectMismatch);
+      Logger.log('DIAGNOSTIC -- skipped (subject pattern), labeled so it stops reappearing: ' + subject);
       continue;
     }
+
+    const messages = thread.getMessages();
+    const lastMsg = lastNonDraftMessage_(messages) || messages[messages.length - 1];
 
     if (!isCcdToNetworkGroup(lastMsg)) {
       Logger.log('DIAGNOSTIC -- skipped (not CC-d to network on last message): ' + subject);
