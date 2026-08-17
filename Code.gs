@@ -129,7 +129,15 @@ const CONFIG = {
   SOP_DOC_ID: '15SwaYCEXGshe_8eZ2ZzADa0fk_SkdcvuDgjgajPEhag',
   STATE_DIRECTORY_SHEET_ID: '1ULIpgYPJEhK68OespSm7yO8fzSP0OU8Y_cStb4sUHKM',
 
-  MAX_THREADS_PER_RUN: 50,
+  // RAISED (17 Aug 2026, real incident): the search's own newer_than window
+  // was widened from 3 days to 180 (see below), surfacing a real backlog of
+  // ~200 threads that had been silently invisible to this function the
+  // entire time. Most of those are cheap, non-LLM skips (already answered by
+  // team, subject-pattern mismatch) -- raised to 200 (matching the search's
+  // own fetch cap just below) so a single run can clear through that backlog
+  // quickly, while MAX_DRAFTS_PER_RUN below still bounds the expensive part
+  // (actual LLM calls) separately.
+  MAX_THREADS_PER_RUN: 200,
 
   // ADDED (17 Aug 2026, real incident): after Montell/Mariann/Mumu got
   // genuinely-interested replies drafted as declines (classifyAndDraft()
@@ -302,8 +310,15 @@ function runReplyDrafterInner() {
   const addressClauses = CONFIG.REQUIRED_CC_ADDRESSES
     .map(addr => 'to:"' + addr + '" OR cc:"' + addr + '"')
     .join(' OR ');
-  const searchQuery = '(' + addressClauses + ') newer_than:3d -label:"' + CONFIG.LABEL_AI_DRAFTED + '" -label:"' + CONFIG.LABEL_STOP + '" -label:"' + CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM + '"';
-  const threads = GmailApp.search(searchQuery, 0, 200);
+  // WIDENED (17 Aug 2026, real incident): was newer_than:3d, which silently
+  // ignored an entire real backlog (~200 threads, confirmed by dropping the
+  // date filter and checking directly) older than 3 days -- those leads were
+  // never invisible on purpose, missed_leads_audit.gs exists for exactly this
+  // gap but only EMAILS an alert, it never drafts. 180d matches the
+  // furthest missed-leads lookback (runWeekendDeepMissedLeadsAudit), so
+  // nothing genuinely reachable by either system falls in a gap between them.
+  const searchQuery = '(' + addressClauses + ') newer_than:180d -label:"' + CONFIG.LABEL_AI_DRAFTED + '" -label:"' + CONFIG.LABEL_STOP + '" -label:"' + CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM + '"';
+  const threads = GmailApp.search(searchQuery, 0, 500);
 
   Logger.log('DIAGNOSTIC -- search query: ' + searchQuery);
   Logger.log('DIAGNOSTIC -- threads found: ' + threads.length);
