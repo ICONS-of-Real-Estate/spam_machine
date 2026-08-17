@@ -566,7 +566,15 @@ function getRunningAccountEmail() {
 // evaluated false.
 function assertRunningAsJoana(callerName) {
   const account = getRunningAccountEmail();
-  if (account === EXPECTED_RUN_ACCOUNT) return true;
+  if (account === EXPECTED_RUN_ACCOUNT) {
+    // ADDED (18 Aug 2026, live "Gmail is not defined" investigation): the
+    // success path never logged anything, so every execution log was silent
+    // about which account actually ran -- had to be inferred indirectly.
+    // Logging it plainly on every run costs nothing and settles "is this
+    // really running as Joana" at a glance instead of by deduction.
+    Logger.log('assertRunningAsJoana(' + callerName + '): running as ' + account);
+    return true;
+  }
 
   const message = callerName + ' fired under the wrong account ("' + (account || 'UNKNOWN') +
     '" instead of ' + EXPECTED_RUN_ACCOUNT + '"). No action was taken. This means a trigger for ' +
