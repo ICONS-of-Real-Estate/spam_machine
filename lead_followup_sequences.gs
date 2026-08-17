@@ -567,6 +567,18 @@ function assertRunningAsJoana(callerName) {
   return false;
 }
 
+// PAUSED (17 Aug 2026, real incident): classifyAndDraft() in Code.gs has
+// been caught mislabeling genuinely-interested replies (e.g. "Sure, I'd
+// like to hear more", "Yes, you can call") as no_decline. This cadence
+// correctly trusts that recorded category and re-derives the email
+// correctly -- the poison is upstream, not here -- but that means it keeps
+// drafting wrong "sorry that's not for you, want to be a guest?" nudges to
+// leads who never declined. Pausing DRAFT CREATION for this cadence only
+// until the upstream classification issue is actually fixed. Registration
+// still runs (harmless bookkeeping, no drafts). Flip back to true once the
+// classification fix is confirmed good.
+const HUB_GUEST_FOLLOWUPS_ENABLED = false;
+
 function runLeadFollowUpCycle() {
   if (!assertRunningAsJoana('runLeadFollowUpCycle')) return;
   ensureFollowUpTabsExistV2();
@@ -580,8 +592,12 @@ function runLeadFollowUpCycle() {
   registerNewPodcastSalesLeads();
   registerNewHubGuestInvites();
   advancePodcastSalesFollowUps();
-  advanceHubGuestFollowUps();
-  Logger.log('Lead follow-up cycle complete (both cadences).');
+  if (HUB_GUEST_FOLLOWUPS_ENABLED) {
+    advanceHubGuestFollowUps();
+  } else {
+    Logger.log('Hub Guest follow-up drafting SKIPPED -- HUB_GUEST_FOLLOWUPS_ENABLED is false pending a fix to the upstream no_decline misclassification. Registration still ran; no new drafts created for this cadence.');
+  }
+  Logger.log('Lead follow-up cycle complete (Podcast Sales active, Hub Guest paused).');
 }
 
 function runFollowUpDeepDiveBackfill() {
