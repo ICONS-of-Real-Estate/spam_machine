@@ -172,6 +172,15 @@ const CONFIG = {
   // incremental-trust pattern used earlier in the session.
   MAX_DRAFTS_PER_RUN: 10,
 
+  // TEMPORARY (18 Aug 2026, per direct request): skip no_decline and
+  // no_data_error replies for now so the cap of 10 is spent entirely on
+  // positive-category drafts, since the hub-guest-invite close on declines
+  // is already confirmed working well and doesn't need more review right
+  // now. These threads aren't excluded permanently -- see the skip-cache
+  // check in runReplyDrafterInner. Set back to false to resume drafting
+  // declines.
+  DRAFT_ONLY_POSITIVE_FOR_NOW: true,
+
   // SWITCHED (17 Aug 2026): Kimi is now the PRIMARY model (via Moonshot's
   // Anthropic-compatible endpoint), Anthropic is the automatic fallback --
   // see callLlmWithFallback() in quota_guard_and_alerting.gs for the actual
@@ -600,6 +609,19 @@ function runReplyDrafterInner() {
     if (!result) {
       skipCache[threadId] = { reason: 'classification/draft failed', lastCheckedAt: new Date() };
       Logger.log('Classification/draft failed for: ' + subject + ', cached for ' + SKIP_CACHE_TTL_HOURS + 'h.');
+      continue;
+    }
+
+    // TEMPORARY (18 Aug 2026, per direct request): deprioritizing no_decline
+    // and no_data_error today to focus review capacity on positive replies
+    // -- the hub-guest-invite close on declines is already confirmed working
+    // well. This is a state-dependent skip (cached, not labeled), so these
+    // threads come back on their own once the cache TTL expires -- nothing
+    // is permanently excluded. Flip CONFIG.DRAFT_ONLY_POSITIVE_FOR_NOW back
+    // to false whenever declines should be drafted again.
+    if (CONFIG.DRAFT_ONLY_POSITIVE_FOR_NOW && (result.category === 'no_decline' || result.category === 'no_data_error')) {
+      skipCache[threadId] = { reason: 'deprioritized (' + result.category + ') -- focusing on positive replies for now', lastCheckedAt: new Date() };
+      Logger.log('DIAGNOSTIC -- skipped (deprioritized ' + result.category + ' per today\'s request), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
       continue;
     }
 
