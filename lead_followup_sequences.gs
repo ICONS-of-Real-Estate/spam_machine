@@ -90,7 +90,7 @@ const FOLLOWUP_DEEP_DIVE_LOOKBACK_DAYS = 270;
 // until Joana sends enough of the current batch to drop back under the cap.
 // This is deliberately a single easy-to-change number -- adjust here, not
 // scattered through the code.
-const FOLLOWUP_DRAFT_CAP = 100;
+const FOLLOWUP_DRAFT_CAP = 5;
 
 // DAILY CREATION CAP (15 Aug 2026, per Kris): in addition to the total
 // pending-approval ceiling above, cap how many NEW follow-up drafts get
@@ -98,7 +98,17 @@ const FOLLOWUP_DRAFT_CAP = 100;
 // processable batch of ~100 each day rather than an unbounded flood. The
 // counter lives in Script Properties and self-resets each Pacific day.
 // Adjust here, same as the total cap.
-const FOLLOWUP_DAILY_DRAFT_CAP = 100;
+//
+// TEMPORARILY DROPPED TO 5 (17 Aug 2026): a live audit found Hub Guest
+// follow-up drafts being generated for leads whose ORIGINAL reply was a
+// clear expression of interest (e.g. "Sure, I'd like to hear more",
+// "Yes, you can call") but got classified no_decline upstream in
+// classifyAndDraft(), so the follow-up cadence treated them as a decline
+// and pushed a guest-invite nudge instead. Both caps dropped to 5 so
+// Goodness can review a small batch and confirm quality before this
+// reopens to its normal ~100/day volume -- raise both back once
+// confirmed good.
+const FOLLOWUP_DAILY_DRAFT_CAP = 5;
 
 // SAFETY NET (14 Aug 2026, real incident): a lead (Treye Bird) who clearly
 // declined ("I'm sorry i haven't responded earlier. I'm not interested,
