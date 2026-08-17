@@ -87,6 +87,91 @@ function clearGmailQuotaExhaustedFlag() {
   Logger.log('Quota-exhausted flag cleared manually.');
 }
 
+// ---------- LLM PROVIDER FALLBACK CHAIN (17 Aug 2026) ----------
+//
+// PROBLEM THIS SOLVES: Kris's Anthropic API key ran out of credit mid-run,
+// silently killing every draft for the rest of that run -- each thread just
+// logged "Classification/draft failed" and got skipped, with nothing
+// surfaced until a human happened to notice zero drafts got made. The team
+// also runs on Moonshot's Kimi day-to-day. This makes Kimi the PRIMARY
+// provider, Anthropic an automatic fallback if Kimi errors, and -- if BOTH
+// fail -- treats that as a real systemic problem (not a one-off): alerts
+// Kris by email, then throws. Nothing in this project catches that throw,
+// so it stops the whole run instead of silently repeating the same double
+// failure for every remaining item in the batch.
+//
+// Every LLM call site in this project (Code.gs's classifyAndDraft,
+// learning_loop.gs's generateSopSuggestions, and
+// lead_followup_sequences.gs's classifyAndDraftFollowUp /
+// summarizeFollowUpLearning) goes through this one function, so there is
+// exactly one place that knows about both providers and both keys.
+//
+// Returns the parsed response body on success (same shape from either
+// provider -- Moonshot's /anthropic endpoint returns Anthropic-shaped
+// responses, so callers' existing data.content.find(...) parsing needs no
+// changes). Throws on total failure -- let it propagate.
+function callLlmWithFallback(systemPrompt, userPrompt, maxTokens, callerLabel) {
+  const props = PropertiesService.getScriptProperties();
+  const kimiKey = props.getProperty('KIMI_API_KEY');
+  const anthropicKey = props.getProperty('ANTHROPIC_API_KEY');
+
+  if (kimiKey) {
+    const kimiResult = attemptLlmCall_(
+      'https://api.moonshot.ai/anthropic/v1/messages',
+      { 'Authorization': 'Bearer ' + kimiKey },
+      CONFIG.MODEL,
+      systemPrompt, userPrompt, maxTokens
+    );
+    if (kimiResult.ok) return kimiResult.data;
+    Logger.log(callerLabel + ' -- Kimi call failed, falling back to Anthropic: ' + kimiResult.error);
+  } else {
+    Logger.log(callerLabel + ' -- KIMI_API_KEY not set in Script Properties, going straight to Anthropic fallback.');
+  }
+
+  if (anthropicKey) {
+    const anthropicResult = attemptLlmCall_(
+      'https://api.anthropic.com/v1/messages',
+      { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
+      CONFIG.ANTHROPIC_FALLBACK_MODEL,
+      systemPrompt, userPrompt, maxTokens
+    );
+    if (anthropicResult.ok) return anthropicResult.data;
+    Logger.log(callerLabel + ' -- Anthropic fallback ALSO failed: ' + anthropicResult.error);
+  } else {
+    Logger.log(callerLabel + ' -- ANTHROPIC_API_KEY not set in Script Properties, no fallback available.');
+  }
+
+  sendOpsAlert(
+    'Both Kimi and Anthropic API calls failed',
+    callerLabel + ' could not get a usable response from either LLM provider. This run has been stopped rather than continuing to fail silently for every remaining item. Check both KIMI_API_KEY and ANTHROPIC_API_KEY (credit balance / validity) in Script Properties, fix whichever is broken, then re-run manually.'
+  );
+  throw new Error(callerLabel + ': both Kimi and Anthropic calls failed -- see execution log and the ops alert email for details.');
+}
+
+function attemptLlmCall_(url, headers, model, systemPrompt, userPrompt, maxTokens) {
+  try {
+    const response = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: headers,
+      payload: JSON.stringify({
+        model: model,
+        max_tokens: maxTokens,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
+      }),
+      muteHttpExceptions: true,
+    });
+
+    if (response.getResponseCode() !== 200) {
+      return { ok: false, error: 'HTTP ' + response.getResponseCode() + ': ' + response.getContentText() };
+    }
+    return { ok: true, data: JSON.parse(response.getContentText('UTF-8')) };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
 /**
  * Sends an alert via MailApp (NOT GmailApp) -- a separate quota, so
  * this keeps working even when Gmail access itself is dead. Rate

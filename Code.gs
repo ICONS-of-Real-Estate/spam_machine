@@ -61,10 +61,15 @@
  * created in the shared Drive already visible to the team). Also requires
  * quota_guard_and_alerting.gs to exist in the same Apps Script project.
  *
- * NOTE ON API USAGE: CONFIG.MODEL calls run against Kris's own Anthropic
- * API key (ANTHROPIC_API_KEY in Script Properties) -- every draft this
- * generates uses his API credit, not a shared/team budget. Worth keeping
- * in mind if volume ramps up.
+ * NOTE ON API USAGE (UPDATED 17 Aug 2026): switched to Moonshot's Kimi as
+ * the primary LLM provider after Anthropic API credits ran out mid-run
+ * during a live incident review, with Anthropic kept wired in as an
+ * automatic fallback (see callLlmWithFallback() in
+ * quota_guard_and_alerting.gs -- every LLM call in this project goes
+ * through that one function now). Requires KIMI_API_KEY and
+ * ANTHROPIC_API_KEY in Script Properties; if BOTH fail, Kris gets an
+ * ops alert email and the run stops rather than silently producing
+ * nothing for the rest of the batch.
  */
 
 // ---------- CONFIG ----------
@@ -124,10 +129,23 @@ const CONFIG = {
   // actual DRAFTS CREATED, separate from MAX_THREADS_PER_RUN above (which
   // just bounds how many threads get scanned/considered).
   MAX_DRAFTS_PER_RUN: 5,
-  MODEL: 'claude-sonnet-5', // switched from claude-sonnet-4-6 (25 Jul 2026) -- same tier fit for
-  // this task (classification + template-following drafts), currently cheaper at $2/$10 per
-  // MTok vs 4.6's $3/$15, during intro pricing through 31 Aug 2026. Reverts to $3/$15 after
-  // that, matching 4.6 exactly -- no downside, only savings until then.
+
+  // SWITCHED (17 Aug 2026): Kimi is now the PRIMARY model (via Moonshot's
+  // Anthropic-compatible endpoint), Anthropic is the automatic fallback --
+  // see callLlmWithFallback() in quota_guard_and_alerting.gs for the actual
+  // provider logic. Picked kimi-k2.6 (Moonshot's "value tier", ~$0.95/$4.00
+  // per MTok) over the kimi-k3 flagship (~$3/$15, same price class as
+  // Claude Sonnet) -- at this system's real volume (a handful of drafts/day,
+  // capped at MAX_DRAFTS_PER_RUN) the dollar difference between tiers is
+  // trivial, so this isn't really a cost call. Revisit (bump to kimi-k3) if
+  // Kimi's classification turns out less reliable than Claude's on the kind
+  // of ambiguous replies that caused the Aug 17 incident.
+  MODEL: 'kimi-k2.6',
+
+  // Fallback model used only when Kimi fails and the call retries against
+  // Anthropic directly (see callLlmWithFallback()). This was CONFIG.MODEL
+  // before the 17 Aug switch.
+  ANTHROPIC_FALLBACK_MODEL: 'claude-sonnet-5',
 };
 
 const OPT_OUT_PATTERNS = /\b(stop|unsubscribe|remove me|take me off|do not (contact|email) me)\b/i;
@@ -249,12 +267,6 @@ function runReplyDrafter() {
 }
 
 function runReplyDrafterInner() {
-  const props = PropertiesService.getScriptProperties();
-  const apiKey = props.getProperty('ANTHROPIC_API_KEY');
-  if (!apiKey) {
-    throw new Error('ANTHROPIC_API_KEY not set in Script Properties.');
-  }
-
   const labelYes = getOrWarnLabel(CONFIG.LABEL_YES);
   const labelYesPenciled = getOrWarnLabel(CONFIG.LABEL_YES_PENCILED);
   const labelNo = getOrWarnLabel(CONFIG.LABEL_NO);
@@ -365,7 +377,7 @@ function runReplyDrafterInner() {
     const matchedShow = state ? stateDirectory[normalizeState(state)] : null;
 
     const context = buildThreadContext(messages);
-    const result = classifyAndDraft(apiKey, systemPrompt, subject, context, leadEmail, state, matchedShow);
+    const result = classifyAndDraft(systemPrompt, subject, context, leadEmail, state, matchedShow);
 
     if (!result) {
       Logger.log('Classification/draft failed for: ' + subject);
@@ -700,7 +712,7 @@ function commitNoDeclineVariation(index) {
   PropertiesService.getScriptProperties().setProperty('NO_DECLINE_VARIATION_INDEX', String(index));
 }
 
-function classifyAndDraft(apiKey, systemPrompt, subject, threadContext, prospectEmail, state, matchedShow) {
+function classifyAndDraft(systemPrompt, subject, threadContext, prospectEmail, state, matchedShow) {
   const candidateVariation = peekNoDeclineVariation();
 
   const matchedShowBlock = matchedShow
@@ -728,36 +740,7 @@ Set needs_teammate_routing to true only when the reply is a strong YES that shou
 
 Set "priority" to true ONLY when the prospect shows clear, immediate buying intent -- e.g. explicitly asking to book a call, saying yes and asking "when," giving their phone number/availability unprompted, or otherwise acting ready to move now rather than just curious. A soft or ambiguous "maybe, tell me more" is NOT priority. This is independent of needs_teammate_routing -- a reply can be high-priority without needing a teammate handoff, or vice versa.`;
 
-  const payload = {
-    model: CONFIG.MODEL,
-    max_tokens: 2000,
-    system: [
-      {
-        type: 'text',
-        text: systemPrompt,
-        cache_control: { type: 'ephemeral' }
-      }
-    ],
-    messages: [{ role: 'user', content: userPrompt }],
-  };
-
-  const response = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
-    method: 'post',
-    contentType: 'application/json',
-    headers: {
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true,
-  });
-
-  if (response.getResponseCode() !== 200) {
-    Logger.log('Claude API error: ' + response.getContentText());
-    return null;
-  }
-
-  const data = JSON.parse(response.getContentText('UTF-8'));
+  const data = callLlmWithFallback(systemPrompt, userPrompt, 2000, 'classifyAndDraft');
 
   if (data.usage) {
     Logger.log(
@@ -769,7 +752,7 @@ Set "priority" to true ONLY when the prospect shows clear, immediate buying inte
 
   const textBlock = data.content.find(c => c.type === 'text');
   if (!textBlock) {
-    Logger.log('No text block in Claude response -- stop_reason: ' + data.stop_reason + ', content types: ' + JSON.stringify((data.content || []).map(c => c.type)));
+    Logger.log('No text block in LLM response -- stop_reason: ' + data.stop_reason + ', content types: ' + JSON.stringify((data.content || []).map(c => c.type)));
     return null;
   }
 
@@ -778,7 +761,7 @@ Set "priority" to true ONLY when the prospect shows clear, immediate buying inte
     const cleanedText = textBlock.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     parsed = JSON.parse(cleanedText);
   } catch (e) {
-    Logger.log('Failed to parse Claude JSON response: ' + textBlock.text);
+    Logger.log('Failed to parse LLM JSON response: ' + textBlock.text);
     return null;
   }
 

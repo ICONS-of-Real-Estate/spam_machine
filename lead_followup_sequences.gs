@@ -350,7 +350,8 @@ function buildSchedulingNote(originalMessageDate) {
 // "## FOLLOW-UP DRAFTING" section of the same live SOP Doc the main drafter
 // reads (editable there, version history included), with a hardcoded
 // fallback below if that section is ever missing. Uses the existing
-// CONFIG.MODEL and ANTHROPIC_API_KEY -- no new infrastructure.
+// callLlmWithFallback() (Kimi primary, Anthropic fallback -- see
+// quota_guard_and_alerting.gs) -- no new infrastructure.
 //
 // Hub Guest only for now. Podcast Sales stays on PODCAST_SALES_TEMPLATES
 // until the Follow-Up Learning Log shows whether Joana rewrites those too.
@@ -396,7 +397,7 @@ When referencing the show, ALWAYS include the exact show URL given to you, verba
 // referral-ask, empathy close, affiliate pivot, gentle bump, or nothing at all.
 // Returns { action: 'draft'|'stop', leadState, draftBody } or null on failure
 // (caller leaves the row at _SCHEDULE so it retries on the next daily run).
-function classifyAndDraftFollowUp(apiKey, systemPrompt, ctx) {
+function classifyAndDraftFollowUp(systemPrompt, ctx) {
   // ctx: { name, email, state, showName, showLink, step, thread }
   const messages = ctx.thread.getMessages();
   const threadContext = buildThreadContext(messages);
@@ -440,27 +441,7 @@ Return ONLY a JSON object, no markdown fences, no preamble, with this exact shap
 
 Set action to "stop" ONLY for a clear hard decline or an explicit request to stop contacting them (draft_body can be empty in that case). Everything else gets action "draft".`;
 
-  const payload = {
-    model: CONFIG.MODEL,
-    max_tokens: 2000,
-    system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
-    messages: [{ role: 'user', content: userPrompt }],
-  };
-
-  const response = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true,
-  });
-
-  if (response.getResponseCode() !== 200) {
-    Logger.log('classifyAndDraftFollowUp -- Claude API error: ' + response.getContentText());
-    return null;
-  }
-
-  const data = JSON.parse(response.getContentText('UTF-8'));
+  const data = callLlmWithFallback(systemPrompt, userPrompt, 2000, 'classifyAndDraftFollowUp');
   const textBlock = data.content.find(c => c.type === 'text');
   if (!textBlock) {
     Logger.log('classifyAndDraftFollowUp -- no text block in response, stop_reason: ' + data.stop_reason);
@@ -489,14 +470,12 @@ Set action to "stop" ONLY for a clear hard decline or an explicit request to sto
 // to sanity-check prompt edits before letting runLeadFollowUpCycle() draft
 // for real.
 function testFollowUpDraftForThread(threadId, step) {
-  const apiKey = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
-  if (!apiKey) { Logger.log('ANTHROPIC_API_KEY not set.'); return; }
   const thread = GmailApp.getThreadById(threadId);
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const row = ss.getSheetByName(HUB_GUEST_QUEUE_TAB).getDataRange().getValues()
     .find(r => r[0] === threadId);
   if (!row) { Logger.log('Thread ' + threadId + ' not found in Hub Guest queue.'); return; }
-  const result = classifyAndDraftFollowUp(apiKey, buildFollowUpSystemPrompt(), {
+  const result = classifyAndDraftFollowUp(buildFollowUpSystemPrompt(), {
     name: row[1], email: row[2], state: row[3], showName: row[4], showLink: row[5],
     step: step || 1, thread: thread,
   });
@@ -1074,13 +1053,6 @@ function wipeScriptMadeDrafts(applyDeletions) {
 // Run daily (e.g. after Goodness finishes her batch). Safe to re-run:
 // reviewed rows are marked so they aren't re-batched.
 function summarizeFollowUpLearning() {
-  const props = PropertiesService.getScriptProperties();
-  const apiKey = props.getProperty('ANTHROPIC_API_KEY');
-  if (!apiKey) {
-    Logger.log('summarizeFollowUpLearning -- ANTHROPIC_API_KEY not set, skipping.');
-    return;
-  }
-
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const logTab = ss.getSheetByName(FOLLOWUP_LEARNING_LOG_TAB);
   let suggestionsTab = ss.getSheetByName('SOP Suggestions');
@@ -1134,23 +1106,10 @@ function summarizeFollowUpLearning() {
 
   const userPrompt = `Here are ${edits.length} examples of AI-drafted follow-up emails versus what the human editor actually sent:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested changes to the FOLLOW-UP DRAFTING section. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
 
-  const response = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-    payload: JSON.stringify({ model: CONFIG.MODEL, max_tokens: 2000, system: systemPrompt, messages: [{ role: 'user', content: userPrompt }] }),
-    muteHttpExceptions: true,
-  });
-
-  if (response.getResponseCode() !== 200) {
-    Logger.log('summarizeFollowUpLearning -- Claude API error: ' + response.getContentText());
-    return;
-  }
-
-  const data = JSON.parse(response.getContentText('UTF-8'));
+  const data = callLlmWithFallback(systemPrompt, userPrompt, 2000, 'summarizeFollowUpLearning');
   const textBlock = data.content.find(c => c.type === 'text');
   if (!textBlock) {
-    Logger.log('summarizeFollowUpLearning -- no text block in Claude response.');
+    Logger.log('summarizeFollowUpLearning -- no text block in LLM response.');
     return;
   }
 
@@ -1417,9 +1376,7 @@ function advanceHubGuestFollowUps() {
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const queueTab = ss.getSheetByName(HUB_GUEST_QUEUE_TAB);
   const bensTab = ss.getSheetByName(BENS_CALL_LIST_TAB_V2);
-  const followUpApiKey = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
   const followUpSystemPrompt = buildFollowUpSystemPrompt();
-  let followUpKeyWarned = false;
   const data = queueTab.getDataRange().getValues();
   let advanced = 0;
   let completed = 0;
@@ -1471,32 +1428,24 @@ function advanceHubGuestFollowUps() {
       const nextStep = currentStep + 1;
       if (nextStep > 2) continue;
 
-      if (!followUpApiKey) {
-        if (!followUpKeyWarned) {
-          Logger.log('advanceHubGuestFollowUps -- ANTHROPIC_API_KEY not set in Script Properties. No Hub Guest follow-ups can be drafted; rows left at _SCHEDULE. Fix the key and they will draft on the next run.');
-          followUpKeyWarned = true;
-        }
-        continue;
-      }
-
-      const followUp = classifyAndDraftFollowUp(followUpApiKey, followUpSystemPrompt, {
+      const followUp = classifyAndDraftFollowUp(followUpSystemPrompt, {
         name: name, email: email, state: state, showName: showName, showLink: showLink,
         step: nextStep, thread: thread
       });
 
       if (!followUp) {
-        Logger.log('advanceHubGuestFollowUps -- Claude drafting failed for ' + threadId + ' (' + name + ') -- left at _SCHEDULE, will retry on the next run.');
+        Logger.log('advanceHubGuestFollowUps -- LLM drafting failed for ' + threadId + ' (' + name + ') -- left at _SCHEDULE, will retry on the next run.');
         continue;
       }
 
       if (followUp.action === 'stop') {
         queueTab.getRange(r + 1, 10).setValue('STOPPED');
-        Logger.log('advanceHubGuestFollowUps -- STOPPED (Claude read the thread as a hard decline, lead_state=' + followUp.leadState + '): ' + threadId + ' (' + name + ', ' + email + '). No follow-up drafted.');
+        Logger.log('advanceHubGuestFollowUps -- STOPPED (LLM read the thread as a hard decline, lead_state=' + followUp.leadState + '): ' + threadId + ' (' + name + ', ' + email + '). No follow-up drafted.');
         stopped++;
         continue;
       }
 
-      Logger.log('advanceHubGuestFollowUps -- Claude drafted for ' + threadId + ' (' + name + '), lead_state=' + followUp.leadState + ', step ' + nextStep);
+      Logger.log('advanceHubGuestFollowUps -- LLM drafted for ' + threadId + ' (' + name + '), lead_state=' + followUp.leadState + ', step ' + nextStep);
 
       const note = buildSchedulingNote(new Date(originalReplyTime));
       const plainBody = followUp.draftBody;

@@ -12,7 +12,9 @@
  *
  * 2. generateSopSuggestions() — run this weekly (or whenever you want a
  *    check-in). It reads any un-reviewed edited rows from "Learning Log",
- *    sends them to Claude in a batch, and asks it to identify patterns
+ *    sends them to the LLM (Kimi, falling back to Claude -- see
+ *    callLlmWithFallback() in quota_guard_and_alerting.gs) in a batch, and
+ *    asks it to identify patterns
  *    and propose SPECIFIC SOP changes. These land in the "SOP Suggestions"
  *    tab as PROPOSALS ONLY — nothing here rewrites the live SOP file or
  *    the automation's system prompt automatically. A human (Kris, or
@@ -142,12 +144,6 @@ function levenshteinRough(a, b) {
 // ---------- 2. SURFACE SOP SUGGESTIONS (proposals only, never auto-applied) ----------
 
 function generateSopSuggestions() {
-  const props = PropertiesService.getScriptProperties();
-  const apiKey = props.getProperty('ANTHROPIC_API_KEY');
-  if (!apiKey) {
-    Logger.log('ANTHROPIC_API_KEY not set — skipping.');
-    return;
-  }
   if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') return;
 
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
@@ -190,28 +186,7 @@ function generateSopSuggestions() {
 
   const userPrompt = `Here are ${unreviewedEdits.length} examples of AI-drafted replies versus what Joana actually sent instead:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested SOP changes. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
 
-  const response = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
-    method: 'post',
-    contentType: 'application/json',
-    headers: {
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    payload: JSON.stringify({
-      model: CONFIG.MODEL,
-      max_tokens: 2000,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
-    }),
-    muteHttpExceptions: true,
-  });
-
-  if (response.getResponseCode() !== 200) {
-    Logger.log('Claude API error during SOP suggestion generation: ' + response.getContentText());
-    return;
-  }
-
-  const data = JSON.parse(response.getContentText());
+  const data = callLlmWithFallback(systemPrompt, userPrompt, 2000, 'generateSopSuggestions');
   const textBlock = data.content.find(c => c.type === 'text');
   if (!textBlock) return;
 
