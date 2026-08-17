@@ -23,6 +23,14 @@
  */
 
 function runDailyReport() {
+  // ADDED (17 Aug 2026, real incident): confirmed live that a different
+  // account than Joana's has its own trigger firing this function -- see
+  // assertRunningAsJoana() in lead_followup_sequences.gs. This calls
+  // GmailApp.search() to count "leads received today" -- running as the
+  // wrong account would silently report a wrong number pulled from a
+  // different mailbox instead of Joana's.
+  if (!assertRunningAsJoana('runDailyReport')) return;
+
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const draftsTab = ss.getSheetByName('AI Drafts Log');
   const learningTab = ss.getSheetByName('Learning Log');

@@ -32,6 +32,14 @@
 // ---------- 1. COMPARE SENT VS. DRAFTED ----------
 
 function runLearningLoop() {
+  // ADDED (17 Aug 2026, real incident): confirmed live that a different
+  // account than Joana's has its own trigger firing this function -- see
+  // assertRunningAsJoana() in lead_followup_sequences.gs. This reads real
+  // Gmail threads/sent messages, so running as the wrong account would just
+  // fail to find any of the thread IDs logged (they belong to Joana's
+  // mailbox specifically) rather than silently doing something useful.
+  if (!assertRunningAsJoana('runLearningLoop')) return;
+
   if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') {
     Logger.log('CONFIG.SPREADSHEET_ID not set — skipping learning loop.');
     return;

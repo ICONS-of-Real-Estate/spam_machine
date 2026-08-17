@@ -64,6 +64,13 @@ function runWeekendDeepMissedLeadsAudit() {
 }
 
 function runMissedLeadsAudit(daysBack) {
+  // ADDED (17 Aug 2026, real incident): confirmed live that a different
+  // account than Joana's has its own trigger firing this function -- see
+  // assertRunningAsJoana() in lead_followup_sequences.gs. Also covers
+  // runWeekendDeepMissedLeadsAudit, which just calls this with a longer
+  // lookback.
+  if (!assertRunningAsJoana('runMissedLeadsAudit')) return;
+
   const lookback = daysBack || 14;
 
   if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') {

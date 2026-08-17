@@ -361,6 +361,14 @@ function saveSkipCache(ss, cacheMap) {
 // ---------- MAIN ENTRY POINT ----------
 
 function runReplyDrafter() {
+  // ADDED (17 Aug 2026, real incident): this was the one Gmail-touching
+  // entry point in the whole project that DIDN'T call assertRunningAsJoana()
+  // -- a real gap, confirmed live when the Executions view showed this exact
+  // function firing under a different ("Other user") account's trigger.
+  // Without this check it would have happily searched/drafted against
+  // whatever mailbox that OTHER account runs as, instead of refusing to run.
+  if (!assertRunningAsJoana('runReplyDrafter')) return;
+
   if (isGmailQuotaExhausted()) {
     Logger.log('Skipping runReplyDrafter -- Gmail quota already known exhausted today.');
     return;
