@@ -40,6 +40,27 @@ function runLearningLoop() {
   // mailbox specifically) rather than silently doing something useful.
   if (!assertRunningAsJoana('runLearningLoop')) return;
 
+  // ADDED (17 Aug 2026): this function's dedup (skip a Thread ID already
+  // present in "Learning Log") is correct for a SINGLE execution, but
+  // nothing stopped two overlapping executions from both reading the log
+  // before either had appended anything -- both would then log the SAME
+  // thread comparison as a duplicate row. Same class of race as today's
+  // cross-account trigger duplicate-draft incident. Locking the same way
+  // runReplyDrafter() already does.
+  const lock = LockService.getScriptLock();
+  const gotLock = lock.tryLock(10000);
+  if (!gotLock) {
+    Logger.log('Another runLearningLoop execution is already in progress -- skipping this run rather than racing it.');
+    return;
+  }
+  try {
+    runLearningLoopInner();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function runLearningLoopInner() {
   if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') {
     Logger.log('CONFIG.SPREADSHEET_ID not set — skipping learning loop.');
     return;
@@ -152,6 +173,25 @@ function levenshteinRough(a, b) {
 // ---------- 2. SURFACE SOP SUGGESTIONS (proposals only, never auto-applied) ----------
 
 function generateSopSuggestions() {
+  // ADDED (17 Aug 2026, real incident): without a lock, two overlapping
+  // executions could both read the same unreviewed rows before either
+  // marks them reviewed, and both send the same examples to the LLM --
+  // wasted API cost and duplicate rows in "SOP Suggestions". Same fix as
+  // runLearningLoopInner() above and runReplyDrafter() in Code.gs.
+  const lock = LockService.getScriptLock();
+  const gotLock = lock.tryLock(10000);
+  if (!gotLock) {
+    Logger.log('Another generateSopSuggestions execution is already in progress -- skipping this run rather than racing it.');
+    return;
+  }
+  try {
+    generateSopSuggestionsInner();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function generateSopSuggestionsInner() {
   if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') return;
 
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);

@@ -1135,6 +1135,26 @@ function wipeScriptMadeDrafts(applyDeletions) {
 // Run daily (e.g. after Goodness finishes her batch). Safe to re-run:
 // reviewed rows are marked so they aren't re-batched.
 function summarizeFollowUpLearning() {
+  // ADDED (17 Aug 2026, real incident): without a lock, two overlapping
+  // executions could both read the same unreviewed rows before either
+  // marks them reviewed, and both send the same examples to the LLM --
+  // wasted API cost and duplicate rows in "SOP Suggestions". Same fix as
+  // generateSopSuggestions()/runLearningLoop() in learning_loop.gs and
+  // runReplyDrafter() in Code.gs.
+  const lock = LockService.getScriptLock();
+  const gotLock = lock.tryLock(10000);
+  if (!gotLock) {
+    Logger.log('Another summarizeFollowUpLearning execution is already in progress -- skipping this run rather than racing it.');
+    return;
+  }
+  try {
+    summarizeFollowUpLearningInner();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function summarizeFollowUpLearningInner() {
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const logTab = ss.getSheetByName(FOLLOWUP_LEARNING_LOG_TAB);
   let suggestionsTab = ss.getSheetByName('SOP Suggestions');
