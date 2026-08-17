@@ -26,7 +26,7 @@
  *
  * HOW TO WIRE THIS INTO EXISTING FUNCTIONS:
  * At the very top of runReplyDrafterInner(), runLeadFollowUpCycle(),
- * runMissedLeadsAudit(), runStalledBookingsAudit(), and any other
+ * runMissedLeadsAudit(), and any other
  * Gmail-touching entry point, add:
  *
  *   if (isGmailQuotaExhausted()) {

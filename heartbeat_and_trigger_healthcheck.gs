@@ -42,8 +42,10 @@ const EXPECTED_TRIGGER_FUNCTIONS = [
   'runMissedLeadsAudit',
   'runLeadFollowUpCycle',
   'runDailyReport',
-  'runWeekendDeepMissedLeadsAudit',
-  'runStalledBookingsAudit'
+  'runWeekendDeepMissedLeadsAudit'
+  // NOTE: runStalledBookingsAudit was removed -- it is not defined anywhere in the
+  // project, so it can never have a valid trigger. Listing it here made the health
+  // check report a false "missing trigger" alarm every single day.
 ];
 
 function setupHeartbeatTriggers() {

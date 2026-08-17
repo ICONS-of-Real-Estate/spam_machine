@@ -27,8 +27,7 @@ function setupAllTriggers() {
     'runLeadFollowUpCycle',
     'summarizeFollowUpLearning',
     'runDailyReport',
-    'runWeekendDeepMissedLeadsAudit',
-    'runStalledBookingsAudit'
+    'runWeekendDeepMissedLeadsAudit'
   ];
 
   // Delete any existing triggers for these functions first, so re-running
@@ -109,12 +108,18 @@ function setupAllTriggers() {
     .create();
   Logger.log('Created: runWeekendDeepMissedLeadsAudit, weekly on Saturday around 8 AM ' + TZ + ' (looks back 180 days).');
 
-  ScriptApp.newTrigger('runStalledBookingsAudit')
-    .timeBased()
-    .onWeekDay(ScriptApp.WeekDay.SATURDAY)
-    .atHour(8)
-    .create();
-  Logger.log('Created: runStalledBookingsAudit, weekly on Saturday around 8 AM ' + TZ + ' (looks back 180 days).');
+  // NOTE (housekeeping): a trigger for runStalledBookingsAudit used to be created
+  // here, but that function is not defined anywhere in the project -- the trigger
+  // would have fired into a missing-handler error every week. Removed. Re-add here
+  // only once a real runStalledBookingsAudit() is implemented.
+  if (ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === 'runStalledBookingsAudit')) {
+    ScriptApp.getProjectTriggers().forEach(t => {
+      if (t.getHandlerFunction() === 'runStalledBookingsAudit') {
+        ScriptApp.deleteTrigger(t);
+        Logger.log('Removed dangling trigger for undefined runStalledBookingsAudit.');
+      }
+    });
+  }
 
   Logger.log('All ' + functionsToSchedule.length + ' triggers created, all clock times in ' + TZ + '. Check the Triggers page (clock icon) to confirm.');
 }

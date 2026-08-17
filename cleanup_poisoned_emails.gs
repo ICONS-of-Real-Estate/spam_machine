@@ -27,11 +27,15 @@
  */
 
 const CLEANUP_BATCH_SIZE = 40;
-const QUOTA_ERROR_SUBSTRING = 'too many times for one day';
 
-function isQuotaExceededError(e) {
-  return String(e).indexOf(QUOTA_ERROR_SUBSTRING) !== -1;
-}
+// NOTE (housekeeping): this file previously defined its own isQuotaExceededError()
+// and a local QUOTA_ERROR_SUBSTRING constant -- an exact duplicate of the one in
+// quota_guard_and_alerting.gs. Apps Script shares one global scope across all files
+// in a project, so only ONE definition can win (the last one loaded), and a stale
+// duplicate here risked silently shadowing the canonical helper. The duplicate has
+// been removed; this file now relies on the single shared isQuotaExceededError()
+// (and QUOTA_ERROR_SUBSTRING_GLOBAL) from quota_guard_and_alerting.gs, which must
+// live in the same project.
 
 function debugSingleThread(threadId) {
   Logger.log('--- DEBUG: ' + threadId + ' ---');
