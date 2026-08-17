@@ -120,11 +120,12 @@ const CONFIG = {
   // typing out (and risking a typo in) the raw URL itself.
   HUB_LINK_URL: 'https://hub.iconsofrealestate.com/',
 
-  // Joana's standing Zoom room -- confirmed via her own sent replies, same
-  // link reused consistently across months (Amina, Heather, Yvette, Rachel,
-  // Jermaine, and others). Replaces the BOOKING_LINK placeholder that was
-  // previously left unfilled in every draft.
-  BOOKING_LINK_URL: 'https://zoom.us/j/2268364546?pwd=EosrIzrbJ3uMp1MrGG8tIgFGAcppmZ.1',
+  // UPDATED (17 Aug 2026, per Goodness's feedback doc): the Zoom-room link
+  // below is stale -- Joana has moved to this booking-widget link and was
+  // manually swapping it into nearly every AI draft by hand (Marcell, Julia,
+  // Bubba, Elia, Adnan, Destiny, Ciara, Heather, Allie, Meka, Jason, Alexsis,
+  // Marsha, Vernon, and more -- same substitution, every single time).
+  BOOKING_LINK_URL: 'https://link.iconsofrealestate.com/widget/bookings/joana-podcast-production',
 
   // Paste the ID from the Sheet's URL: https://docs.google.com/spreadsheets/d/THIS_PART/edit
   SPREADSHEET_ID: '1uDrt3WAPZR90iaPgM6wZcfN9rOXzkkuFHJ6tg_XMHHs',
@@ -189,7 +190,13 @@ const CONFIG = {
   ANTHROPIC_FALLBACK_MODEL: 'claude-sonnet-5',
 };
 
-const OPT_OUT_PATTERNS = /\b(stop|unsubscribe|remove me|take me off|do not (contact|email) me)\b/i;
+// BROADENED (17 Aug 2026, per Goodness's feedback doc, real incident): the
+// original pattern only covered polite/formal opt-outs. Jose's actual reply
+// was just "Fuck off" -- Goodness's note on it was literally "No need for
+// any reply." That's a real gap: a hostile/profane reply is functionally an
+// opt-out (drafting a follow-up to it would be actively bad), but nothing
+// here caught it.
+const OPT_OUT_PATTERNS = /\b(stop|unsubscribe|remove me|take me off|do not (contact|email) me|fuck off|fuck you|piss off|get lost|leave me (the fuck )?alone|don'?t (contact|email|message|text) me again)\b/i;
 
 // Same pattern already proven in missed_leads_audit.gs -- common phrasing in
 // genuine bounce-backs and out-of-office auto-replies. Checked against the
