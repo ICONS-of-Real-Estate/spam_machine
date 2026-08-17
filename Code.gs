@@ -329,7 +329,7 @@ function runReplyDrafterInner() {
     }
 
     const messages = thread.getMessages();
-    const lastMsg = messages[messages.length - 1];
+    const lastMsg = lastNonDraftMessage_(messages) || messages[messages.length - 1];
     const subject = thread.getFirstMessageSubject();
 
     if (!CONFIG.SUBJECT_PATTERN.test(subject)) {
@@ -543,6 +543,25 @@ function sanitizeEmojiForGmail(text) {
   return text
     .replace(/\uFE0F/g, '')
     .replace(/\u200D/g, '');
+}
+
+// FIX (17 Aug 2026, real incident): thread.getMessages() includes UNSENT
+// drafts as real messages. Using the raw last message meant a pending,
+// never-reviewed AI draft (sender = the account itself) got mistaken for
+// "a human already answered this" -- which then permanently excluded the
+// thread from ever being reconsidered (see
+// LABEL_ALREADY_ANSWERED_BY_TEAM), even though nothing was actually sent.
+// Concretely: this would have silently orphaned a lead forever if its
+// first (unreviewed) draft was later deleted, since the thread would
+// still carry the "already answered" label from before. Skip trailing
+// drafts to find the real last message -- same pattern already used in
+// learning_loop.gs's findSentReplyAfterDraft().
+function lastNonDraftMessage_(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].isDraft && messages[i].isDraft()) continue;
+    return messages[i];
+  }
+  return null;
 }
 
 function isRealTeamReply(email) {
