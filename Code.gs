@@ -184,7 +184,15 @@ const OPT_OUT_PATTERNS = /\b(stop|unsubscribe|remove me|take me off|do not (cont
 // mailbox the person says they don't check. Drafting a warm "stay in touch"
 // reply to Nina's defunct address was pointless. Same suppression as the
 // other auto-reply patterns: no draft, just marked handled.
-const AUTOREPLY_PATTERNS = /(mailbox that is not actively monitored|does not correspond to a valid address|delivery (has |)failed|undeliverable|out of (the |)office|automatic reply|auto-reply|this is an automated|heavy volume of emails|currently unavailable and will respond|(this |my |the )?email( address)?( is| has been|'s)? no longer (used|valid|active|in use|monitored)|do not (send|reply|use) to this email|please use (my |the |a )?(new|updated) email)/i;
+// BROADENED (17 Aug 2026, real incident): the original "email ... no longer
+// used" addition only matched that exact word order ("email" before "no
+// longer"). A real reply -- "I can no longer be reached at this email" --
+// has "no longer" BEFORE "email" and slipped straight through, producing a
+// pointless draft to a dead address (Anne-Marie's thread). Replaced the
+// narrow, order-specific phrase with a general "no longer
+// (reached/used/valid/active/monitored/using)" match that doesn't care what
+// comes before or after it.
+const AUTOREPLY_PATTERNS = /(mailbox that is not actively monitored|does not correspond to a valid address|delivery (has |)failed|undeliverable|out of (the |)office|automatic reply|auto-reply|this is an automated|heavy volume of emails|currently unavailable and will respond|no longer (be |)(reach(ed|able)|used?|valid|active|monitored|using)|do not (send|reply|use) to this email|please use (my |the |a )?(new|updated) email)/i;
 
 const US_STATES = [
   'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut',
