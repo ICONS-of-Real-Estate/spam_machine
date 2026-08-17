@@ -1279,7 +1279,6 @@ function auditActiveSalesDraftsForDeclines() {
 function advancePodcastSalesFollowUps() {
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const queueTab = ss.getSheetByName(PODCAST_SALES_QUEUE_TAB);
-  const stateDirectory = loadStateDirectory();
   const data = queueTab.getDataRange().getValues();
   let advanced = 0;
   let completed = 0;
@@ -1346,15 +1345,18 @@ function advancePodcastSalesFollowUps() {
       if (nextStep === 1) {
         body = PODCAST_SALES_TEMPLATES[1].replace('{{name}}', name || 'there');
       } else {
-        const subject = thread.getFirstMessageSubject();
-        const state = extractStateFromSubject(subject);
-        const matchedShow = state ? stateDirectory[normalizeState(state)] : null;
-        if (matchedShow) {
-          body = 'Hi ' + (name || 'there') + ', Totally understand if starting your own show isn\'t the right fit right now -- in the meantime, have you checked out "' +
-            matchedShow.showName + '," in ' + state + '? If being a guest ever sounds interesting, we\'d love to have you on! ' + matchedShow.link;
-        } else {
-          body = 'Hi ' + (name || 'there') + ', Totally understand if starting your own show isn\'t the right fit right now -- if being a guest on a podcast within our network ever sounds interesting, we\'ve got a huge network you can tap into: [our guest network](HUB_LINK)';
-        }
+        // FIXED (17 Aug 2026, real incident): this used to hardcode "Totally
+        // understand if starting your own show isn't the right fit" for
+        // EVERY step-2 lead, unconditionally assuming a decline -- but
+        // threadContainsDecline() above already stops the cadence for any
+        // real decline before this point is reached, so every lead who
+        // makes it here simply hasn't responded yet, not declined. That
+        // false assumption directly contradicted what several real leads
+        // had actually said (e.g. asking for more info, not declining).
+        // Replaced with the SOP's own "THEY NEVER REPLIED AT ALL" pattern:
+        // a gentle bump, no decline assumed, no guest-invite pivot (guest
+        // invites are the Hub Guest cadence's job, not this one).
+        body = 'Hi ' + (name || 'there') + ', Just floating this back to the top of your inbox in case it got buried! No pressure at all -- but if hosting your own podcast is still something you\'d be interested in, happy to find a time that works: [book a 15-minute Zoom Call here](BOOKING_LINK). Either way, wishing you continued success!';
       }
       body = substituteLinkTokens(body);
       const plainBody = markdownLinksToPlain(body);
