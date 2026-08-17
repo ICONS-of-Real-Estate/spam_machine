@@ -537,13 +537,30 @@ function getRunningAccountEmail() {
   }
 }
 
-// Returns true if running as Joana; otherwise logs a loud warning and returns
-// false so the caller exits before touching Gmail or the queues.
+// Returns true if running as Joana. Otherwise (UPGRADED 17 Aug 2026, real
+// incident): the original version just logged a line and returned false --
+// which meant a wrong-account trigger firing showed up as a perfectly normal
+// "completed" execution in the Executions view, indistinguishable from a
+// real successful run unless someone happened to open that specific row's
+// log. That's exactly how the "Other user" triggers went unnoticed. Now it
+// throws (so the execution shows red/Failed, visible at a glance in the
+// Executions list) AND emails Kris via sendOpsAlert (rate-limited to once
+// per callerName per day, so a trigger firing every 5 minutes doesn't spam).
+// Existing call sites written as `if (!assertRunningAsJoana(...)) return;`
+// still work unchanged -- the throw interrupts before that check is ever
+// evaluated false.
 function assertRunningAsJoana(callerName) {
   const account = getRunningAccountEmail();
   if (account === EXPECTED_RUN_ACCOUNT) return true;
-  Logger.log('ABORT (' + callerName + '): running as "' + (account || 'UNKNOWN') + '" but this system must run as ' + EXPECTED_RUN_ACCOUNT + ' (the inbox it drafts from). No action taken. Re-run under Joana\'s account.');
-  return false;
+
+  const message = callerName + ' fired under the wrong account ("' + (account || 'UNKNOWN') +
+    '" instead of ' + EXPECTED_RUN_ACCOUNT + '"). No action was taken. This means a trigger for ' +
+    callerName + ' exists under a different Google account -- see deleteAllMyTriggers() in ' +
+    'setup_all_triggers.gs (that account has to run it themselves; this account cannot see or ' +
+    'delete another user\'s triggers).';
+  Logger.log('ABORT (' + callerName + '): ' + message);
+  sendOpsAlert('Wrong-account trigger fired: ' + callerName, message);
+  throw new Error(message);
 }
 
 // PAUSED (17 Aug 2026, real incident): classifyAndDraft() in Code.gs has
