@@ -138,7 +138,12 @@ const CONFIG = {
   // each small batch can get reviewed before more go out. This bounds
   // actual DRAFTS CREATED, separate from MAX_THREADS_PER_RUN above (which
   // just bounds how many threads get scanned/considered).
-  MAX_DRAFTS_PER_RUN: 5,
+  //
+  // RAISED to 50 (17 Aug 2026, same day) after review of the first Kimi
+  // batch (3/4 good -- one bad draft traced to a real AUTOREPLY_PATTERNS
+  // gap, now fixed above). Matches MAX_THREADS_PER_RUN, i.e. no longer
+  // artificially throttling below what a single run would otherwise scan.
+  MAX_DRAFTS_PER_RUN: 50,
 
   // SWITCHED (17 Aug 2026): Kimi is now the PRIMARY model (via Moonshot's
   // Anthropic-compatible endpoint), Anthropic is the automatic fallback --
@@ -165,7 +170,13 @@ const OPT_OUT_PATTERNS = /\b(stop|unsubscribe|remove me|take me off|do not (cont
 // prospect's fresh reply text only (same isolation as OPT_OUT_PATTERNS),
 // not the full quoted history, for the same reason: avoids false positives
 // from boilerplate elsewhere in the thread.
-const AUTOREPLY_PATTERNS = /(mailbox that is not actively monitored|does not correspond to a valid address|delivery (has |)failed|undeliverable|out of (the |)office|automatic reply|auto-reply|this is an automated|heavy volume of emails|currently unavailable and will respond)/i;
+// EXTENDED (17 Aug 2026, real incident): a real person replying "this email is
+// no longer used, please use my new one" isn't an auto-reply/bounce, but it's
+// functionally the same case -- nobody will ever read a reply sent to a
+// mailbox the person says they don't check. Drafting a warm "stay in touch"
+// reply to Nina's defunct address was pointless. Same suppression as the
+// other auto-reply patterns: no draft, just marked handled.
+const AUTOREPLY_PATTERNS = /(mailbox that is not actively monitored|does not correspond to a valid address|delivery (has |)failed|undeliverable|out of (the |)office|automatic reply|auto-reply|this is an automated|heavy volume of emails|currently unavailable and will respond|(this |my |the )?email( address)?( is| has been|'s)? no longer (used|valid|active|in use|monitored)|do not (send|reply|use) to this email|please use (my |the |a )?(new|updated) email)/i;
 
 const US_STATES = [
   'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut',

@@ -42,7 +42,11 @@ function isNonHumanSender(email) {
   return NON_HUMAN_SENDER_PATTERNS.test(email);
 }
 
-const BOUNCE_OR_AUTOREPLY_PATTERNS = /(mailbox that is not actively monitored|does not correspond to a valid address|delivery (has |)failed|undeliverable|out of (the |)office|automatic reply|auto-reply|this is an automated)/i;
+// Kept in sync with AUTOREPLY_PATTERNS in Code.gs (extended 17 Aug 2026 to
+// also catch a real person saying "this email is no longer used" -- same
+// suppression intent as a true bounce/auto-reply, since nobody reads a reply
+// sent to an address they've said they don't check).
+const BOUNCE_OR_AUTOREPLY_PATTERNS = /(mailbox that is not actively monitored|does not correspond to a valid address|delivery (has |)failed|undeliverable|out of (the |)office|automatic reply|auto-reply|this is an automated|(this |my |the )?email( address)?( is| has been|'s)? no longer (used|valid|active|in use|monitored)|do not (send|reply|use) to this email|please use (my |the |a )?(new|updated) email)/i;
 
 // WEEKEND DEEP AUDIT (11 Aug 2026): same tested logic and dedup as above,
 // just with a months-long lookback instead of the daily 14-day one. Shares
