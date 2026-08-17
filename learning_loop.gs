@@ -186,13 +186,30 @@ function generateSopSuggestions() {
     return;
   }
 
-  const examplesText = unreviewedEdits
+  // CAPPED (17 Aug 2026, real incident): this function was designed around a
+  // weekly trickle of a handful of edits, and dumped ALL unreviewed edits
+  // into ONE LLM call with no batching. The first real run found 74 edits
+  // at once (this exact function had never run before today) and the
+  // resulting request -- 1,203,882 tokens -- blew past Kimi's 262,144 limit
+  // and would have blown past any provider's context window regardless of
+  // which one was used; this was never a "wrong provider" problem. Slicing
+  // to a bounded batch per run and leaving the rest for the next run fixes
+  // it regardless of how large the backlog ever gets again.
+  const SOP_SUGGESTIONS_BATCH_SIZE = 15;
+  const deferredCount = Math.max(0, unreviewedEdits.length - SOP_SUGGESTIONS_BATCH_SIZE);
+  const batchEdits = unreviewedEdits.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
+  const batchRowIndexes = rowIndexesToMark.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
+  if (deferredCount > 0) {
+    Logger.log('generateSopSuggestions -- ' + unreviewedEdits.length + ' unreviewed edits found; processing ' + batchEdits.length + ' this run, deferring ' + deferredCount + ' to the next run(s).');
+  }
+
+  const examplesText = batchEdits
     .map((e, idx) => `EXAMPLE ${idx + 1} (category: ${e.category})\n--- AI DRAFTED ---\n${e.original}\n--- JOANA ACTUALLY SENT ---\n${e.final}`)
     .join('\n\n');
 
   const systemPrompt = `You review edited email drafts to find patterns in how a human editor (Joana) changes AI-drafted sales replies, and propose specific, concrete updates to the SOP that produced the drafts. You are NOT rewriting the SOP yourself — you are proposing changes for a human to review and approve. Be specific: quote the actual phrasing pattern you see repeated across edits, don't generalize vaguely. If the edits don't show a clear repeated pattern (e.g. they're all one-off stylistic tweaks with no common thread), say so plainly rather than inventing a pattern.`;
 
-  const userPrompt = `Here are ${unreviewedEdits.length} examples of AI-drafted replies versus what Joana actually sent instead:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested SOP changes. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
+  const userPrompt = `Here are ${batchEdits.length} examples of AI-drafted replies versus what Joana actually sent instead:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested SOP changes. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
 
   const data = callLlmWithFallback(systemPrompt, userPrompt, 2000, 'generateSopSuggestions');
   const textBlock = data.content.find(c => c.type === 'text');
@@ -209,16 +226,16 @@ function generateSopSuggestions() {
   suggestions.forEach(s => {
     suggestionsTab.appendRow([
       new Date(),
-      unreviewedEdits.length,
+      batchEdits.length,
       `[${s.confidence}] ${s.pattern_observed} -> ${s.suggested_change}`,
       'pending',
     ]);
   });
 
   // Mark these rows as reviewed so they don't get re-batched next week
-  rowIndexesToMark.forEach(rowNum => {
+  batchRowIndexes.forEach(rowNum => {
     learningTab.getRange(rowNum, reviewedCol + 1).setValue(true);
   });
 
-  Logger.log('Generated ' + suggestions.length + ' SOP suggestions from ' + unreviewedEdits.length + ' edited examples.');
+  Logger.log('Generated ' + suggestions.length + ' SOP suggestions from ' + batchEdits.length + ' edited examples' + (deferredCount > 0 ? ' (' + deferredCount + ' more deferred to next run).' : '.'));
 }

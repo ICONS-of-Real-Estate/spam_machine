@@ -1180,13 +1180,27 @@ function summarizeFollowUpLearning() {
     return;
   }
 
-  const examplesText = edits
+  // CAPPED (17 Aug 2026, real incident): same fix as generateSopSuggestions()
+  // in learning_loop.gs -- dumping ALL unreviewed edits into one LLM call
+  // has no ceiling and will eventually exceed any provider's context window
+  // (confirmed there: 74 edits at once produced a 1.2M-token request against
+  // Kimi's 262K limit). Bounding the batch here too, before this cadence
+  // ever accumulates a large enough backlog to hit the same wall.
+  const SOP_SUGGESTIONS_BATCH_SIZE = 15;
+  const deferredCount = Math.max(0, edits.length - SOP_SUGGESTIONS_BATCH_SIZE);
+  const batchEdits = edits.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
+  const batchRowIndexes = rowIndexesToMark.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
+  if (deferredCount > 0) {
+    Logger.log('summarizeFollowUpLearning -- ' + edits.length + ' unreviewed edits found; processing ' + batchEdits.length + ' this run, deferring ' + deferredCount + ' to the next run(s).');
+  }
+
+  const examplesText = batchEdits
     .map((e, idx) => `EXAMPLE ${idx + 1} (cadence: ${e.cadence}, step: ${e.step})\n--- AI DRAFTED ---\n${e.drafted}\n--- GOODNESS ACTUALLY SENT ---\n${e.sent}`)
     .join('\n\n');
 
   const systemPrompt = `You review edited email follow-up drafts to find patterns in how a human editor changes AI-drafted follow-up emails, and propose specific, concrete updates to the "## FOLLOW-UP DRAFTING" section of the SOP that produced them. You are NOT rewriting the SOP yourself -- you propose changes for a human to review and approve. Be specific: quote the actual phrasing pattern repeated across edits, don't generalize vaguely. If the edits show no clear repeated pattern (all one-off stylistic tweaks with no common thread), say so plainly rather than inventing a pattern.`;
 
-  const userPrompt = `Here are ${edits.length} examples of AI-drafted follow-up emails versus what the human editor actually sent:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested changes to the FOLLOW-UP DRAFTING section. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
+  const userPrompt = `Here are ${batchEdits.length} examples of AI-drafted follow-up emails versus what the human editor actually sent:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested changes to the FOLLOW-UP DRAFTING section. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
 
   const data = callLlmWithFallback(systemPrompt, userPrompt, 2000, 'summarizeFollowUpLearning');
   const textBlock = data.content.find(c => c.type === 'text');
@@ -1206,7 +1220,7 @@ function summarizeFollowUpLearning() {
   suggestions.forEach(s => {
     suggestionsTab.appendRow([
       new Date(),
-      edits.length,
+      batchEdits.length,
       '[FOLLOW-UP][' + s.confidence + '] ' + s.pattern_observed + ' -> ' + s.suggested_change,
       'pending'
     ]);
@@ -1219,11 +1233,11 @@ function summarizeFollowUpLearning() {
     logTab.getRange(1, headers.length + 1).setValue('Reviewed For SOP');
     reviewedColIndex = headers.length;
   }
-  rowIndexesToMark.forEach(rowNum => {
+  batchRowIndexes.forEach(rowNum => {
     logTab.getRange(rowNum, reviewedColIndex + 1).setValue(true);
   });
 
-  Logger.log('summarizeFollowUpLearning -- generated ' + suggestions.length + ' FOLLOW-UP SOP suggestion(s) from ' + edits.length + ' edited example(s). Review them in the "SOP Suggestions" tab.');
+  Logger.log('summarizeFollowUpLearning -- generated ' + suggestions.length + ' FOLLOW-UP SOP suggestion(s) from ' + batchEdits.length + ' edited example(s)' + (deferredCount > 0 ? ' (' + deferredCount + ' more deferred to next run)' : '') + '. Review them in the "SOP Suggestions" tab.');
 }
 
 // Quick read-only status check: how many drafts in THIS Gmail account belong
