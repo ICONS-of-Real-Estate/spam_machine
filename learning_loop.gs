@@ -195,7 +195,7 @@ function generateSopSuggestions() {
   // which one was used; this was never a "wrong provider" problem. Slicing
   // to a bounded batch per run and leaving the rest for the next run fixes
   // it regardless of how large the backlog ever gets again.
-  const SOP_SUGGESTIONS_BATCH_SIZE = 15;
+  const SOP_SUGGESTIONS_BATCH_SIZE = 5; // start small, verify quality, raise later once trusted
   const deferredCount = Math.max(0, unreviewedEdits.length - SOP_SUGGESTIONS_BATCH_SIZE);
   const batchEdits = unreviewedEdits.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
   const batchRowIndexes = rowIndexesToMark.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);

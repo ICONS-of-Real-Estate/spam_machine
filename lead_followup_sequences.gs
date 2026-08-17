@@ -1186,7 +1186,7 @@ function summarizeFollowUpLearning() {
   // (confirmed there: 74 edits at once produced a 1.2M-token request against
   // Kimi's 262K limit). Bounding the batch here too, before this cadence
   // ever accumulates a large enough backlog to hit the same wall.
-  const SOP_SUGGESTIONS_BATCH_SIZE = 15;
+  const SOP_SUGGESTIONS_BATCH_SIZE = 5; // start small, verify quality, raise later once trusted
   const deferredCount = Math.max(0, edits.length - SOP_SUGGESTIONS_BATCH_SIZE);
   const batchEdits = edits.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
   const batchRowIndexes = rowIndexesToMark.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
