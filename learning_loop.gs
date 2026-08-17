@@ -80,6 +80,7 @@ function runLearningLoopInner() {
 
   const draftRows = draftsTab.getDataRange().getValues();
   const headers = draftRows[0];
+  const timestampCol = headers.indexOf('Timestamp');
   const threadIdCol = headers.indexOf('Thread ID');
   const subjectCol = headers.indexOf('Subject');
   const categoryCol = headers.indexOf('Category');
@@ -100,7 +101,19 @@ function runLearningLoopInner() {
     }
     if (!thread) continue;
 
-    const sentReply = findSentReplyAfterDraft(thread);
+    // FIX (18 Aug 2026, real incident): findSentReplyAfterDraft() relied on
+    // isDraft() to skip the still-unsent draft itself, but that
+    // misidentified an unsent createThreadedDraft_() draft (Nancy's Hawaii
+    // thread, confirmed live -- still just one unsent draft in Gmail while
+    // the "sent reply" already showed up in Learning Log) as a genuine sent
+    // reply. Root cause is likely isDraft() not reliably recognizing drafts
+    // created via the Advanced Gmail API (raw MIME) the same way it
+    // recognizes GmailApp.createDraft() ones. Rather than chase that
+    // compatibility gap, guard with a fact that can't be wrong regardless of
+    // cause: a genuine sent reply can only have a timestamp AFTER the draft
+    // was created.
+    const draftCreatedAt = row[timestampCol];
+    const sentReply = findSentReplyAfterDraft(thread, draftCreatedAt);
     if (!sentReply) continue; // Joana hasn't sent it yet — check again tomorrow
 
     const draftText = row[draftTextCol];
@@ -124,11 +137,19 @@ function runLearningLoopInner() {
   Logger.log('Learning loop run complete. Newly compared: ' + compared);
 }
 
-function findSentReplyAfterDraft(thread) {
+function findSentReplyAfterDraft(thread, draftCreatedAt) {
   const messages = thread.getMessages();
   // Look from the end for a message sent by our own account (i.e. Joana actually replied)
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].isDraft && messages[i].isDraft()) continue;
+    // PRIMARY GUARD (18 Aug 2026, real incident): isDraft() alone isn't
+    // trustworthy for drafts created via the Advanced Gmail API (see the
+    // real incident noted at the call site) -- it let an unsent draft
+    // through and got logged as a "sent reply" that was never actually
+    // sent. A message that predates the draft it's supposedly replying to
+    // cannot possibly be the real sent reply, so this check catches that
+    // case even when isDraft() is wrong.
+    if (draftCreatedAt && messages[i].getDate().getTime() <= new Date(draftCreatedAt).getTime()) continue;
     const from = messages[i].getFrom().toLowerCase();
     const isOwnAccount = CONFIG.INTERNAL_DOMAINS.some(d => from.indexOf('@' + d) !== -1);
     // Heuristic: it's a genuine sent reply if it's from an internal address
