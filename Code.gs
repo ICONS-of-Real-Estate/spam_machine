@@ -92,6 +92,16 @@ const CONFIG = {
 
   LABEL_AI_DRAFTED: 'AI-Drafted-PendingReview',
   LABEL_NEEDS_ROUTING: 'AI-NeedsTeammateRouting',
+
+  // ADDED (17 Aug 2026): a thread where a real human already sent the last
+  // reply directly (bypassing the AI entirely) is NOT the same state as
+  // "AI-Drafted-PendingReview" -- there's no draft to review here. Using
+  // the drafted label for this would be actively misleading (implies a
+  // draft exists when it doesn't) on top of being functionally wrong (it's
+  // meant to signal review is needed). This is its own label so these
+  // threads (a) stop reappearing in the search every run, and (b) stay
+  // honestly distinguishable from real AI drafts for anyone auditing later.
+  LABEL_ALREADY_ANSWERED_BY_TEAM: 'AI-Skipped-AlreadyAnsweredByTeam',
   LABEL_PRIORITY: '0. PRIORITY - Reply First', // ADDED 13 Aug 2026 -- label already exists in Gmail
 
   // Only ever act on threads CC'd to the network group -- this is the
@@ -178,7 +188,7 @@ function setup() {
     }
   });
 
-  [CONFIG.LABEL_AI_DRAFTED, CONFIG.LABEL_NEEDS_ROUTING].forEach(name => {
+  [CONFIG.LABEL_AI_DRAFTED, CONFIG.LABEL_NEEDS_ROUTING, CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM].forEach(name => {
     if (!GmailApp.getUserLabelByName(name)) {
       GmailApp.createLabel(name);
       Logger.log('Created internal tracking label: ' + name);
@@ -273,6 +283,7 @@ function runReplyDrafterInner() {
   const labelStop = getOrWarnLabel(CONFIG.LABEL_STOP);
   const labelDrafted = GmailApp.getUserLabelByName(CONFIG.LABEL_AI_DRAFTED);
   const labelNeedsRouting = GmailApp.getUserLabelByName(CONFIG.LABEL_NEEDS_ROUTING);
+  const labelAlreadyAnsweredByTeam = getOrWarnLabel(CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM);
 
   const systemPrompt = buildSystemPrompt();
   const stateDirectory = loadStateDirectory();
@@ -280,7 +291,7 @@ function runReplyDrafterInner() {
   const addressClauses = CONFIG.REQUIRED_CC_ADDRESSES
     .map(addr => 'to:"' + addr + '" OR cc:"' + addr + '"')
     .join(' OR ');
-  const searchQuery = '(' + addressClauses + ') newer_than:3d -label:"' + CONFIG.LABEL_AI_DRAFTED + '" -label:"' + CONFIG.LABEL_STOP + '"';
+  const searchQuery = '(' + addressClauses + ') newer_than:3d -label:"' + CONFIG.LABEL_AI_DRAFTED + '" -label:"' + CONFIG.LABEL_STOP + '" -label:"' + CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM + '"';
   const threads = GmailApp.search(searchQuery, 0, 200);
 
   Logger.log('DIAGNOSTIC -- search query: ' + searchQuery);
@@ -322,7 +333,8 @@ function runReplyDrafterInner() {
 
     const lastSenderEmail = extractEmail(lastMsg.getFrom());
     if (isRealTeamReply(lastSenderEmail)) {
-      Logger.log('DIAGNOSTIC -- skipped (already answered by ' + lastSenderEmail + '): ' + subject);
+      if (labelAlreadyAnsweredByTeam) thread.addLabel(labelAlreadyAnsweredByTeam);
+      Logger.log('DIAGNOSTIC -- skipped (already answered by ' + lastSenderEmail + '), labeled so it stops reappearing: ' + subject);
       continue;
     }
 
