@@ -783,9 +783,16 @@ function lastNonDraftMessage_(messages) {
 // created as a raw MIME message with an explicit threadId AND full control
 // over To/In-Reply-To/References -- both correct simultaneously.
 //
-// REQUIRES the Gmail API advanced service enabled once in the Apps Script
-// editor itself (Services > + > Gmail API), in addition to the manifest
-// entry -- pulling the manifest change alone may not be enough. If this
+// REQUIRES the Gmail API advanced service enabled in the Apps Script editor
+// itself: Services (+ icon in the sidebar) > Gmail API > Add. This is a
+// MANUAL, UI-ONLY step -- appsscript.json's dependencies.enabledAdvancedServices
+// field (the normal way to declare this in code) was tried and reverted
+// (17 Aug 2026) because it broke the project's Git Pull entirely -- the
+// sync tool threw "Cannot read properties of undefined (reading 'forEach')"
+// on every pull attempt with that field present. Adding the service via the
+// UI enables it on the live project directly and does NOT require (or
+// write back into) the committed manifest, so this gap is permanent, not
+// a temporary workaround to later "do properly" via the manifest. If this
 // throws "Gmail is not defined," that's the first thing to check.
 //
 // UNTESTED AGAINST A LIVE ACCOUNT as of this commit -- I have no way to
