@@ -165,12 +165,11 @@ const CONFIG = {
   // Kris wants smaller batches again (10 at a time) for rapid review
   // feedback, not because the code couldn't reach 50.
   //
-  // DROPPED to 1 (17 Aug 2026, same day): testing createThreadedDraft_()
-  // (the new in-thread reply fix) against a live account for the first
-  // time. One real thread, manually checked in Gmail, before trusting the
-  // Advanced Gmail API call at any real volume. Raise back once confirmed
-  // it actually nests in the original thread.
-  MAX_DRAFTS_PER_RUN: 1,
+  // RAISED to 10 (17 Aug 2026, same day): the cap-1 test confirmed
+  // createThreadedDraft_() nests correctly in the original thread (Nancy's
+  // draft, verified live in Gmail). Stepping up to 10 next per the same
+  // incremental-trust pattern used earlier in the session.
+  MAX_DRAFTS_PER_RUN: 10,
 
   // SWITCHED (17 Aug 2026): Kimi is now the PRIMARY model (via Moonshot's
   // Anthropic-compatible endpoint), Anthropic is the automatic fallback --
