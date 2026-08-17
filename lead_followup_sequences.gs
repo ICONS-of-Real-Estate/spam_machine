@@ -79,6 +79,21 @@
 const PODCAST_SALES_QUEUE_TAB = 'Podcast Sales Follow-Up Queue';
 const HUB_GUEST_QUEUE_TAB = 'Hub Guest Follow-Up Queue';
 const BENS_CALL_LIST_TAB_V2 = 'Bens Call List';
+const NEEDS_CLASSIFICATION_REVIEW_TAB = 'Needs Classification Review';
+
+// SAFETY NET (17 Aug 2026, real incident): classifyAndDraft() in Code.gs
+// sometimes assigns no_decline to a reply that's actually a scheduling
+// constraint or an info request -- exactly the mistake that caused
+// Montell/Mariann/Mumu to get drafted as declines. The system prompt now
+// reinforces the SOP's own distinction more forcefully, but an LLM
+// judgment call can still be wrong on a given reply, so this is a
+// deterministic second check specifically gating what's allowed to enter
+// the automated Hub Guest follow-up cadence: if a no_decline reply
+// contains one of these signal phrases, don't trust the classification --
+// route it to a human instead of silently enrolling it. This does not
+// touch classifyAndDraft() itself or the direct reply already drafted;
+// it only gates whether THIS cadence acts on that category automatically.
+const AMBIGUOUS_NO_DECLINE_SIGNALS = /(send (me |)(the |)(info|information|framework|details|samples)|tell me more|know more about|what('s| is) involved|how (does|would) (this|it) work|not (right now|available) (this week|today|right now)\b|maybe (later|next|in a) (week|month)|can we (talk|chat|discuss) (later|next)|too (busy|swamped) (this|right now)|out of (town|office) (this week|until)|reach (me|out) (again|later)|circle back|touch base (later|next))/i;
 const FOLLOWUP_LEARNING_LOG_TAB = 'Follow-Up Learning Log';
 const FOLLOWUP_WORKING_DAYS_GAP = 2;
 const FOLLOWUP_DEEP_DIVE_LOOKBACK_DAYS = 270;
@@ -734,6 +749,7 @@ function registerNewHubGuestInvites(lookbackDaysOverride) {
   const draftsData = draftsLogTab.getDataRange().getValues().slice(1);
   const stateDirectory = loadStateDirectory();
   let enrolled = 0;
+  const ambiguousFlags = []; // accumulated for ONE batched alert at the end, not one email per lead
 
   draftsData.forEach(row => {
     const [timestamp, threadId, subject] = row;
@@ -780,8 +796,21 @@ function registerNewHubGuestInvites(lookbackDaysOverride) {
       return;
     }
 
-    const name = extractNameFromSubject(subject) || 'there';
     const originalReplyMsg = messages[0];
+
+    // SAFETY NET (17 Aug 2026, real incident): re-scan the prospect's ACTUAL
+    // original reply text (not the AI's drafted reply) before trusting a
+    // no_decline classification enough to auto-enroll it. See
+    // AMBIGUOUS_NO_DECLINE_SIGNALS above for why.
+    const prospectReplyText = extractProspectFreshReplyText(originalReplyMsg);
+    if (AMBIGUOUS_NO_DECLINE_SIGNALS.test(prospectReplyText)) {
+      Logger.log('registerNewHubGuestInvites -- SKIPPED (ambiguous no_decline, looks like a scheduling constraint or info request -- flagged for human review instead): ' + threadId + ' -- "' + prospectReplyText.slice(0, 200) + '"');
+      const wasNew = flagAmbiguousNoDeclineForReview(threadId, subject, realEmail, prospectReplyText);
+      if (wasNew) ambiguousFlags.push({ threadId: threadId, subject: subject, email: realEmail, excerpt: prospectReplyText.slice(0, 200) });
+      return;
+    }
+
+    const name = extractNameFromSubject(subject) || 'there';
     const originalReplyTime = originalReplyMsg.getDate();
 
     queueTab.appendRow([
@@ -794,7 +823,43 @@ function registerNewHubGuestInvites(lookbackDaysOverride) {
     enrolled++;
   });
 
-  Logger.log('registerNewHubGuestInvites complete. Enrolled ' + enrolled + ' new lead(s).');
+  Logger.log('registerNewHubGuestInvites complete. Enrolled ' + enrolled + ' new lead(s), flagged ' + ambiguousFlags.length + ' ambiguous no_decline(s) for review.');
+
+  if (ambiguousFlags.length > 0) {
+    const lines = ambiguousFlags
+      .map(f => '- "' + f.subject + '" (' + f.email + '): "' + f.excerpt + '" -- https://mail.google.com/mail/u/0/#all/' + f.threadId)
+      .join('\n');
+    sendOpsAlert(
+      ambiguousFlags.length + ' ambiguous no_decline(s) need a human look',
+      'classifyAndDraft() categorized these as no_decline, but the prospect\'s actual reply looks like it might be a ' +
+      'scheduling constraint or info request instead of a real decline -- exactly the pattern that caused ' +
+      'Montell/Mariann/Mumu to get drafted as declines earlier. Registration into the Hub Guest follow-up queue was ' +
+      'skipped for all of these; logged in the "' + NEEDS_CLASSIFICATION_REVIEW_TAB + '" tab for a manual check:\n\n' + lines
+    );
+  }
+}
+
+// Logs an ambiguous no_decline to the review tab, deduped by Thread ID.
+// Returns true if this was a NEW flag (caller batches these into one
+// summary alert rather than emailing per-lead), false if already logged.
+function flagAmbiguousNoDeclineForReview(threadId, subject, email, replyExcerpt) {
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  let tab = ss.getSheetByName(NEEDS_CLASSIFICATION_REVIEW_TAB);
+  if (!tab) {
+    tab = ss.insertSheet(NEEDS_CLASSIFICATION_REVIEW_TAB);
+    tab.appendRow(['Flagged At', 'Thread ID', 'Subject', 'Prospect Email', 'Prospect Reply Excerpt', 'Thread Link', 'Status (pending/confirmed_decline/actually_interested)']);
+  }
+
+  const alreadyFlagged = new Set(
+    tab.getDataRange().getValues().slice(1).map(row => row[1])
+  );
+  if (alreadyFlagged.has(threadId)) return false;
+
+  tab.appendRow([
+    new Date(), threadId, subject, email, replyExcerpt.slice(0, 500),
+    'https://mail.google.com/mail/u/0/#all/' + threadId, 'pending'
+  ]);
+  return true;
 }
 
 // ---------- DRAFT CAP HELPER ----------
