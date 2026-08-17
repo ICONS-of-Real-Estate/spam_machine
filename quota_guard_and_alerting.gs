@@ -120,7 +120,14 @@ function callLlmWithFallback(systemPrompt, userPrompt, maxTokens, callerLabel) {
       'https://api.moonshot.ai/anthropic/v1/messages',
       { 'Authorization': 'Bearer ' + kimiKey },
       CONFIG.MODEL,
-      systemPrompt, userPrompt, maxTokens
+      systemPrompt, userPrompt, maxTokens,
+      // kimi-k2.6 defaults to "Thinking" mode -- visible chain-of-thought that
+      // counts against max_tokens. Confirmed in production (17 Aug 2026): every
+      // call came back stop_reason: max_tokens, content types: ["thinking"],
+      // with NO text block at all -- the model spent the entire budget
+      // reasoning and never got to write the actual answer. This task only
+      // needs the direct JSON output, so thinking mode is switched off.
+      { thinking: { type: 'disabled' } }
     );
     if (kimiResult.ok) return kimiResult.data;
     Logger.log(callerLabel + ' -- Kimi call failed, falling back to Anthropic: ' + kimiResult.error);
@@ -148,25 +155,46 @@ function callLlmWithFallback(systemPrompt, userPrompt, maxTokens, callerLabel) {
   throw new Error(callerLabel + ': both Kimi and Anthropic calls failed -- see execution log and the ops alert email for details.');
 }
 
-function attemptLlmCall_(url, headers, model, systemPrompt, userPrompt, maxTokens) {
+function attemptLlmCall_(url, headers, model, systemPrompt, userPrompt, maxTokens, extraPayloadFields) {
   try {
+    const payload = Object.assign({
+      model: model,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }],
+    }, extraPayloadFields || {});
+
     const response = UrlFetchApp.fetch(url, {
       method: 'post',
       contentType: 'application/json',
       headers: headers,
-      payload: JSON.stringify({
-        model: model,
-        max_tokens: maxTokens,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userPrompt }],
-      }),
+      payload: JSON.stringify(payload),
       muteHttpExceptions: true,
     });
 
     if (response.getResponseCode() !== 200) {
       return { ok: false, error: 'HTTP ' + response.getResponseCode() + ': ' + response.getContentText() };
     }
-    return { ok: true, data: JSON.parse(response.getContentText('UTF-8')) };
+
+    const data = JSON.parse(response.getContentText('UTF-8'));
+
+    // FIX (17 Aug 2026): a 200 response is not the same as a USABLE response --
+    // this is exactly how the thinking-mode bug above slipped past the fallback
+    // entirely last time. A response with no text content block (e.g. it hit
+    // max_tokens mid-"thinking" and never wrote an answer) must count as a
+    // failure here so the caller actually falls back to the other provider,
+    // instead of handing back content-free "success" that only fails later,
+    // downstream, after the fallback chance is already gone.
+    const hasTextBlock = (data.content || []).some(c => c.type === 'text');
+    if (!hasTextBlock) {
+      return {
+        ok: false,
+        error: 'no usable text block in response (stop_reason: ' + data.stop_reason +
+          ', content types: ' + JSON.stringify((data.content || []).map(c => c.type)) + ')'
+      };
+    }
+
+    return { ok: true, data: data };
   } catch (e) {
     return { ok: false, error: String(e) };
   }
