@@ -412,11 +412,13 @@ function runReplyDrafterInner() {
     }
 
     try {
-      const aiReplyPlain = sanitizeEmojiForGmail(markdownLinksToPlain(result.draftBody));
+      const priorityNote = buildPriorityCheckNote(result);
+      const aiReplyPlain = priorityNote + sanitizeEmojiForGmail(markdownLinksToPlain(result.draftBody));
       const historyPlain = stripForwardHeaderKeepHistory(lastMsg.getPlainBody());
       const fullPlainBody = aiReplyPlain + '\n\n' + historyPlain;
 
-      const aiReplyHtml = emojiToHtmlEntities(sanitizeEmojiForGmail(markdownLinksToHtml(result.draftBody)));
+      const priorityNoteHtml = escapeHtml(priorityNote).replace(/\n/g, '<br>');
+      const aiReplyHtml = priorityNoteHtml + emojiToHtmlEntities(sanitizeEmojiForGmail(markdownLinksToHtml(result.draftBody)));
       const historyHtml = emojiToHtmlEntities(escapeHtml(historyPlain).replace(/\n/g, '<br>'));
       const fullHtmlBody = aiReplyHtml + '<br><br>' + historyHtml;
 
@@ -735,6 +737,17 @@ function commitNoDeclineVariation(index) {
   PropertiesService.getScriptProperties().setProperty('NO_DECLINE_VARIATION_INDEX', String(index));
 }
 
+// ADDED (17 Aug 2026): a Gmail label can't hold free text -- it's a fixed,
+// reused tag, not a per-thread note -- so this is the only way to actually
+// show Joana WHY the AI did or didn't flag priority, right where she's
+// already looking (the draft itself), instead of a silent binary label.
+// Mirrors the existing buildSchedulingNote() pattern in
+// lead_followup_sequences.gs (bracketed, marked DELETE BEFORE SENDING).
+function buildPriorityCheckNote(result) {
+  return '[AI PRIORITY CHECK FOR JOANA -- DELETE THIS LINE BEFORE SENDING: flagged as ' +
+    (result.priority ? 'PRIORITY' : 'not priority') + '. AI reasoning: ' + result.reasoning + ']\n\n';
+}
+
 function classifyAndDraft(systemPrompt, subject, threadContext, prospectEmail, state, matchedShow) {
   const candidateVariation = peekNoDeclineVariation();
 
@@ -792,6 +805,13 @@ Set "priority" to true ONLY when the prospect shows clear, immediate buying inte
     category: parsed.category,
     needsTeammateRouting: !!parsed.needs_teammate_routing,
     priority: !!parsed.priority,
+    // ADDED (17 Aug 2026): the model was already asked for this (see the
+    // userPrompt schema above) but it was silently discarded here. Kris
+    // wants to see WHY priority was/wasn't flagged on each draft, right in
+    // the draft itself, so misses (like Star's -- clear "would tomorrow or
+    // Monday work?" availability that should have been flagged and wasn't)
+    // are visible immediately during review instead of only found by luck.
+    reasoning: parsed.reasoning || '(no reasoning given)',
     draftBody: parsed.draft_body,
     candidateVariationIndex: candidateVariation.index,
   };
