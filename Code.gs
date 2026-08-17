@@ -278,6 +278,84 @@ function ensureLogSheetExists() {
     suggestionsTab = ss.insertSheet('SOP Suggestions');
     suggestionsTab.appendRow(['Generated At', 'Based On N Edits', 'Suggested Change', 'Status (pending/approved/rejected)']);
   }
+
+  ensureSkipCacheTabExists(ss);
+}
+
+// ---------- SKIP CACHE (17 Aug 2026, real incident) ----------
+//
+// PROBLEM THIS SOLVES: LABEL_ALREADY_ANSWERED_BY_TEAM and
+// LABEL_SUBJECT_MISMATCH permanently exclude a thread from future search
+// results -- safe ONLY because both describe facts that literally cannot
+// change (a human already sent a real reply; a subject line is immutable).
+// But several other skip reasons -- not CC'd to network on the last
+// message, a draft already exists for this lead, classification/drafting
+// failed, forwarded-lead info couldn't be parsed -- describe the thread's
+// CURRENT state, which genuinely CAN change (a new message arrives, a
+// draft gets deleted, a transient LLM hiccup resolves). Permanently
+// excluding those would risk silently orphaning a lead the moment its
+// state changes, same failure mode already fixed twice today.
+//
+// So instead of a permanent label, these get a TIME-BOUNDED cache: a
+// thread hitting one of these skip reasons is recorded with a timestamp,
+// and won't be re-fetched/re-checked until SKIP_CACHE_TTL_HOURS has
+// passed. At a 5-minute trigger cadence, that cuts ~72 redundant
+// re-checks down to 1 for any thread stuck in one of these states,
+// while still guaranteeing it gets a fresh look within the TTL window if
+// something actually changed. Stored in its own tab (not Script
+// Properties) since it can hold hundreds of rows -- Script Properties
+// has a ~9KB per-value / ~500KB total cap that a large cache would blow
+// through.
+const SKIP_CACHE_TAB = 'Skip Cache';
+const SKIP_CACHE_TTL_HOURS = 6;
+
+function ensureSkipCacheTabExists(ss) {
+  let tab = ss.getSheetByName(SKIP_CACHE_TAB);
+  if (!tab) {
+    tab = ss.insertSheet(SKIP_CACHE_TAB);
+    tab.appendRow(['Thread ID', 'Skip Reason', 'Last Checked At']);
+  }
+  return tab;
+}
+
+// Read once at the top of a run (not per-thread) -- this is a Sheets read,
+// not a Gmail call, and cheap regardless of row count compared to what
+// it's replacing (repeated GmailApp.getMessages() calls).
+function loadSkipCache(ss) {
+  const tab = ensureSkipCacheTabExists(ss);
+  const values = tab.getDataRange().getValues();
+  const map = {};
+  for (let i = 1; i < values.length; i++) {
+    const threadId = values[i][0];
+    const reason = values[i][1];
+    const lastCheckedAt = values[i][2];
+    if (threadId && lastCheckedAt instanceof Date) {
+      map[threadId] = { reason: reason, lastCheckedAt: lastCheckedAt };
+    }
+  }
+  return map;
+}
+
+function isSkipCacheFresh_(entry) {
+  if (!entry) return false;
+  const ageHours = (Date.now() - entry.lastCheckedAt.getTime()) / (1000 * 60 * 60);
+  return ageHours < SKIP_CACHE_TTL_HOURS;
+}
+
+// Rewrites the whole tab in one batch write from the in-memory map built up
+// during the run -- far cheaper than updating a row per skip as it happens
+// (that would be one Sheets API call per skip, same class of problem this
+// cache exists to avoid). This tab is pure cache with no human-readable
+// history value, so a full overwrite each run is safe.
+function saveSkipCache(ss, cacheMap) {
+  const tab = ensureSkipCacheTabExists(ss);
+  const rows = Object.keys(cacheMap).map(threadId =>
+    [threadId, cacheMap[threadId].reason, cacheMap[threadId].lastCheckedAt]
+  );
+
+  const lastRow = tab.getLastRow();
+  if (lastRow > 1) tab.getRange(2, 1, lastRow - 1, 3).clearContent();
+  if (rows.length > 0) tab.getRange(2, 1, rows.length, 3).setValues(rows);
 }
 
 // ---------- MAIN ENTRY POINT ----------
@@ -325,6 +403,9 @@ function runReplyDrafterInner() {
   const labelNeedsRouting = GmailApp.getUserLabelByName(CONFIG.LABEL_NEEDS_ROUTING);
   const labelAlreadyAnsweredByTeam = getOrWarnLabel(CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM);
   const labelSubjectMismatch = getOrWarnLabel(CONFIG.LABEL_SUBJECT_MISMATCH);
+
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const skipCache = loadSkipCache(ss);
 
   const systemPrompt = buildSystemPrompt();
   const stateDirectory = loadStateDirectory();
@@ -410,17 +491,31 @@ function runReplyDrafterInner() {
       continue;
     }
 
+    // CACHE CHECK (17 Aug 2026, real incident): also before the expensive
+    // getMessages() fetch. If this thread hit a state-dependent skip
+    // reason recently (see the "SKIP CACHE" block above), don't redo the
+    // expensive check yet -- but unlike the subject-mismatch label above,
+    // this expires, so the thread gets a fresh look once the TTL passes.
+    const threadId = thread.getId();
+    const cacheEntry = skipCache[threadId];
+    if (isSkipCacheFresh_(cacheEntry)) {
+      Logger.log('DIAGNOSTIC -- skipped (cached ' + Math.round((Date.now() - cacheEntry.lastCheckedAt.getTime()) / 60000) + 'm ago: ' + cacheEntry.reason + '): ' + subject);
+      continue;
+    }
+
     const messages = thread.getMessages();
     const lastMsg = lastNonDraftMessage_(messages) || messages[messages.length - 1];
 
     if (!isCcdToNetworkGroup(lastMsg)) {
-      Logger.log('DIAGNOSTIC -- skipped (not CC-d to network on last message): ' + subject);
+      skipCache[threadId] = { reason: 'not CC-d to network on last message', lastCheckedAt: new Date() };
+      Logger.log('DIAGNOSTIC -- skipped (not CC-d to network on last message), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
       continue;
     }
 
     const lastSenderEmail = extractEmail(lastMsg.getFrom());
     if (isRealTeamReply(lastSenderEmail)) {
       if (labelAlreadyAnsweredByTeam) thread.addLabel(labelAlreadyAnsweredByTeam);
+      delete skipCache[threadId]; // now permanently excluded via label -- any earlier cache entry is moot
       Logger.log('DIAGNOSTIC -- skipped (already answered by ' + lastSenderEmail + '), labeled so it stops reappearing: ' + subject);
       continue;
     }
@@ -442,7 +537,8 @@ function runReplyDrafterInner() {
     } else {
       const forwardInfo = extractForwardedLeadInfo(lastMsg);
       if (!forwardInfo) {
-        Logger.log('Could not parse forwarded lead info for: ' + subject + ' -- skipping rather than guessing.');
+        skipCache[threadId] = { reason: 'could not parse forwarded lead info', lastCheckedAt: new Date() };
+        Logger.log('Could not parse forwarded lead info for: ' + subject + ' -- skipping rather than guessing, cached for ' + SKIP_CACHE_TTL_HOURS + 'h.');
         continue;
       }
       leadEmail = forwardInfo.email;
@@ -450,7 +546,8 @@ function runReplyDrafterInner() {
     }
 
     if (draftedThisRun.has(leadEmail.toLowerCase()) || draftAlreadyExistsFor(leadEmail)) {
-      Logger.log('DIAGNOSTIC -- skipped (draft already exists for ' + leadEmail + '): ' + subject);
+      skipCache[threadId] = { reason: 'draft already exists for ' + leadEmail, lastCheckedAt: new Date() };
+      Logger.log('DIAGNOSTIC -- skipped (draft already exists for ' + leadEmail + '), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
       continue;
     }
 
@@ -460,6 +557,7 @@ function runReplyDrafterInner() {
     if (alreadyLabeledStop || OPT_OUT_PATTERNS.test(replyBody)) {
       if (labelStop && !alreadyLabeledStop) thread.addLabel(labelStop);
       thread.addLabel(labelDrafted);
+      delete skipCache[threadId]; // now permanently excluded via label -- any earlier cache entry is moot
       Logger.log('Suppressed (opt-out): ' + subject + ' <' + leadEmail + '>');
       processed++;
       continue;
@@ -467,6 +565,7 @@ function runReplyDrafterInner() {
 
     if (AUTOREPLY_PATTERNS.test(replyBody)) {
       thread.addLabel(labelDrafted);
+      delete skipCache[threadId];
       Logger.log('Suppressed (auto-reply/OOO, not a real reply): ' + subject + ' <' + leadEmail + '>');
       processed++;
       continue;
@@ -479,7 +578,8 @@ function runReplyDrafterInner() {
     const result = classifyAndDraft(systemPrompt, subject, context, leadEmail, state, matchedShow);
 
     if (!result) {
-      Logger.log('Classification/draft failed for: ' + subject);
+      skipCache[threadId] = { reason: 'classification/draft failed', lastCheckedAt: new Date() };
+      Logger.log('Classification/draft failed for: ' + subject + ', cached for ' + SKIP_CACHE_TTL_HOURS + 'h.');
       continue;
     }
 
@@ -506,6 +606,7 @@ function runReplyDrafterInner() {
       var draftLink = 'https://mail.google.com/mail/u/0/#all/' + createdDraft.getMessage().getId();
       draftedThisRun.add(leadEmail.toLowerCase());
       draftsCreated++;
+      delete skipCache[threadId]; // now permanently excluded via LABEL_AI_DRAFTED below -- any earlier cache entry is moot
     } catch (e) {
       Logger.log('Draft creation failed for ' + subject + ': ' + e);
       continue;
@@ -535,6 +636,7 @@ function runReplyDrafterInner() {
     pageStart += PAGE_SIZE;
   }
 
+  saveSkipCache(ss, skipCache);
   Logger.log('Run complete. Threads processed: ' + processed + ', drafts created: ' + draftsCreated);
 }
 
