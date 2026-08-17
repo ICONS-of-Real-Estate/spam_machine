@@ -607,11 +607,12 @@ function runReplyDrafterInner() {
       const fullHtmlBody = aiReplyHtml + '<br><br>' + historyHtml;
 
       const cleanSubject = (originalSubjectFromForward || subject).replace(/^(fwd:\s*)+/i, '').trim();
-      const createdDraft = GmailApp.createDraft(leadEmail, cleanSubject, fullPlainBody, {
-        htmlBody: fullHtmlBody,
-        cc: CONFIG.NETWORK_CC_ON_REPLY
-      });
-      var draftLink = 'https://mail.google.com/mail/u/0/#all/' + createdDraft.getMessage().getId();
+      // FIX (17 Aug 2026, real incident -- Joana's top-priority, repeatedly
+      // flagged complaint): GmailApp.createDraft() composed a brand-new,
+      // unthreaded message every time. See createThreadedDraft_() above for
+      // the full history and why the base service can't do this correctly.
+      createThreadedDraft_(thread, lastMsg, leadEmail, CONFIG.NETWORK_CC_ON_REPLY, cleanSubject, fullPlainBody, fullHtmlBody);
+      var draftLink = 'https://mail.google.com/mail/u/0/#all/' + thread.getId();
       draftedThisRun.add(leadEmail.toLowerCase());
       draftsCreated++;
       delete skipCache[threadId]; // now permanently excluded via LABEL_AI_DRAFTED below -- any earlier cache entry is moot
@@ -752,6 +753,86 @@ function lastNonDraftMessage_(messages) {
     return messages[i];
   }
   return null;
+}
+
+// ---------- THREADED DRAFT CREATION (17 Aug 2026, real incident) ----------
+//
+// PROBLEM THIS SOLVES: Joana's most-repeated, highest-priority feedback --
+// "drafts land as a new blank thread, not a reply on the original thread."
+// Root cause: GmailApp.createDraft() composes a brand-new message with no
+// concept of an existing thread at all; it only ever LOOKS threaded if
+// Gmail's own subject-matching heuristic happens to notice the similarity
+// and merge it, which is exactly the gamble that's been failing.
+//
+// The base service's alternative, message.createDraftReply(), DOES thread
+// correctly, but always replies to the ORIGINAL SENDER of the message it's
+// called on. For the "Fwd: Re: ..." forwarded-lead pattern, that sender is
+// the internal team/alias who forwarded it, not the real lead -- this is
+// the exact "wrong-recipient" problem lead_followup_sequences.gs's history
+// already documents (see buildQuotedHistoryForReply() above it). Neither
+// base-service method can get the thread AND the recipient right at once,
+// which is exactly why this bug kept reappearing across both fixes.
+//
+// FIX: the Advanced Gmail API (enabled in appsscript.json) lets a draft be
+// created as a raw MIME message with an explicit threadId AND full control
+// over To/In-Reply-To/References -- both correct simultaneously.
+//
+// REQUIRES the Gmail API advanced service enabled once in the Apps Script
+// editor itself (Services > + > Gmail API), in addition to the manifest
+// entry -- pulling the manifest change alone may not be enough. If this
+// throws "Gmail is not defined," that's the first thing to check.
+//
+// UNTESTED AGAINST A LIVE ACCOUNT as of this commit -- I have no way to
+// execute Apps Script or touch real Gmail from here. Run this against ONE
+// real thread first and manually confirm in Gmail that the draft actually
+// nests under the original conversation before trusting it at volume --
+// same start-small-verify-then-scale approach used everywhere else today.
+function createThreadedDraft_(thread, lastMsg, toEmail, ccEmail, subject, plainBody, htmlBody) {
+  const headerInfo = Gmail.Users.Messages.get('me', lastMsg.getId(), {
+    format: 'metadata',
+    metadataHeaders: ['Message-ID', 'References']
+  });
+  const headerMap = {};
+  (headerInfo.payload.headers || []).forEach(h => { headerMap[h.name] = h.value; });
+  const lastMessageId = headerMap['Message-ID'] || headerMap['Message-Id'] || '';
+  const priorReferences = headerMap['References'] || '';
+  const referencesValue = (priorReferences + ' ' + lastMessageId).trim();
+
+  const replySubject = /^re:/i.test(subject.trim()) ? subject : 'Re: ' + subject;
+
+  const boundary = 'boundary_' + Utilities.getUuid().replace(/-/g, '');
+  const rawLines = [];
+  rawLines.push('To: ' + toEmail);
+  if (ccEmail) rawLines.push('Cc: ' + ccEmail);
+  rawLines.push('Subject: =?UTF-8?B?' + Utilities.base64Encode(replySubject, Utilities.Charset.UTF_8) + '?=');
+  rawLines.push('MIME-Version: 1.0');
+  if (lastMessageId) rawLines.push('In-Reply-To: ' + lastMessageId);
+  if (referencesValue) rawLines.push('References: ' + referencesValue);
+  rawLines.push('Content-Type: multipart/alternative; boundary="' + boundary + '"');
+  rawLines.push('');
+  rawLines.push('--' + boundary);
+  rawLines.push('Content-Type: text/plain; charset="UTF-8"');
+  rawLines.push('Content-Transfer-Encoding: base64');
+  rawLines.push('');
+  rawLines.push(Utilities.base64Encode(plainBody, Utilities.Charset.UTF_8));
+  rawLines.push('');
+  rawLines.push('--' + boundary);
+  rawLines.push('Content-Type: text/html; charset="UTF-8"');
+  rawLines.push('Content-Transfer-Encoding: base64');
+  rawLines.push('');
+  rawLines.push(Utilities.base64Encode(htmlBody, Utilities.Charset.UTF_8));
+  rawLines.push('');
+  rawLines.push('--' + boundary + '--');
+
+  const rawMime = rawLines.join('\r\n');
+  const encodedRaw = Utilities.base64EncodeWebSafe(rawMime);
+
+  return Gmail.Users.Drafts.create({
+    message: {
+      raw: encodedRaw,
+      threadId: thread.getId()
+    }
+  }, 'me');
 }
 
 function isRealTeamReply(email) {

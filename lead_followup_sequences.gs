@@ -1453,7 +1453,14 @@ function advancePodcastSalesFollowUps() {
       const plainBody = markdownLinksToPlain(body);
       const fullDraftText = note + plainBody + buildQuotedHistoryForReply(thread);
 
-      GmailApp.createDraft(email, thread.getFirstMessageSubject().replace(/^(fwd:\s*)+/i, '').trim(), fullDraftText, { cc: CONFIG.NETWORK_CC_ON_REPLY });
+      // FIX (17 Aug 2026, real incident -- Joana's top-priority, repeatedly
+      // flagged complaint): GmailApp.createDraft() composed a brand-new,
+      // unthreaded message every time. See createThreadedDraft_() in
+      // Code.gs for the full history and why the base service can't do
+      // this correctly. Plain-text only here (this cadence doesn't build
+      // an HTML body), so the html part just wraps the same text.
+      const cleanFollowUpSubject = thread.getFirstMessageSubject().replace(/^(fwd:\s*)+/i, '').trim();
+      createThreadedDraft_(thread, last, email, CONFIG.NETWORK_CC_ON_REPLY, cleanFollowUpSubject, fullDraftText, escapeHtml(fullDraftText).replace(/\n/g, '<br>'));
 
       queueTab.getRange(r + 1, 5).setValue(nextStep);
       queueTab.getRange(r + 1, 6).setValue(new Date());
@@ -1567,7 +1574,14 @@ function advanceHubGuestFollowUps() {
       const plainBody = followUp.draftBody;
       const fullDraftText = note + plainBody + buildQuotedHistoryForReply(thread);
 
-      GmailApp.createDraft(email, thread.getFirstMessageSubject().replace(/^(fwd:\s*)+/i, '').trim(), fullDraftText, { cc: CONFIG.NETWORK_CC_ON_REPLY });
+      // FIX (17 Aug 2026, real incident -- Joana's top-priority, repeatedly
+      // flagged complaint): GmailApp.createDraft() composed a brand-new,
+      // unthreaded message every time. See createThreadedDraft_() in
+      // Code.gs for the full history and why the base service can't do
+      // this correctly. Plain-text only here (this cadence doesn't build
+      // an HTML body), so the html part just wraps the same text.
+      const cleanHubGuestSubject = thread.getFirstMessageSubject().replace(/^(fwd:\s*)+/i, '').trim();
+      createThreadedDraft_(thread, last, email, CONFIG.NETWORK_CC_ON_REPLY, cleanHubGuestSubject, fullDraftText, escapeHtml(fullDraftText).replace(/\n/g, '<br>'));
 
       queueTab.getRange(r + 1, 8).setValue(nextStep);
       queueTab.getRange(r + 1, 9).setValue(new Date());
