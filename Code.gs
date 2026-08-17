@@ -151,7 +151,13 @@ const CONFIG = {
   // batch (3/4 good -- one bad draft traced to a real AUTOREPLY_PATTERNS
   // gap, now fixed above). Matches MAX_THREADS_PER_RUN, i.e. no longer
   // artificially throttling below what a single run would otherwise scan.
-  MAX_DRAFTS_PER_RUN: 50,
+  //
+  // LOWERED to 10 (17 Aug 2026, same day) once the search's own 500-thread
+  // single-page ceiling turned out to be the real reason a run only
+  // produced 3 drafts instead of 50 -- now that pagination fixes that,
+  // Kris wants smaller batches again (10 at a time) for rapid review
+  // feedback, not because the code couldn't reach 50.
+  MAX_DRAFTS_PER_RUN: 10,
 
   // SWITCHED (17 Aug 2026): Kimi is now the PRIMARY model (via Moonshot's
   // Anthropic-compatible endpoint), Anthropic is the automatic fallback --
@@ -326,13 +332,29 @@ function runReplyDrafterInner() {
   // furthest missed-leads lookback (runWeekendDeepMissedLeadsAudit), so
   // nothing genuinely reachable by either system falls in a gap between them.
   const searchQuery = '(' + addressClauses + ') newer_than:180d -label:"' + CONFIG.LABEL_AI_DRAFTED + '" -label:"' + CONFIG.LABEL_STOP + '" -label:"' + CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM + '"';
-  const threads = GmailApp.search(searchQuery, 0, 500);
 
   Logger.log('DIAGNOSTIC -- search query: ' + searchQuery);
-  Logger.log('DIAGNOSTIC -- threads found: ' + threads.length);
 
   let processed = 0;
   let draftsCreated = 0;
+
+  // FIX (17 Aug 2026, real incident): widening the date window to 180d
+  // surfaced a real backlog, but GmailApp.search's third argument has a HARD
+  // ceiling of 500 -- one call can never return more than that, no matter
+  // how many threads actually match. With the backlog mostly consisting of
+  // "already answered by team" noise sorted newest-first, the entire first
+  // (and only) page of 500 got consumed without ever reaching
+  // MAX_THREADS_PER_RUN or MAX_DRAFTS_PER_RUN -- a run that was SUPPOSED to
+  // produce up to the draft cap instead produced only 3, because there was
+  // nothing left to look at, not because either cap was hit. Paginate with
+  // GmailApp.search's start offset so a single run can keep pulling pages
+  // until it actually reaches one of the two real caps -- bounded by a
+  // wall-clock budget below, since Apps Script hard-kills executions at 6
+  // minutes and iterating enough pages to reach a real cap could otherwise
+  // run past that and get killed mid-run instead of stopping cleanly.
+  const RUNTIME_BUDGET_MS = 5 * 60 * 1000; // 5 min, leaving a 1-min buffer before the 6-min hard limit
+  const runStartTime = Date.now();
+  const PAGE_SIZE = 500; // GmailApp.search's own hard per-call max
 
   // FIX (13 Aug 2026): GmailApp.getDraftMessages() can lag behind drafts
   // created earlier in this SAME execution (a propagation gap in Apps
@@ -343,13 +365,24 @@ function runReplyDrafterInner() {
   // same run. This in-memory set catches that immediately; the Gmail scan
   // stays in place as the cross-run backup.
   const draftedThisRun = new Set();
+  let pageStart = 0;
 
-  for (const thread of threads) {
-    if (processed >= CONFIG.MAX_THREADS_PER_RUN) break;
-    if (draftsCreated >= CONFIG.MAX_DRAFTS_PER_RUN) {
-      Logger.log('Reached MAX_DRAFTS_PER_RUN (' + CONFIG.MAX_DRAFTS_PER_RUN + ') -- stopping this run so the batch can be reviewed. Remaining threads will be picked up on the next run.');
-      break;
-    }
+  pagination:
+  while (true) {
+    const page = GmailApp.search(searchQuery, pageStart, PAGE_SIZE);
+    Logger.log('DIAGNOSTIC -- fetched page starting at ' + pageStart + ': ' + page.length + ' threads');
+    if (page.length === 0) break;
+
+    for (const thread of page) {
+      if (processed >= CONFIG.MAX_THREADS_PER_RUN) break pagination;
+      if (draftsCreated >= CONFIG.MAX_DRAFTS_PER_RUN) {
+        Logger.log('Reached MAX_DRAFTS_PER_RUN (' + CONFIG.MAX_DRAFTS_PER_RUN + ') -- stopping this run so the batch can be reviewed. Remaining threads will be picked up on the next run.');
+        break pagination;
+      }
+      if (Date.now() - runStartTime > RUNTIME_BUDGET_MS) {
+        Logger.log('Approaching Apps Script\'s execution time limit -- stopping this run early so it completes cleanly instead of getting killed mid-run. Remaining threads will be picked up next run.');
+        break pagination;
+      }
 
     const messages = thread.getMessages();
     const lastMsg = lastNonDraftMessage_(messages) || messages[messages.length - 1];
@@ -475,7 +508,11 @@ function runReplyDrafterInner() {
 
     logDraftToSheet(thread.getId(), subject, leadEmail, result.category, result.needsTeammateRouting, result.draftBody, draftLink);
 
-    processed++;
+      processed++;
+    }
+
+    if (page.length < PAGE_SIZE) break; // short page -- that was the last of the real backlog
+    pageStart += PAGE_SIZE;
   }
 
   Logger.log('Run complete. Threads processed: ' + processed + ', drafts created: ' + draftsCreated);
