@@ -1180,13 +1180,29 @@ function classifyAndDraft(systemPrompt, subject, threadContext, prospectEmail, s
     ? `MATCHED SHOW FOR THIS PROSPECT'S STATE (${state}): "${matchedShow.showName}" hosted by ${matchedShow.host} -- ${matchedShow.link}\nIf this reply is a no_decline, close with EXACTLY this text (verbatim, only substituting {{name}}, {{show}}, {{state}} with the real values -- do not rephrase, shorten, or improvise a different version): "${candidateVariation.text}" -- then add the link on its own, formatted per the SOP's link rules.`
     : `MATCHED SHOW FOR THIS PROSPECT'S STATE: none available${state ? ' (state detected as ' + state + ' but no confirmed show yet in the Directory)' : ' (could not determine state from subject line)'}.\nIf this reply is a no_decline, fall back to the generic guest-network invite per the SOP (the rotation above only applies when a real show match exists).`;
 
-  const userPrompt = `EMAIL SUBJECT: ${subject}
+  // FIX (18 Aug 2026, real incident): the prompt gave the model the thread's
+  // own quoted dates but never today's actual date, so it had no way to know
+  // how much time had passed since the prospect's message -- it would just
+  // mirror their relative-time language ("tomorrow", "today") literally even
+  // when the draft was picked up and sent weeks later, producing replies
+  // like proposing "4:00 PM ET tomorrow" for a "chat tomorrow?" ask that was
+  // actually over a month stale, with no apology for the gap. Real caught
+  // example: Nikki (Virginia) asked to chat "tomorrow late afternoon" on Jul
+  // 16; the reply wasn't sent until Aug 19 but still proposed "tomorrow" as
+  // if replying same-day.
+  const todayForModel = Utilities.formatDate(new Date(), 'America/New_York', "EEEE, MMMM d, yyyy 'at' h:mm a 'ET'");
+
+  const userPrompt = `TODAY'S ACTUAL DATE (when this reply is being drafted): ${todayForModel}
+
+EMAIL SUBJECT: ${subject}
 PROSPECT EMAIL: ${prospectEmail}
 
 ${matchedShowBlock}
 
 THREAD (oldest to newest):
 ${threadContext}
+
+IMPORTANT on stale timing (REAL INCIDENT, 18 Aug 2026): compare today's actual date above against the date of the prospect's own message in the thread. If real time has passed since they wrote it -- especially anything more than a couple of days -- do NOT parrot back their relative-time phrasing ("tomorrow," "today," "this week") as if it's still accurate; that reads as tone-deaf when the gap is weeks or months. Instead, briefly acknowledge/apologize for the delayed reply (matching the SOP's real tone for this), and if proposing or confirming a time, use an actual concrete upcoming date/time computed from today's real date, never a stale relative one lifted from their message.
 
 Return ONLY a JSON object, no markdown fences, no preamble, with this exact shape:
 {
