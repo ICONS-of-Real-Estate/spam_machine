@@ -85,6 +85,7 @@ function runLearningLoopInner() {
   const subjectCol = headers.indexOf('Subject');
   const categoryCol = headers.indexOf('Category');
   const draftTextCol = headers.indexOf('Draft Text');
+  const sopModeCol = headers.indexOf('SOP Mode'); // -1 for rows logged before the split test existed
 
   let compared = 0;
 
@@ -129,6 +130,7 @@ function runLearningLoopInner() {
       sentText,
       wasEdited,
       false, // Reviewed For SOP — starts false, generateSopSuggestions() flips it to true
+      sopModeCol !== -1 ? (row[sopModeCol] || 'joana') : 'joana',
     ]);
 
     compared++;
@@ -151,10 +153,19 @@ function findSentReplyAfterDraft(thread, draftCreatedAt) {
     // case even when isDraft() is wrong.
     if (draftCreatedAt && messages[i].getDate().getTime() <= new Date(draftCreatedAt).getTime()) continue;
     const from = messages[i].getFrom().toLowerCase();
-    const isOwnAccount = CONFIG.INTERNAL_DOMAINS.some(d => from.indexOf('@' + d) !== -1);
-    // Heuristic: it's a genuine sent reply if it's from an internal address
-    // AND it's not one of the original 4-touch sequence messages (those come
-    // from the lookalike outreach domains, not the real inbox owner sending).
+    // FIX (18 Aug 2026, real incident): this used to accept ANY
+    // CONFIG.INTERNAL_DOMAINS address as "Joana's genuine reply" -- but
+    // network@ardorseo.com is a forwarding/distribution alias, not a real
+    // reply sender: it's the address the lead's OWN forwarded message
+    // routes through (see the search query in Code.gs targeting
+    // to:"network@ardorseo.com"). A "Fwd: Re: ..." message from that alias
+    // satisfied the old check and got returned as the "sent reply" even
+    // though its body is just the forwarded lead text with zero actual
+    // reply content -- this is confirmed to be why the vast majority of
+    // Learning Log rows came back with an empty/no-reply Final Sent Text
+    // across every category (83-92% empty in a full audit). Only Joana's
+    // own sending address is ever a genuine reply.
+    const isOwnAccount = from.indexOf(EXPECTED_RUN_ACCOUNT) !== -1;
     if (isOwnAccount) return messages[i];
   }
   return null;

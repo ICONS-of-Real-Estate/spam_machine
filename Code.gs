@@ -285,13 +285,13 @@ function ensureLogSheetExists() {
   let draftsTab = ss.getSheetByName('AI Drafts Log');
   if (!draftsTab) {
     draftsTab = ss.insertSheet('AI Drafts Log');
-    draftsTab.appendRow(['Timestamp', 'Thread ID', 'Subject', 'Prospect Email', 'Category', 'Needs Teammate Routing', 'Draft Text', 'Draft Link']);
+    draftsTab.appendRow(['Timestamp', 'Thread ID', 'Subject', 'Prospect Email', 'Category', 'Needs Teammate Routing', 'Draft Text', 'Draft Link', 'SOP Mode']);
   }
 
   let learningTab = ss.getSheetByName('Learning Log');
   if (!learningTab) {
     learningTab = ss.insertSheet('Learning Log');
-    learningTab.appendRow(['Compared At', 'Thread ID', 'Subject', 'Category', 'Original AI Draft', 'Final Sent Text', 'Was Edited', 'Reviewed For SOP']);
+    learningTab.appendRow(['Compared At', 'Thread ID', 'Subject', 'Category', 'Original AI Draft', 'Final Sent Text', 'Was Edited', 'Reviewed For SOP', 'SOP Mode']);
   }
 
   let suggestionsTab = ss.getSheetByName('SOP Suggestions');
@@ -301,6 +301,31 @@ function ensureLogSheetExists() {
   }
 
   ensureSkipCacheTabExists(ss);
+}
+
+// ADDED (18 Aug 2026, Hormozi-vs-Joana split test): ensureLogSheetExists()
+// only sets headers when it CREATES a sheet -- 'AI Drafts Log' and
+// 'Learning Log' already existed with hundreds of real rows before the
+// 'SOP Mode' column was added, so it never got backfilled onto them. Run
+// this once (manually, from the editor) to add the missing header without
+// touching any existing row data -- pre-existing rows simply read blank in
+// that column, which is accurate: they predate the split test.
+function migrateAddSopModeColumn() {
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  ['AI Drafts Log', 'Learning Log'].forEach(name => {
+    const tab = ss.getSheetByName(name);
+    if (!tab) {
+      Logger.log('migrateAddSopModeColumn: sheet "' + name + '" not found, skipping.');
+      return;
+    }
+    const headers = tab.getRange(1, 1, 1, tab.getLastColumn()).getValues()[0];
+    if (headers.indexOf('SOP Mode') !== -1) {
+      Logger.log('migrateAddSopModeColumn: "' + name + '" already has SOP Mode column, skipping.');
+      return;
+    }
+    tab.getRange(1, headers.length + 1).setValue('SOP Mode');
+    Logger.log('migrateAddSopModeColumn: added SOP Mode column to "' + name + '" at column ' + (headers.length + 1) + '.');
+  });
 }
 
 // ---------- SKIP CACHE (17 Aug 2026, real incident) ----------
@@ -604,7 +629,9 @@ function runReplyDrafterInner() {
     const matchedShow = state ? stateDirectory[normalizeState(state)] : null;
 
     const context = buildThreadContext(messages);
-    const result = classifyAndDraft(systemPrompt, subject, context, leadEmail, state, matchedShow);
+    const sopMode = assignSopMode(threadId);
+    const promptForThisThread = buildSystemPromptForMode(systemPrompt, sopMode);
+    const result = classifyAndDraft(promptForThisThread, subject, context, leadEmail, state, matchedShow);
 
     if (!result) {
       skipCache[threadId] = { reason: 'classification/draft failed', lastCheckedAt: new Date() };
@@ -631,12 +658,14 @@ function runReplyDrafterInner() {
 
     try {
       const priorityNote = buildPriorityCheckNote(result);
-      const aiReplyPlain = priorityNote + sanitizeEmojiForGmail(markdownLinksToPlain(result.draftBody));
+      const sopModeNote = buildSopModeNote(sopMode);
+      const aiReplyPlain = priorityNote + sopModeNote + sanitizeEmojiForGmail(markdownLinksToPlain(result.draftBody));
       const historyPlain = stripForwardHeaderKeepHistory(lastMsg.getPlainBody());
       const fullPlainBody = aiReplyPlain + '\n\n' + historyPlain;
 
       const priorityNoteHtml = escapeHtml(priorityNote).replace(/\n/g, '<br>');
-      const aiReplyHtml = priorityNoteHtml + emojiToHtmlEntities(sanitizeEmojiForGmail(markdownLinksToHtml(result.draftBody)));
+      const sopModeNoteHtml = escapeHtml(sopModeNote).replace(/\n/g, '<br>');
+      const aiReplyHtml = priorityNoteHtml + sopModeNoteHtml + emojiToHtmlEntities(sanitizeEmojiForGmail(markdownLinksToHtml(result.draftBody)));
       const historyHtml = emojiToHtmlEntities(escapeHtml(historyPlain).replace(/\n/g, '<br>'));
       const fullHtmlBody = aiReplyHtml + '<br><br>' + historyHtml;
 
@@ -670,7 +699,7 @@ function runReplyDrafterInner() {
       }
     }
 
-    logDraftToSheet(thread.getId(), subject, leadEmail, result.category, result.needsTeammateRouting, result.draftBody, draftLink);
+    logDraftToSheet(thread.getId(), subject, leadEmail, result.category, result.needsTeammateRouting, result.draftBody, draftLink, sopMode);
 
       processed++;
     }
@@ -683,16 +712,53 @@ function runReplyDrafterInner() {
   Logger.log('Run complete. Threads processed: ' + processed + ', drafts created: ' + draftsCreated);
 }
 
-function logDraftToSheet(threadId, subject, prospectEmail, category, needsRouting, draftText, draftLink) {
+function logDraftToSheet(threadId, subject, prospectEmail, category, needsRouting, draftText, draftLink, sopMode) {
   if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') return;
   try {
     const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
     const tab = ss.getSheetByName('AI Drafts Log');
     if (!tab) return;
-    tab.appendRow([new Date(), threadId, subject, prospectEmail, category, !!needsRouting, draftText, draftLink || '']);
+    tab.appendRow([new Date(), threadId, subject, prospectEmail, category, !!needsRouting, draftText, draftLink || '', sopMode || 'joana']);
   } catch (e) {
     Logger.log('Failed to log draft to sheet: ' + e);
   }
+}
+
+// ADDED (18 Aug 2026): Hormozi-vs-Joana SOP split test. Deterministic on
+// threadId (not random) so the same thread always gets the same mode if
+// ever reprocessed -- a thread flipping modes mid-conversation would make
+// the Learning Log comparison meaningless. Simple hash, not cryptographic;
+// only needs a stable, roughly-even 50/50 split.
+function assignSopMode(threadId) {
+  let hash = 0;
+  for (let i = 0; i < threadId.length; i++) {
+    hash = (hash * 31 + threadId.charCodeAt(i)) | 0;
+  }
+  return (Math.abs(hash) % 2 === 0) ? 'hormozi' : 'joana';
+}
+
+// The SOP Doc (see buildSystemPrompt() above) carries a "## HORMOZI MODE
+// OVERRIDES" section alongside the standard categories -- this just tells
+// the model, per-reply, whether to apply it. Keeping the substitution
+// itself as an LLM instruction (not string-splicing in code) mirrors how
+// "## FOLLOW-UP DRAFTING" is already found by heading rather than parsed
+// apart, and avoids brittle text surgery on live Doc content.
+function buildSystemPromptForMode(baseSopText, mode) {
+  if (mode === 'hormozi') {
+    return baseSopText + '\n\n---\n\nACTIVE SPLIT TEST -- HORMOZI MODE (assigned to this specific reply, 18 Aug 2026): apply the "## HORMOZI MODE OVERRIDES" section above IN PLACE OF the standard core pitch paragraph, cost-question close, and CTA close it corresponds to, for THIS reply only. Everything else in the SOP above (categories, hard rules, tone, link formatting, no_decline handling, etc.) stays exactly as written.';
+  }
+  return baseSopText + '\n\n---\n\nACTIVE SPLIT TEST -- JOANA MODE (assigned to this specific reply, 18 Aug 2026): ignore the "## HORMOZI MODE OVERRIDES" section entirely if present above -- use only the standard SOP text for this reply.';
+}
+
+// Mirrors buildPriorityCheckNote()'s pattern exactly (bracketed, marked
+// DELETE BEFORE SENDING) so Joana and Goodness see mode the same way they
+// already see the priority flag -- no new convention to learn.
+function buildSopModeNote(mode) {
+  return '[SOP MODE: ' + (mode === 'hormozi' ? 'HORMOZI' : 'JOANA') +
+    ' -- ' + (mode === 'hormozi'
+      ? 'experimental direct/value-stacked pitch style, part of an active A/B test.'
+      : 'current standard style.') +
+    ' DELETE THIS LINE BEFORE SENDING.]\n\n';
 }
 
 function normalizeState(state) {
