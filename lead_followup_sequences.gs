@@ -586,6 +586,29 @@ function assertRunningAsJoana(callerName) {
   throw new Error(message);
 }
 
+// ---------- GMAIL ADVANCED SERVICE GUARD (18 Aug 2026, real incident) ----------
+// createThreadedDraft_() in Code.gs requires the Gmail Advanced Service
+// (Services > + > Gmail API in the editor -- a manual, per-project setting
+// that a Git Pull silently undoes since appsscript.json in the repo doesn't
+// declare it). Without this guard, a run with the service missing would
+// spend its whole runtime budget calling the LLM for every candidate thread
+// and only fail at the final draft-creation step each time -- 0 drafts
+// created, full API cost paid anyway, and no clear signal why. Checking
+// `typeof Gmail` once up front catches this before any of that spend.
+function assertGmailAdvancedServiceEnabled(callerName) {
+  if (typeof Gmail !== 'undefined') return true;
+
+  const message = callerName + ' aborted: the Gmail Advanced Service is not enabled on this project ' +
+    '("Gmail is not defined"). This gets silently wiped by Git Pull (appsscript.json in the repo has ' +
+    'an empty dependencies block, and pulling overwrites the live manifest) -- re-enable it manually: ' +
+    'Services (+ icon in the editor sidebar) > Gmail API > Add, then click into it and hit Save even if ' +
+    'it already shows as added, to force it to actually persist. No threads were scanned and no LLM ' +
+    'calls were made this run.';
+  Logger.log('ABORT (' + callerName + '): ' + message);
+  sendOpsAlert('Gmail Advanced Service missing -- run aborted: ' + callerName, message);
+  throw new Error(message);
+}
+
 // PAUSED (17 Aug 2026, real incident): classifyAndDraft() in Code.gs has
 // been caught mislabeling genuinely-interested replies (e.g. "Sure, I'd
 // like to hear more", "Yes, you can call") as no_decline. This cadence
@@ -600,6 +623,11 @@ const HUB_GUEST_FOLLOWUPS_ENABLED = false;
 
 function runLeadFollowUpCycle() {
   if (!assertRunningAsJoana('runLeadFollowUpCycle')) return;
+  // Same Gmail Advanced Service dependency as runReplyDrafter -- see the
+  // guard's own comment in lead_followup_sequences.gs for why this keeps
+  // getting silently wiped by Git Pull. Both draft-creation paths below
+  // (Podcast Sales and Hub Guest follow-ups) go through createThreadedDraft_().
+  if (!assertGmailAdvancedServiceEnabled('runLeadFollowUpCycle')) return;
   ensureFollowUpTabsExistV2();
   // SELF-HEAL (15 Aug 2026): reconcile BEFORE registering/advancing, so any
   // row stuck at "_APPROVAL" whose draft was deleted (manually or via a wipe)

@@ -415,6 +415,18 @@ function runReplyDrafter() {
   // whatever mailbox that OTHER account runs as, instead of refusing to run.
   if (!assertRunningAsJoana('runReplyDrafter')) return;
 
+  // ADDED (18 Aug 2026, real incident): the Gmail Advanced Service keeps
+  // getting silently wiped by Git Pull (appsscript.json in the repo has an
+  // empty dependencies block, and pulling overwrites the live manifest,
+  // undoing the manual Services > Gmail API > Save step every time). Before
+  // this check, a run with the service missing would burn its whole ~5min
+  // budget calling the LLM for every candidate thread, only to fail at the
+  // final createThreadedDraft_() step each time -- 0 drafts created, full
+  // cost paid anyway. Check once, up front, and abort immediately with a
+  // clear alert instead. Mirrors assertRunningAsJoana()'s pattern: throws
+  // (so the execution shows red/Failed at a glance) and emails an alert.
+  if (!assertGmailAdvancedServiceEnabled('runReplyDrafter')) return;
+
   if (isGmailQuotaExhausted()) {
     Logger.log('Skipping runReplyDrafter -- Gmail quota already known exhausted today.');
     return;
