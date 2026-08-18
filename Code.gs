@@ -757,7 +757,23 @@ function assignSopMode(threadId) {
 // apart, and avoids brittle text surgery on live Doc content.
 function buildSystemPromptForMode(baseSopText, mode) {
   if (mode === 'hormozi') {
-    return baseSopText + '\n\n---\n\nACTIVE SPLIT TEST -- HORMOZI MODE (assigned to this specific reply, 18 Aug 2026): apply the "## HORMOZI MODE OVERRIDES" section above IN PLACE OF the standard core pitch paragraph, cost-question close, and CTA close it corresponds to, for THIS reply only. Everything else in the SOP above (categories, hard rules, tone, link formatting, no_decline handling, etc.) stays exactly as written.';
+    // FIX (18 Aug 2026, real incident): the first version of this just told
+    // the model to "go apply the HORMOZI MODE OVERRIDES section above" --
+    // confirmed live that this does NOT reliably work (a draft came back
+    // correctly LABELED Hormozi mode but with 100% standard content, the
+    // override silently ignored). Asking the model to locate a heading and
+    // self-substitute paragraphs somewhere earlier in a 6000+ token prompt
+    // is too indirect. Handing it the exact override text again, right
+    // here, as the last thing it reads, removes that lookup step entirely.
+    // Compliance framing matches the one thing in this SOP that's already
+    // proven to work under similar pressure: the Tone section's mandatory
+    // emoji pair ("a REQUIREMENT, not a style suggestion... no exceptions").
+    return baseSopText + '\n\n---\n\nMANDATORY OVERRIDE FOR THIS REPLY ONLY -- HORMOZI MODE (active split test, 18 Aug 2026). This is a REQUIREMENT, not a style suggestion: you MUST use the exact text below in place of the standard core pitch paragraph, cost-question close, and CTA close, with no exceptions. Do not blend the two styles, do not fall back to the standard wording above, do not decide the standard version fits better.\n\n' +
+      'CORE PITCH PARAGRAPH (use this, not the standard one): "Most agents know they should be building a personal brand, but between showings and closings there\'s never time to actually create content consistently. That\'s exactly what this solves: a podcast where you just show up for a relaxed 20-30 minute conversation with a local business owner, lender, or community leader a couple times a month — we handle 100% of the production, editing, publishing, and turning it into social clips, so it adds zero to your workload. We\'ve done this for 100+ agents across 30 states, and for the ones who lean into it, it\'s turned into real referral relationships in their market, not just downloads."\n\n' +
+      'BENEFIT LINE (include right after the pitch paragraph): "The real benefit? It grows your sphere of influence, builds your authority as the go-to name in your market, and — most importantly — helps you sell more houses."\n\n' +
+      'COST-QUESTION CLOSE (use this if cost comes up, not the standard one): "Great question! ... There is a cost involved: a $497 one-time start-up kit, then $600/month for ongoing production. Don\'t want to hide the pricing from you, but what matters is understanding your goals and seeing how launching your own show on the ICONS network will help you grow your business. A lot of hosts also bring on a sponsor to offset the cost, which tends to be an easy sell in real estate."\n\n' +
+      'CTA CLOSE (use this, not the standard "I\'ll have one of our team give you a call" line): "Here\'s the quick version: [detail specific to what they asked]. Want the full picture in under 15 minutes instead? Grab a slot here: [book a 15-minute Zoom Call here](BOOKING_LINK) — I\'ll walk you through everything and answer whatever\'s on your mind."\n\n' +
+      'Everything else in the SOP above (categories, hard rules, tone, emoji, link formatting, no_decline handling, etc.) stays exactly as written -- only these four pieces change for this reply.';
   }
   return baseSopText + '\n\n---\n\nACTIVE SPLIT TEST -- JOANA MODE (assigned to this specific reply, 18 Aug 2026): ignore the "## HORMOZI MODE OVERRIDES" section entirely if present above -- use only the standard SOP text for this reply.';
 }
