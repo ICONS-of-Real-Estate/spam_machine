@@ -659,7 +659,25 @@ function runReplyDrafterInner() {
       continue;
     }
 
-    if (AUTOREPLY_PATTERNS.test(replyBody)) {
+    // FIX (19 Aug 2026, real incident): AUTOREPLY_PATTERNS only checked
+    // replyBody (extractProspectFreshReplyText's output), which walks the
+    // "fresh" text before the first quoted "On ... wrote:" line. For a
+    // DOUBLE-forwarded auto-reply (Mike McDonagh's OOO, itself wrapped in
+    // a "---------- Forwarded message ---------" block that is itself
+    // inside another layer of quoting), the entire OOO text ends up on
+    // quoted ("> ") lines with no unquoted "fresh" text above it --
+    // extractProspectFreshReplyText finds nothing, the regex tests against
+    // an empty/wrong string, and the thread slips through to the LLM. The
+    // LLM correctly recognized it as an OOO auto-reply in its own reasoning
+    // ("no reply should be drafted") but nothing acts on that -- a draft
+    // still got created, with no real content. Checking the last message's
+    // own Subject header too closes this gap cheaply and safely: an
+    // auto-responder almost always stamps "Out of Office" / "Automatic
+    // reply:" directly into its own subject line, and checking one
+    // message's own subject (not the full quoted body) doesn't reintroduce
+    // the false-positive risk the body-only check was deliberately built to
+    // avoid.
+    if (AUTOREPLY_PATTERNS.test(replyBody) || AUTOREPLY_PATTERNS.test(lastMsg.getSubject())) {
       thread.addLabel(labelDrafted);
       delete skipCache[threadId];
       Logger.log('Suppressed (auto-reply/OOO, not a real reply): ' + subject + ' <' + leadEmail + '>');
