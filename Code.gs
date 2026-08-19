@@ -170,7 +170,15 @@ const CONFIG = {
   // createThreadedDraft_() nests correctly in the original thread (Nancy's
   // draft, verified live in Gmail). Stepping up to 10 next per the same
   // incremental-trust pattern used earlier in the session.
-  MAX_DRAFTS_PER_RUN: 10,
+  //
+  // RAISED to 20 (19 Aug 2026): the 10-draft batch reviewed clean (emoji
+  // compliance, no named-teammate promises, delay-apology correctly gated
+  // on real elapsed time, only one stray unprompted-pricing miss on
+  // Traci that traced to model compliance drift, not an SOP gap) and
+  // Goodness's own draft-vs-sent log showed only light wording polish on
+  // review, not a rewrite -- stepping up per the same incremental-trust
+  // pattern used throughout this project.
+  MAX_DRAFTS_PER_RUN: 20,
 
   // TEMPORARY (18 Aug 2026, per direct request): skip no_decline and
   // no_data_error replies for now so the cap of 10 is spent entirely on
