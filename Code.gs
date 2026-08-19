@@ -180,6 +180,18 @@ const CONFIG = {
   // pattern used throughout this project.
   MAX_DRAFTS_PER_RUN: 20,
 
+  // ADDED (19 Aug 2026, per direct request): now that runReplyDrafter is
+  // going back on a 5-minute auto-trigger (see setup_all_triggers.gs),
+  // MAX_DRAFTS_PER_RUN alone no longer bounds the real risk -- a run every
+  // 5 minutes, each allowed up to 20 drafts, could pile up far faster than
+  // Joana/Goodness can review, especially against the ~200-thread backlog
+  // this project already knows exists. This caps the TOTAL number of
+  // drafts sitting in the Drafts folder at once (checked against
+  // GmailApp.getDraftMessages().length at the start of each run, live count
+  // during it), separate from and in addition to MAX_DRAFTS_PER_RUN -- the
+  // run stops the moment either limit is hit, whichever comes first.
+  MAX_PENDING_DRAFTS_IN_FOLDER: 25,
+
   // TEMPORARY (18 Aug 2026, per direct request): skip no_decline and
   // no_data_error replies for now so the cap of 10 is spent entirely on
   // positive-category drafts, since the hub-guest-invite close on declines
@@ -530,6 +542,12 @@ function runReplyDrafterInner() {
   const draftedThisRun = new Set();
   let pageStart = 0;
 
+  // ADDED (19 Aug 2026): folder-wide pending-drafts cap, separate from
+  // MAX_DRAFTS_PER_RUN -- see CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER above for
+  // why this is needed now that the drafter runs on an unattended timer.
+  const startingDraftCount = GmailApp.getDraftMessages().length;
+  Logger.log('DIAGNOSTIC -- ' + startingDraftCount + ' draft(s) already in the folder at run start (cap: ' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ').');
+
   pagination:
   while (true) {
     const page = GmailApp.search(searchQuery, pageStart, PAGE_SIZE);
@@ -540,6 +558,10 @@ function runReplyDrafterInner() {
       if (processed >= CONFIG.MAX_THREADS_PER_RUN) break pagination;
       if (draftsCreated >= CONFIG.MAX_DRAFTS_PER_RUN) {
         Logger.log('Reached MAX_DRAFTS_PER_RUN (' + CONFIG.MAX_DRAFTS_PER_RUN + ') -- stopping this run so the batch can be reviewed. Remaining threads will be picked up on the next run.');
+        break pagination;
+      }
+      if (startingDraftCount + draftsCreated >= CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER) {
+        Logger.log('Reached MAX_PENDING_DRAFTS_IN_FOLDER (' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ') -- the Drafts folder is full enough for now, stopping this run so it can be reviewed down before more get created. Remaining threads will be picked up on a future run.');
         break pagination;
       }
       if (Date.now() - runStartTime > RUNTIME_BUDGET_MS) {
