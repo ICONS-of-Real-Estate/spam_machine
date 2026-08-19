@@ -10,23 +10,31 @@
  *    that actually went out, and records whether she sent the draft as-is
  *    or changed it — logging both versions side by side in "Learning Log".
  *
- * 2. generateSopSuggestions() — run this weekly (or whenever you want a
- *    check-in). It reads any un-reviewed edited rows from "Learning Log",
- *    sends them to the LLM (Kimi, falling back to Claude -- see
- *    callLlmWithFallback() in quota_guard_and_alerting.gs) in a batch, and
- *    asks it to identify patterns
- *    and propose SPECIFIC SOP changes. These land in the "SOP Suggestions"
- *    tab as PROPOSALS ONLY — nothing here rewrites the live SOP file or
- *    the automation's system prompt automatically. A human (Kris, or
- *    Kris + Claude in a chat) should review "SOP Suggestions" and merge
- *    anything real into Icons_Podcast_Reply_SOP.md and the drafter's
- *    system prompt by hand. This is deliberate: unsupervised SOP rewrites
- *    based on live sales replies can drift in ways nobody notices until
- *    it's already gone out to real leads.
+ * 2. generateSopSuggestions() — run this daily (18 Aug -> 19 Aug 2026:
+ *    switched from weekly to daily, per direct request, once the doc+email
+ *    step below made a daily cadence reviewable instead of overwhelming).
+ *    It reads any un-reviewed edited rows from "Learning Log", sends them
+ *    to the LLM (Kimi, falling back to Claude -- see callLlmWithFallback()
+ *    in quota_guard_and_alerting.gs) in a batch, and asks it to identify
+ *    patterns and propose SPECIFIC SOP changes. These still land in the
+ *    "SOP Suggestions" tab as a structured log (unchanged), but ALSO get
+ *    written into a same-day Google Doc (createSopSuggestionsDoc()) and
+ *    emailed to Goodness, Joana, and Kris (emailSopSuggestionsDoc()) so
+ *    there's an actual daily reviewable artifact instead of a sheet tab
+ *    nobody remembers to open. PROPOSALS ONLY, same as before — nothing
+ *    here rewrites the live SOP file or the drafter's system prompt
+ *    automatically. A human should review the emailed doc and merge
+ *    anything real into the live SOP by hand. This is deliberate:
+ *    unsupervised SOP rewrites based on live sales replies can drift in
+ *    ways nobody notices until it's already gone out to real leads.
  *
- * Add both as time-driven triggers in the same project:
+ * Add both as time-driven triggers in the same project (see
+ * setup_all_triggers.gs):
  *   - runLearningLoop      -> Day timer, once daily (e.g. overnight)
- *   - generateSopSuggestions -> Week timer, once weekly
+ *   - generateSopSuggestions -> Day timer, once daily, timed so the email
+ *     lands around 6 PM Pacific (see the timezone note in
+ *     setup_all_triggers.gs -- the script's own trigger clock runs on
+ *     Europe/Paris, not Pacific)
  */
 
 // ---------- 1. COMPARE SENT VS. DRAFTED ----------
@@ -267,6 +275,13 @@ function generateSopSuggestionsInner() {
   // which one was used; this was never a "wrong provider" problem. Slicing
   // to a bounded batch per run and leaving the rest for the next run fixes
   // it regardless of how large the backlog ever gets again.
+  //
+  // KEPT at 5 (19 Aug 2026) even though this now runs daily instead of
+  // weekly, and even though the doc+email step below makes a bigger batch
+  // easier to actually read than raw sheet rows were -- same "start small,
+  // verify quality, raise later once trusted" reasoning as everywhere else
+  // in this project. Raise it once a few days of daily docs have come back
+  // clean.
   const SOP_SUGGESTIONS_BATCH_SIZE = 5; // start small, verify quality, raise later once trusted
   const deferredCount = Math.max(0, unreviewedEdits.length - SOP_SUGGESTIONS_BATCH_SIZE);
   const batchEdits = unreviewedEdits.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
@@ -310,4 +325,73 @@ function generateSopSuggestionsInner() {
   });
 
   Logger.log('Generated ' + suggestions.length + ' SOP suggestions from ' + batchEdits.length + ' edited examples' + (deferredCount > 0 ? ' (' + deferredCount + ' more deferred to next run).' : '.'));
+
+  // ADDED (19 Aug 2026, per direct request): the "SOP Suggestions" sheet
+  // tab above is kept as the permanent structured log, but nobody reliably
+  // opens a sheet tab on their own -- this creates an actual reviewable
+  // document for today's batch and emails it directly, so review is a
+  // reply to an email, not a "remember to go check the sheet" chore.
+  const docFile = createSopSuggestionsDoc(batchEdits, suggestions, deferredCount);
+  emailSopSuggestionsDoc(docFile, suggestions.length);
+}
+
+// ---------- 3. DAILY REVIEWABLE DOC + EMAIL (added 19 Aug 2026) ----------
+
+function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount) {
+  const dateStr = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'MMMM d, yyyy');
+  const doc = DocumentApp.create('SOP Suggestions -- ' + dateStr);
+  const body = doc.getBody();
+
+  body.appendParagraph('SOP Suggestions -- ' + dateStr).setHeading(DocumentApp.ParagraphHeading.HEADING1);
+  body.appendParagraph(
+    'Generated automatically from ' + batchEdits.length + ' real edited repl' + (batchEdits.length === 1 ? 'y' : 'ies') +
+    ' found today (AI draft vs. what Joana actually sent).' +
+    (deferredCount > 0 ? ' ' + deferredCount + ' more edited example(s) are still queued and will show up in a future day\'s doc.' : '')
+  );
+  body.appendParagraph('PROPOSALS ONLY -- nothing here has been applied to the live SOP. Review each one below and copy anything real into the live SOP doc by hand.');
+  body.appendHorizontalRule();
+
+  if (suggestions.length === 0) {
+    body.appendParagraph('No clear repeated pattern found in today\'s edits -- nothing to propose.');
+  } else {
+    suggestions.forEach((s, idx) => {
+      body.appendParagraph('Suggestion ' + (idx + 1) + ' -- ' + String(s.confidence).toUpperCase() + ' confidence').setHeading(DocumentApp.ParagraphHeading.HEADING2);
+      body.appendParagraph('Pattern observed: ' + s.pattern_observed);
+      body.appendParagraph('Suggested change: ' + s.suggested_change);
+    });
+  }
+
+  body.appendHorizontalRule();
+  body.appendParagraph('Underlying examples this was generated from').setHeading(DocumentApp.ParagraphHeading.HEADING2);
+  batchEdits.forEach((e, idx) => {
+    body.appendParagraph('Example ' + (idx + 1) + ' (' + e.category + ')').setHeading(DocumentApp.ParagraphHeading.HEADING3);
+    body.appendParagraph('AI drafted: ' + e.original);
+    body.appendParagraph('Joana actually sent: ' + e.final);
+  });
+
+  doc.saveAndClose();
+  const file = DriveApp.getFileById(doc.getId());
+  // Share with just the three reviewers, not "anyone with the link" --
+  // this is real lead-reply content, no reason to widen access beyond who
+  // actually needs to review it.
+  file.addViewers(['goodness@iconsofrealestate.com', 'joana@iconsofrealestate.com', 'kris@iconsofrealestate.com']);
+  return file;
+}
+
+function emailSopSuggestionsDoc(docFile, suggestionsCount) {
+  const dateStr = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'MMMM d, yyyy');
+  const body =
+    'This email was written by Claude.\n\n' +
+    'Today\'s automated review of edited replies found ' + suggestionsCount + ' potential SOP update' + (suggestionsCount === 1 ? '' : 's') +
+    ', based on real differences between what the AI drafted and what Joana actually sent:\n\n' +
+    docFile.getUrl() + '\n\n' +
+    'Please review and decide whether to add any of these to the live SOP -- nothing here has been applied automatically.';
+
+  MailApp.sendEmail({
+    to: 'goodness@iconsofrealestate.com,joana@iconsofrealestate.com,kris@iconsofrealestate.com',
+    subject: '[Written by Claude] Daily SOP Suggestions -- ' + dateStr,
+    body: body
+  });
+
+  Logger.log('SOP suggestions doc emailed to Goodness, Joana, and Kris: ' + docFile.getUrl());
 }

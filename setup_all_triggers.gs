@@ -7,7 +7,7 @@
  * this twice doesn't create duplicates), then creates:
  *   - runReplyDrafter          -- every 5 minutes
  *   - runLearningLoop          -- daily
- *   - generateSopSuggestions   -- weekly (Monday)
+ *   - generateSopSuggestions   -- daily (~6 PM Pacific -- see timezone note below)
  *   - runMissedLeadsAudit      -- daily
  *   - runLeadFollowUpCycle     -- daily (6 AM Europe/Paris -- batch ready before Goodness starts)
  *   - summarizeFollowUpLearning -- daily (8 PM Europe/Paris -- turns the day's edits into SOP suggestions)
@@ -72,12 +72,24 @@ function setupAllTriggers() {
     .create();
   Logger.log('Created: runLearningLoop, daily around 6 AM ' + TZ + '.');
 
+  // SWITCHED to daily (19 Aug 2026, per direct request), now that it emails
+  // a same-day reviewable doc to Goodness/Joana/Kris instead of just
+  // appending to a sheet tab. Target is ~6 PM PACIFIC, not Paris -- Pacific
+  // is UTC-7 in August (daylight time), Paris is UTC+2 (CEST), a 9-hour
+  // gap, so 6 PM Pacific lands at 3 AM Paris the NEXT calendar day. Using
+  // atHour(3) here to hit that. CAVEAT: US and EU daylight-saving transition
+  // on different calendar dates each year (US: 2nd Sun of March / 1st Sun
+  // of November; EU: last Sun of March / last Sun of October), so for a
+  // ~1-2 week window each spring and fall this drifts up to an hour off
+  // 6 PM Pacific. Not worth solving with date math for an internal digest
+  // email -- if that ever actually matters, adjust atHour() by 1 during
+  // those windows.
   ScriptApp.newTrigger('generateSopSuggestions')
     .timeBased()
-    .onWeekDay(ScriptApp.WeekDay.MONDAY)
-    .atHour(7)
+    .everyDays(1)
+    .atHour(3)
     .create();
-  Logger.log('Created: generateSopSuggestions, weekly on Monday around 7 AM ' + TZ + '.');
+  Logger.log('Created: generateSopSuggestions, daily around 3 AM ' + TZ + ' (~6 PM Pacific the previous day).');
 
   ScriptApp.newTrigger('runMissedLeadsAudit')
     .timeBased()
