@@ -768,11 +768,32 @@ function buildSystemPromptForMode(baseSopText, mode) {
     // Compliance framing matches the one thing in this SOP that's already
     // proven to work under similar pressure: the Tone section's mandatory
     // emoji pair ("a REQUIREMENT, not a style suggestion... no exceptions").
-    return baseSopText + '\n\n---\n\nMANDATORY OVERRIDE FOR THIS REPLY ONLY -- HORMOZI MODE (active split test, 18 Aug 2026). This is a REQUIREMENT, not a style suggestion: you MUST use the exact text below in place of the standard core pitch paragraph, cost-question close, and CTA close, with no exceptions. Do not blend the two styles, do not fall back to the standard wording above, do not decide the standard version fits better.\n\n' +
+    // FIX (19 Aug 2026, real incident -- Tomás/Goodness flagged on Tonette,
+    // a hot lead who opened with "I'd love the opportunity" and asked cost
+    // directly): the old COST-QUESTION CLOSE stated "$497... $600/month" as
+    // a flat, unqualified fact -- "not even saying starting at... that's not
+    // advisable" per Tomás, since it anchors a highly motivated lead on the
+    // cheapest package as if it's the only offer, right when the correct
+    // move is the opposite: get a hot lead on a low-friction call where a
+    // human can scope the real package, not lock in a number over email.
+    // Reframed as an explicit starting point that hands off to a call for
+    // the real fit, rather than removing the number entirely (Hormozi
+    // mode's whole point is not hiding numbers the way standard mode does).
+    // SEPARATE real incident, same email: it also said "I'll have Sean
+    // reach out" -- naming a specific real teammate -- but nothing in this
+    // pipeline ever CCs or notifies Sean; that promise only became true
+    // because Joana happened to manually forward the lead to him over an
+    // hour later. Neither override text below ever said "Sean"; the model
+    // pulled the name from context and, per Tomás/Goodness, blended it with
+    // the standard mode's team-callback line instead of using the CTA below
+    // as an outright replacement per the instruction. Added an explicit rule
+    // against naming an uncommitted teammate to close that gap.
+    return baseSopText + '\n\n---\n\nMANDATORY OVERRIDE FOR THIS REPLY ONLY -- HORMOZI MODE (active split test, 18 Aug 2026). This is a REQUIREMENT, not a style suggestion: you MUST use the exact text below in place of the standard core pitch paragraph, cost-question close, and CTA close, with no exceptions. Do not blend the two styles, do not fall back to the standard wording above, do not decide the standard version fits better. Do NOT combine the CTA close below with the standard mode\'s "I\'ll have one of our team give you a call" line -- use ONLY the CTA close below.\n\n' +
       'CORE PITCH PARAGRAPH (use this, not the standard one): "Most agents know they should be building a personal brand, but between showings and closings there\'s never time to actually create content consistently. That\'s exactly what this solves: a podcast where you just show up for a relaxed 20-30 minute conversation with a local business owner, lender, or community leader a couple times a month — we handle 100% of the production, editing, publishing, and turning it into social clips, so it adds zero to your workload. We\'ve done this for 100+ agents across 30 states, and for the ones who lean into it, it\'s turned into real referral relationships in their market, not just downloads."\n\n' +
       'BENEFIT LINE (include right after the pitch paragraph): "The real benefit? It grows your sphere of influence, builds your authority as the go-to name in your market, and — most importantly — helps you sell more houses."\n\n' +
-      'COST-QUESTION CLOSE (use this if cost comes up, not the standard one): "Great question! ... There is a cost involved: a $497 one-time start-up kit, then $600/month for ongoing production. Don\'t want to hide the pricing from you, but what matters is understanding your goals and seeing how launching your own show on the ICONS network will help you grow your business. A lot of hosts also bring on a sponsor to offset the cost, which tends to be an easy sell in real estate."\n\n' +
+      'COST-QUESTION CLOSE (use this if cost comes up, not the standard one): "Great question! Packages start around a $497 one-time start-up kit and $600/month for ongoing production, but the exact fit depends on your goals and how hands-on you\'d like the team to be -- rather than lock in a number over email, let\'s get that dialed in on a quick call. A lot of hosts also bring on a sponsor to offset the cost, which tends to be an easy sell in real estate." Never present these figures as the final or only price -- they are a starting point, and the close above should route to a call for the real number, especially for a clearly hot/motivated lead.\n\n' +
       'CTA CLOSE (use this, not the standard "I\'ll have one of our team give you a call" line): "Here\'s the quick version: [detail specific to what they asked]. Want the full picture in under 15 minutes instead? Grab a slot here: [book a 15-minute Zoom Call here](BOOKING_LINK) — I\'ll walk you through everything and answer whatever\'s on your mind."\n\n' +
+      'Do NOT name a specific teammate (e.g. "Sean," "Bens") as the one who will personally call or reach out. Nobody is automatically CC\'d or notified when this reply sends -- naming someone specific here is a promise the system cannot back up unless a human manually loops them in afterward. If a handoff needs mentioning, say "someone from our team" / "I\'ll have one of our team reach out," never a specific name.\n\n' +
       'Everything else in the SOP above (categories, hard rules, tone, emoji, link formatting, no_decline handling, etc.) stays exactly as written -- only these four pieces change for this reply.';
   }
   return baseSopText + '\n\n---\n\nACTIVE SPLIT TEST -- JOANA MODE (assigned to this specific reply, 18 Aug 2026): ignore the "## HORMOZI MODE OVERRIDES" section entirely if present above -- use only the standard SOP text for this reply.';
