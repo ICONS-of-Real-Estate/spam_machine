@@ -178,7 +178,16 @@ const CONFIG = {
   // Goodness's own draft-vs-sent log showed only light wording polish on
   // review, not a rewrite -- stepping up per the same incremental-trust
   // pattern used throughout this project.
-  MAX_DRAFTS_PER_RUN: 20,
+  //
+  // LOWERED back to 5 (19 Aug 2026, same day, real incident): 20-per-run
+  // combined with the new 5-minute auto-trigger produced 43 drafts in one
+  // ~30-minute burst before the folder-wide cap below was actually live on
+  // the deployed script -- per-run and folder caps are independent safety
+  // nets, and 20 was too high a per-run ceiling on its own regardless.
+  // Matches FOLLOWUP_DRAFT_CAP in lead_followup_sequences.gs, same
+  // reasoning: small steady batches every 5 minutes reach the folder cap
+  // gradually instead of in one shot.
+  MAX_DRAFTS_PER_RUN: 5,
 
   // ADDED (19 Aug 2026, per direct request): now that runReplyDrafter is
   // going back on a 5-minute auto-trigger (see setup_all_triggers.gs),
