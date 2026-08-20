@@ -557,15 +557,35 @@ function runReplyDrafterInner() {
   //
   // A follow-up attempt intersected the two by iterating
   // GmailApp.getDraftMessages() and calling .getThread() per draft to check
-  // the label client-side -- but that let 70 drafts through before the cap
-  // supposedly at 25 ever tripped. GmailApp's draft objects throw
-  // intermittently on access (see the "Not found" catch in
-  // draftAlreadyExistsFor() below), and each such exception silently
-  // undercounted here. Switched to one atomic Gmail search query instead --
-  // the same mechanism Gmail's own UI uses to count "in:draft" -- so there's
-  // no per-object iteration to throw and no room for the two signals to
-  // disagree.
-  const startingDraftCount = GmailApp.search('in:draft label:"' + CONFIG.LABEL_AI_DRAFTED + '"').length;
+  // the label client-side -- that let 70 drafts through before the cap
+  // supposedly at 25 ever tripped (root cause never fully confirmed).
+  //
+  // A third attempt tried a single combined query --
+  // GmailApp.search('in:draft label:"..."') -- on the theory that one
+  // atomic Gmail query beats client-side iteration. Confirmed WRONG live:
+  // it returned 0 while dozens of real matching drafts existed. Verified
+  // directly against the Gmail API that `label:"..."` alone correctly finds
+  // them (same label filter this file already relies on elsewhere, e.g. the
+  // `-label:"..."` exclusion in the main search query above, which has been
+  // working this whole time) -- so `in:draft` combined with `label:` in one
+  // query string is what breaks, not the label filter itself.
+  //
+  // Fixed by never combining them in one query: two separate, independently
+  // proven-reliable calls, intersected as plain JS thread-ID sets instead of
+  // trusting Gmail's query parser to AND them.
+  const draftThreadIds = new Set(
+    GmailApp.getDraftMessages().map(d => {
+      try {
+        return d.getThread().getId();
+      } catch (e) {
+        return null;
+      }
+    }).filter(Boolean)
+  );
+  const labeledThreadCount = GmailApp.search('label:"' + CONFIG.LABEL_AI_DRAFTED + '"')
+    .filter(t => draftThreadIds.has(t.getId()))
+    .length;
+  const startingDraftCount = labeledThreadCount;
   Logger.log('DIAGNOSTIC -- ' + startingDraftCount + ' draft(s) already in the folder at run start (cap: ' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ').');
 
   pagination:
