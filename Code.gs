@@ -545,13 +545,17 @@ function runReplyDrafterInner() {
   // ADDED (19 Aug 2026): folder-wide pending-drafts cap, separate from
   // MAX_DRAFTS_PER_RUN -- see CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER above for
   // why this is needed now that the drafter runs on an unattended timer.
-  // FIX (20 Aug 2026, real incident): GmailApp.getDraftMessages() counts
-  // EVERY unsent draft in the whole mailbox, not just this system's --
-  // Joana's unrelated manual drafts were inflating the count (58 vs. the
-  // 2 actual AI-Drafted-PendingReview threads), so the cap tripped and
-  // silently produced zero drafts every run. Scope the count to the same
-  // label this run already tracks for that state instead.
-  const startingDraftCount = labelDrafted ? labelDrafted.getThreads().length : 0;
+  //
+  // TEMPORARILY DISABLED (20 Aug 2026, real incident): GmailApp.getDraftMessages()
+  // reported 58, then (after trying to scope it to the AI-Drafted-PendingReview
+  // label instead) 443 -- while Gmail's own "in:draft" search shows 4. Neither
+  // number matches reality and the label-based attempt made it worse (that
+  // label is known-stale -- see reconcile_missing_drafts.gs, which exists
+  // specifically because it doesn't track whether a draft still exists).
+  // Rather than guess again and risk blocking real replies on a metric
+  // nobody trusts, this cap is disabled until the actual discrepancy is
+  // diagnosed properly. MAX_DRAFTS_PER_RUN below still bounds each run.
+  const startingDraftCount = 0;
   Logger.log('DIAGNOSTIC -- ' + startingDraftCount + ' draft(s) already in the folder at run start (cap: ' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ').');
 
   pagination:
