@@ -552,52 +552,37 @@ function runReplyDrafterInner() {
   // MAX_DRAFTS_PER_RUN -- see CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER above for
   // why this is needed now that the drafter runs on an unattended timer.
   //
-  // FIX (20 Aug 2026, real incident, root cause confirmed): the raw 58 from
-  // GmailApp.getDraftMessages() was real -- Joana keeps ~50+ permanent
-  // reusable copy-paste template drafts in the same Drafts folder ("Let's
-  // roll!", "See you in 10", "Sales Briefing - LEAD NAME - DATE", "Lead:
-  // Connection/Socials/No Socials", some dating back to Oct 2025). Those
-  // never go away, so counting the whole mailbox meant this cap was
-  // effectively dead from day one. The AI-Drafted-PendingReview label alone
-  // is no better (443 -- stale, per reconcile_missing_drafts.gs).
+  // REAL INCIDENT, 20 Aug 2026 -- four different ways of asking GmailApp
+  // for this count were each wrong, in different ways, live:
+  //   1. GmailApp.getDraftMessages().length -- counts Joana's ~50+ permanent
+  //      reusable template drafts too ("Let's roll!", "Sales Briefing -
+  //      LEAD NAME - DATE", etc., some from Oct 2025) -- cap was dead on
+  //      arrival regardless of real backlog.
+  //   2. labelDrafted.getThreads().length -- the label alone is stale (443
+  //      -- a thread keeps it even after its draft is long gone, per
+  //      reconcile_missing_drafts.gs, which exists for exactly that gap).
+  //   3. GmailApp.getDraftMessages().filter(d => thread has label) -- let 70
+  //      real drafts through before a cap of 25 ever tripped.
+  //   4. GmailApp.search('in:draft label:"..."') combined in one query
+  //      returned 0 despite dozens of real matches; splitting into two
+  //      separate GmailApp.search() calls (no message-object access at all)
+  //      still reported 11-12 against a real 44+.
+  // Every one of those goes through GmailApp's wrapper. The one method
+  // verified correct against this exact account during the incident (via a
+  // live Gmail API call, independent of GmailApp) was the Gmail REST API's
+  // own drafts.list with a `q` filter. See countPendingAiDrafts_() below --
+  // calls that same endpoint directly via UrlFetchApp, bypassing GmailApp's
+  // wrapper for this one check. No manifest/advanced-service changes needed
+  // (a past attempt at that broke Git Pull -- see git history) since this
+  // uses the OAuth token Apps Script already grants GmailApp.
   //
-  // A follow-up attempt intersected the two by iterating
-  // GmailApp.getDraftMessages() and calling .getThread() per draft to check
-  // the label client-side -- that let 70 drafts through before the cap
-  // supposedly at 25 ever tripped (root cause never fully confirmed).
-  //
-  // A third attempt tried a single combined query --
-  // GmailApp.search('in:draft label:"..."') -- on the theory that one
-  // atomic Gmail query beats client-side iteration. Confirmed WRONG live:
-  // it returned 0 while dozens of real matching drafts existed. Verified
-  // directly against the Gmail API that `label:"..."` alone correctly finds
-  // them (same label filter this file already relies on elsewhere, e.g. the
-  // `-label:"..."` exclusion in the main search query above, which has been
-  // working this whole time) -- so `in:draft` combined with `label:` in one
-  // query string is what breaks, not the label filter itself.
-  //
-  // Fixed attempt #3 (never combine in:draft with label: in one query
-  // string, intersect separately) -- STILL WRONG live: reported 11 while
-  // 44+ real drafts existed. GmailApp.getDraftMessages() itself is the
-  // common thread across every failed attempt so far -- this account's
-  // draft objects throw "Not found" on individual access frequently enough
-  // (confirmed separately in draftAlreadyExistsFor()'s own catch block)
-  // that ANY iteration touching them one-by-one silently undercounts.
-  //
-  // This next attempt drops GmailApp.getDraftMessages() ENTIRELY and stays
-  // at the thread level for both signals -- GmailApp.search('in:draft')
-  // returns threads, not message objects, so there's no per-draft object to
-  // throw. Still run as two separate calls (not combined in one query
-  // string, since that combination was independently confirmed broken).
-  //
-  // UNVERIFIED as of this commit -- could not execute Apps Script directly
-  // to confirm before pushing. CONFIG.MAX_DRAFTS_PER_RUN should be at 0
-  // (temporary, real incident) until this line's logged count is manually
-  // checked against the real Drafts folder count and confirmed correct.
-  const draftThreadIds = new Set(GmailApp.search('in:draft').map(t => t.getId()));
-  const startingDraftCount = GmailApp.search('label:"' + CONFIG.LABEL_AI_DRAFTED + '"')
-    .filter(t => draftThreadIds.has(t.getId()))
-    .length;
+  // FAILS CLOSED: if the API call itself fails for any reason, treat the
+  // folder as full (block new drafts) rather than defaulting to 0 (which is
+  // exactly the failure mode behind incidents #1-4 above -- an undercount
+  // silently allowing unlimited creation). Getting this wrong in the
+  // "blocks too eagerly" direction is a minor annoyance Joana can notice
+  // and rerun; getting it wrong the other way is the incident we just had.
+  const startingDraftCount = countPendingAiDrafts_();
   Logger.log('DIAGNOSTIC -- ' + startingDraftCount + ' draft(s) already in the folder at run start (cap: ' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ').');
 
   pagination:
@@ -1215,6 +1200,55 @@ function markdownLinksToPlain(text) {
 
 function threadHasLabel(thread, labelName) {
   return thread.getLabels().some(l => l.getName() === labelName);
+}
+
+/**
+ * ADDED (20 Aug 2026, real incident): counts real, currently-existing
+ * drafts on threads labeled CONFIG.LABEL_AI_DRAFTED, via the Gmail REST
+ * API's own drafts.list endpoint (q=label:...) instead of GmailApp -- see
+ * the long comment above the MAX_PENDING_DRAFTS_IN_FOLDER check in
+ * runReplyDrafterInner() for why GmailApp's own draft-counting methods
+ * were unreliable on this account.
+ *
+ * Paginates fully rather than trusting resultSizeEstimate (which the
+ * Gmail API documents as approximate) -- this cap needs an exact count,
+ * not an estimate, to mean anything.
+ *
+ * Returns CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER (i.e. "treat the folder as
+ * full") if the API call itself fails, so a transient error can only ever
+ * make this run too cautious, never silently permissive -- the exact
+ * failure mode behind every prior incident on this check.
+ */
+function countPendingAiDrafts_() {
+  const query = 'label:"' + CONFIG.LABEL_AI_DRAFTED + '"';
+  let total = 0;
+  let pageToken = null;
+
+  try {
+    do {
+      let url = 'https://gmail.googleapis.com/gmail/v1/users/me/drafts?q=' + encodeURIComponent(query) + '&maxResults=100';
+      if (pageToken) url += '&pageToken=' + encodeURIComponent(pageToken);
+
+      const response = UrlFetchApp.fetch(url, {
+        headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+        muteHttpExceptions: true,
+      });
+
+      if (response.getResponseCode() !== 200) {
+        Logger.log('countPendingAiDrafts_ -- Gmail API call failed (HTTP ' + response.getResponseCode() + '): ' + response.getContentText() + ' -- failing closed (treating folder as full).');
+        return CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER;
+      }
+
+      const data = JSON.parse(response.getContentText());
+      total += (data.drafts || []).length;
+      pageToken = data.nextPageToken || null;
+    } while (pageToken);
+
+    return total;
+  } catch (e) {
+    Logger.log('countPendingAiDrafts_ -- exception: ' + e + ' -- failing closed (treating folder as full).');
+    return CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER;
+  }
 }
 
 function draftAlreadyExistsFor(leadEmail) {
