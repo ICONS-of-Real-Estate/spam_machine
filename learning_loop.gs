@@ -10,28 +10,65 @@
  *    that actually went out, and records whether she sent the draft as-is
  *    or changed it — logging both versions side by side in "Learning Log".
  *
- * 2. generateSopSuggestions() — run this weekly (or whenever you want a
- *    check-in). It reads any un-reviewed edited rows from "Learning Log",
- *    sends them to the LLM (Kimi, falling back to Claude -- see
- *    callLlmWithFallback() in quota_guard_and_alerting.gs) in a batch, and
- *    asks it to identify patterns
- *    and propose SPECIFIC SOP changes. These land in the "SOP Suggestions"
- *    tab as PROPOSALS ONLY — nothing here rewrites the live SOP file or
- *    the automation's system prompt automatically. A human (Kris, or
- *    Kris + Claude in a chat) should review "SOP Suggestions" and merge
- *    anything real into Icons_Podcast_Reply_SOP.md and the drafter's
- *    system prompt by hand. This is deliberate: unsupervised SOP rewrites
- *    based on live sales replies can drift in ways nobody notices until
- *    it's already gone out to real leads.
+ * 2. generateSopSuggestions() — run this daily (18 Aug -> 19 Aug 2026:
+ *    switched from weekly to daily, per direct request, once the doc+email
+ *    step below made a daily cadence reviewable instead of overwhelming).
+ *    It reads any un-reviewed edited rows from "Learning Log", sends them
+ *    to the LLM (Kimi, falling back to Claude -- see callLlmWithFallback()
+ *    in quota_guard_and_alerting.gs) in a batch, and asks it to identify
+ *    patterns and propose SPECIFIC SOP changes. These still land in the
+ *    "SOP Suggestions" tab as a structured log (unchanged), but ALSO get
+ *    written into a same-day Google Doc (createSopSuggestionsDoc()) and
+ *    emailed to Goodness, Joana, and Kris (emailSopSuggestionsDoc()) so
+ *    there's an actual daily reviewable artifact instead of a sheet tab
+ *    nobody remembers to open. PROPOSALS ONLY, same as before — nothing
+ *    here rewrites the live SOP file or the drafter's system prompt
+ *    automatically. A human should review the emailed doc and merge
+ *    anything real into the live SOP by hand. This is deliberate:
+ *    unsupervised SOP rewrites based on live sales replies can drift in
+ *    ways nobody notices until it's already gone out to real leads.
  *
- * Add both as time-driven triggers in the same project:
+ * Add both as time-driven triggers in the same project (see
+ * setup_all_triggers.gs):
  *   - runLearningLoop      -> Day timer, once daily (e.g. overnight)
- *   - generateSopSuggestions -> Week timer, once weekly
+ *   - generateSopSuggestions -> Day timer, once daily, timed so the email
+ *     lands around 6 PM Pacific (see the timezone note in
+ *     setup_all_triggers.gs -- the script's own trigger clock runs on
+ *     Europe/Paris, not Pacific)
  */
 
 // ---------- 1. COMPARE SENT VS. DRAFTED ----------
 
 function runLearningLoop() {
+  // ADDED (17 Aug 2026, real incident): confirmed live that a different
+  // account than Joana's has its own trigger firing this function -- see
+  // assertRunningAsJoana() in lead_followup_sequences.gs. This reads real
+  // Gmail threads/sent messages, so running as the wrong account would just
+  // fail to find any of the thread IDs logged (they belong to Joana's
+  // mailbox specifically) rather than silently doing something useful.
+  if (!assertRunningAsJoana('runLearningLoop')) return;
+
+  // ADDED (17 Aug 2026): this function's dedup (skip a Thread ID already
+  // present in "Learning Log") is correct for a SINGLE execution, but
+  // nothing stopped two overlapping executions from both reading the log
+  // before either had appended anything -- both would then log the SAME
+  // thread comparison as a duplicate row. Same class of race as today's
+  // cross-account trigger duplicate-draft incident. Locking the same way
+  // runReplyDrafter() already does.
+  const lock = LockService.getScriptLock();
+  const gotLock = lock.tryLock(10000);
+  if (!gotLock) {
+    Logger.log('Another runLearningLoop execution is already in progress -- skipping this run rather than racing it.');
+    return;
+  }
+  try {
+    runLearningLoopInner();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function runLearningLoopInner() {
   if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') {
     Logger.log('CONFIG.SPREADSHEET_ID not set — skipping learning loop.');
     return;
@@ -51,10 +88,12 @@ function runLearningLoop() {
 
   const draftRows = draftsTab.getDataRange().getValues();
   const headers = draftRows[0];
+  const timestampCol = headers.indexOf('Timestamp');
   const threadIdCol = headers.indexOf('Thread ID');
   const subjectCol = headers.indexOf('Subject');
   const categoryCol = headers.indexOf('Category');
   const draftTextCol = headers.indexOf('Draft Text');
+  const sopModeCol = headers.indexOf('SOP Mode'); // -1 for rows logged before the split test existed
 
   let compared = 0;
 
@@ -71,7 +110,19 @@ function runLearningLoop() {
     }
     if (!thread) continue;
 
-    const sentReply = findSentReplyAfterDraft(thread);
+    // FIX (18 Aug 2026, real incident): findSentReplyAfterDraft() relied on
+    // isDraft() to skip the still-unsent draft itself, but that
+    // misidentified an unsent createThreadedDraft_() draft (Nancy's Hawaii
+    // thread, confirmed live -- still just one unsent draft in Gmail while
+    // the "sent reply" already showed up in Learning Log) as a genuine sent
+    // reply. Root cause is likely isDraft() not reliably recognizing drafts
+    // created via the Advanced Gmail API (raw MIME) the same way it
+    // recognizes GmailApp.createDraft() ones. Rather than chase that
+    // compatibility gap, guard with a fact that can't be wrong regardless of
+    // cause: a genuine sent reply can only have a timestamp AFTER the draft
+    // was created.
+    const draftCreatedAt = row[timestampCol];
+    const sentReply = findSentReplyAfterDraft(thread, draftCreatedAt);
     if (!sentReply) continue; // Joana hasn't sent it yet — check again tomorrow
 
     const draftText = row[draftTextCol];
@@ -87,6 +138,7 @@ function runLearningLoop() {
       sentText,
       wasEdited,
       false, // Reviewed For SOP — starts false, generateSopSuggestions() flips it to true
+      sopModeCol !== -1 ? (row[sopModeCol] || 'joana') : 'joana',
     ]);
 
     compared++;
@@ -95,16 +147,33 @@ function runLearningLoop() {
   Logger.log('Learning loop run complete. Newly compared: ' + compared);
 }
 
-function findSentReplyAfterDraft(thread) {
+function findSentReplyAfterDraft(thread, draftCreatedAt) {
   const messages = thread.getMessages();
   // Look from the end for a message sent by our own account (i.e. Joana actually replied)
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].isDraft && messages[i].isDraft()) continue;
+    // PRIMARY GUARD (18 Aug 2026, real incident): isDraft() alone isn't
+    // trustworthy for drafts created via the Advanced Gmail API (see the
+    // real incident noted at the call site) -- it let an unsent draft
+    // through and got logged as a "sent reply" that was never actually
+    // sent. A message that predates the draft it's supposedly replying to
+    // cannot possibly be the real sent reply, so this check catches that
+    // case even when isDraft() is wrong.
+    if (draftCreatedAt && messages[i].getDate().getTime() <= new Date(draftCreatedAt).getTime()) continue;
     const from = messages[i].getFrom().toLowerCase();
-    const isOwnAccount = CONFIG.INTERNAL_DOMAINS.some(d => from.indexOf('@' + d) !== -1);
-    // Heuristic: it's a genuine sent reply if it's from an internal address
-    // AND it's not one of the original 4-touch sequence messages (those come
-    // from the lookalike outreach domains, not the real inbox owner sending).
+    // FIX (18 Aug 2026, real incident): this used to accept ANY
+    // CONFIG.INTERNAL_DOMAINS address as "Joana's genuine reply" -- but
+    // network@ardorseo.com is a forwarding/distribution alias, not a real
+    // reply sender: it's the address the lead's OWN forwarded message
+    // routes through (see the search query in Code.gs targeting
+    // to:"network@ardorseo.com"). A "Fwd: Re: ..." message from that alias
+    // satisfied the old check and got returned as the "sent reply" even
+    // though its body is just the forwarded lead text with zero actual
+    // reply content -- this is confirmed to be why the vast majority of
+    // Learning Log rows came back with an empty/no-reply Final Sent Text
+    // across every category (83-92% empty in a full audit). Only Joana's
+    // own sending address is ever a genuine reply.
+    const isOwnAccount = from.indexOf(EXPECTED_RUN_ACCOUNT) !== -1;
     if (isOwnAccount) return messages[i];
   }
   return null;
@@ -144,6 +213,25 @@ function levenshteinRough(a, b) {
 // ---------- 2. SURFACE SOP SUGGESTIONS (proposals only, never auto-applied) ----------
 
 function generateSopSuggestions() {
+  // ADDED (17 Aug 2026, real incident): without a lock, two overlapping
+  // executions could both read the same unreviewed rows before either
+  // marks them reviewed, and both send the same examples to the LLM --
+  // wasted API cost and duplicate rows in "SOP Suggestions". Same fix as
+  // runLearningLoopInner() above and runReplyDrafter() in Code.gs.
+  const lock = LockService.getScriptLock();
+  const gotLock = lock.tryLock(10000);
+  if (!gotLock) {
+    Logger.log('Another generateSopSuggestions execution is already in progress -- skipping this run rather than racing it.');
+    return;
+  }
+  try {
+    generateSopSuggestionsInner();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function generateSopSuggestionsInner() {
   if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') return;
 
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
@@ -178,13 +266,37 @@ function generateSopSuggestions() {
     return;
   }
 
-  const examplesText = unreviewedEdits
+  // CAPPED (17 Aug 2026, real incident): this function was designed around a
+  // weekly trickle of a handful of edits, and dumped ALL unreviewed edits
+  // into ONE LLM call with no batching. The first real run found 74 edits
+  // at once (this exact function had never run before today) and the
+  // resulting request -- 1,203,882 tokens -- blew past Kimi's 262,144 limit
+  // and would have blown past any provider's context window regardless of
+  // which one was used; this was never a "wrong provider" problem. Slicing
+  // to a bounded batch per run and leaving the rest for the next run fixes
+  // it regardless of how large the backlog ever gets again.
+  //
+  // KEPT at 5 (19 Aug 2026) even though this now runs daily instead of
+  // weekly, and even though the doc+email step below makes a bigger batch
+  // easier to actually read than raw sheet rows were -- same "start small,
+  // verify quality, raise later once trusted" reasoning as everywhere else
+  // in this project. Raise it once a few days of daily docs have come back
+  // clean.
+  const SOP_SUGGESTIONS_BATCH_SIZE = 5; // start small, verify quality, raise later once trusted
+  const deferredCount = Math.max(0, unreviewedEdits.length - SOP_SUGGESTIONS_BATCH_SIZE);
+  const batchEdits = unreviewedEdits.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
+  const batchRowIndexes = rowIndexesToMark.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
+  if (deferredCount > 0) {
+    Logger.log('generateSopSuggestions -- ' + unreviewedEdits.length + ' unreviewed edits found; processing ' + batchEdits.length + ' this run, deferring ' + deferredCount + ' to the next run(s).');
+  }
+
+  const examplesText = batchEdits
     .map((e, idx) => `EXAMPLE ${idx + 1} (category: ${e.category})\n--- AI DRAFTED ---\n${e.original}\n--- JOANA ACTUALLY SENT ---\n${e.final}`)
     .join('\n\n');
 
   const systemPrompt = `You review edited email drafts to find patterns in how a human editor (Joana) changes AI-drafted sales replies, and propose specific, concrete updates to the SOP that produced the drafts. You are NOT rewriting the SOP yourself — you are proposing changes for a human to review and approve. Be specific: quote the actual phrasing pattern you see repeated across edits, don't generalize vaguely. If the edits don't show a clear repeated pattern (e.g. they're all one-off stylistic tweaks with no common thread), say so plainly rather than inventing a pattern.`;
 
-  const userPrompt = `Here are ${unreviewedEdits.length} examples of AI-drafted replies versus what Joana actually sent instead:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested SOP changes. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
+  const userPrompt = `Here are ${batchEdits.length} examples of AI-drafted replies versus what Joana actually sent instead:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested SOP changes. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
 
   const data = callLlmWithFallback(systemPrompt, userPrompt, 2000, 'generateSopSuggestions');
   const textBlock = data.content.find(c => c.type === 'text');
@@ -201,16 +313,85 @@ function generateSopSuggestions() {
   suggestions.forEach(s => {
     suggestionsTab.appendRow([
       new Date(),
-      unreviewedEdits.length,
+      batchEdits.length,
       `[${s.confidence}] ${s.pattern_observed} -> ${s.suggested_change}`,
       'pending',
     ]);
   });
 
   // Mark these rows as reviewed so they don't get re-batched next week
-  rowIndexesToMark.forEach(rowNum => {
+  batchRowIndexes.forEach(rowNum => {
     learningTab.getRange(rowNum, reviewedCol + 1).setValue(true);
   });
 
-  Logger.log('Generated ' + suggestions.length + ' SOP suggestions from ' + unreviewedEdits.length + ' edited examples.');
+  Logger.log('Generated ' + suggestions.length + ' SOP suggestions from ' + batchEdits.length + ' edited examples' + (deferredCount > 0 ? ' (' + deferredCount + ' more deferred to next run).' : '.'));
+
+  // ADDED (19 Aug 2026, per direct request): the "SOP Suggestions" sheet
+  // tab above is kept as the permanent structured log, but nobody reliably
+  // opens a sheet tab on their own -- this creates an actual reviewable
+  // document for today's batch and emails it directly, so review is a
+  // reply to an email, not a "remember to go check the sheet" chore.
+  const docFile = createSopSuggestionsDoc(batchEdits, suggestions, deferredCount);
+  emailSopSuggestionsDoc(docFile, suggestions.length);
+}
+
+// ---------- 3. DAILY REVIEWABLE DOC + EMAIL (added 19 Aug 2026) ----------
+
+function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount) {
+  const dateStr = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'MMMM d, yyyy');
+  const doc = DocumentApp.create('SOP Suggestions -- ' + dateStr);
+  const body = doc.getBody();
+
+  body.appendParagraph('SOP Suggestions -- ' + dateStr).setHeading(DocumentApp.ParagraphHeading.HEADING1);
+  body.appendParagraph(
+    'Generated automatically from ' + batchEdits.length + ' real edited repl' + (batchEdits.length === 1 ? 'y' : 'ies') +
+    ' found today (AI draft vs. what Joana actually sent).' +
+    (deferredCount > 0 ? ' ' + deferredCount + ' more edited example(s) are still queued and will show up in a future day\'s doc.' : '')
+  );
+  body.appendParagraph('PROPOSALS ONLY -- nothing here has been applied to the live SOP. Review each one below and copy anything real into the live SOP doc by hand.');
+  body.appendHorizontalRule();
+
+  if (suggestions.length === 0) {
+    body.appendParagraph('No clear repeated pattern found in today\'s edits -- nothing to propose.');
+  } else {
+    suggestions.forEach((s, idx) => {
+      body.appendParagraph('Suggestion ' + (idx + 1) + ' -- ' + String(s.confidence).toUpperCase() + ' confidence').setHeading(DocumentApp.ParagraphHeading.HEADING2);
+      body.appendParagraph('Pattern observed: ' + s.pattern_observed);
+      body.appendParagraph('Suggested change: ' + s.suggested_change);
+    });
+  }
+
+  body.appendHorizontalRule();
+  body.appendParagraph('Underlying examples this was generated from').setHeading(DocumentApp.ParagraphHeading.HEADING2);
+  batchEdits.forEach((e, idx) => {
+    body.appendParagraph('Example ' + (idx + 1) + ' (' + e.category + ')').setHeading(DocumentApp.ParagraphHeading.HEADING3);
+    body.appendParagraph('AI drafted: ' + e.original);
+    body.appendParagraph('Joana actually sent: ' + e.final);
+  });
+
+  doc.saveAndClose();
+  const file = DriveApp.getFileById(doc.getId());
+  // Share with just the three reviewers, not "anyone with the link" --
+  // this is real lead-reply content, no reason to widen access beyond who
+  // actually needs to review it.
+  file.addViewers(['goodness@iconsofrealestate.com', 'joana@iconsofrealestate.com', 'kris@iconsofrealestate.com']);
+  return file;
+}
+
+function emailSopSuggestionsDoc(docFile, suggestionsCount) {
+  const dateStr = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'MMMM d, yyyy');
+  const body =
+    'This email was written by Claude.\n\n' +
+    'Today\'s automated review of edited replies found ' + suggestionsCount + ' potential SOP update' + (suggestionsCount === 1 ? '' : 's') +
+    ', based on real differences between what the AI drafted and what Joana actually sent:\n\n' +
+    docFile.getUrl() + '\n\n' +
+    'Please review and decide whether to add any of these to the live SOP -- nothing here has been applied automatically.';
+
+  MailApp.sendEmail({
+    to: 'goodness@iconsofrealestate.com,joana@iconsofrealestate.com,kris@iconsofrealestate.com',
+    subject: '[Written by Claude] Daily SOP Suggestions -- ' + dateStr,
+    body: body
+  });
+
+  Logger.log('SOP suggestions doc emailed to Goodness, Joana, and Kris: ' + docFile.getUrl());
 }

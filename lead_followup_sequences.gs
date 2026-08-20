@@ -79,6 +79,21 @@
 const PODCAST_SALES_QUEUE_TAB = 'Podcast Sales Follow-Up Queue';
 const HUB_GUEST_QUEUE_TAB = 'Hub Guest Follow-Up Queue';
 const BENS_CALL_LIST_TAB_V2 = 'Bens Call List';
+const NEEDS_CLASSIFICATION_REVIEW_TAB = 'Needs Classification Review';
+
+// SAFETY NET (17 Aug 2026, real incident): classifyAndDraft() in Code.gs
+// sometimes assigns no_decline to a reply that's actually a scheduling
+// constraint or an info request -- exactly the mistake that caused
+// Montell/Mariann/Mumu to get drafted as declines. The system prompt now
+// reinforces the SOP's own distinction more forcefully, but an LLM
+// judgment call can still be wrong on a given reply, so this is a
+// deterministic second check specifically gating what's allowed to enter
+// the automated Hub Guest follow-up cadence: if a no_decline reply
+// contains one of these signal phrases, don't trust the classification --
+// route it to a human instead of silently enrolling it. This does not
+// touch classifyAndDraft() itself or the direct reply already drafted;
+// it only gates whether THIS cadence acts on that category automatically.
+const AMBIGUOUS_NO_DECLINE_SIGNALS = /(send (me |)(the |)(info|information|framework|details|samples)|tell me more|know more about|what('s| is) involved|how (does|would) (this|it) work|not (right now|available) (this week|today|right now)\b|maybe (later|next|in a) (week|month)|can we (talk|chat|discuss) (later|next)|too (busy|swamped) (this|right now)|out of (town|office) (this week|until)|reach (me|out) (again|later)|circle back|touch base (later|next))/i;
 const FOLLOWUP_LEARNING_LOG_TAB = 'Follow-Up Learning Log';
 const FOLLOWUP_WORKING_DAYS_GAP = 2;
 const FOLLOWUP_DEEP_DIVE_LOOKBACK_DAYS = 270;
@@ -537,13 +552,61 @@ function getRunningAccountEmail() {
   }
 }
 
-// Returns true if running as Joana; otherwise logs a loud warning and returns
-// false so the caller exits before touching Gmail or the queues.
+// Returns true if running as Joana. Otherwise (UPGRADED 17 Aug 2026, real
+// incident): the original version just logged a line and returned false --
+// which meant a wrong-account trigger firing showed up as a perfectly normal
+// "completed" execution in the Executions view, indistinguishable from a
+// real successful run unless someone happened to open that specific row's
+// log. That's exactly how the "Other user" triggers went unnoticed. Now it
+// throws (so the execution shows red/Failed, visible at a glance in the
+// Executions list) AND emails Kris via sendOpsAlert (rate-limited to once
+// per callerName per day, so a trigger firing every 5 minutes doesn't spam).
+// Existing call sites written as `if (!assertRunningAsJoana(...)) return;`
+// still work unchanged -- the throw interrupts before that check is ever
+// evaluated false.
 function assertRunningAsJoana(callerName) {
   const account = getRunningAccountEmail();
-  if (account === EXPECTED_RUN_ACCOUNT) return true;
-  Logger.log('ABORT (' + callerName + '): running as "' + (account || 'UNKNOWN') + '" but this system must run as ' + EXPECTED_RUN_ACCOUNT + ' (the inbox it drafts from). No action taken. Re-run under Joana\'s account.');
-  return false;
+  if (account === EXPECTED_RUN_ACCOUNT) {
+    // ADDED (18 Aug 2026, live "Gmail is not defined" investigation): the
+    // success path never logged anything, so every execution log was silent
+    // about which account actually ran -- had to be inferred indirectly.
+    // Logging it plainly on every run costs nothing and settles "is this
+    // really running as Joana" at a glance instead of by deduction.
+    Logger.log('assertRunningAsJoana(' + callerName + '): running as ' + account);
+    return true;
+  }
+
+  const message = callerName + ' fired under the wrong account ("' + (account || 'UNKNOWN') +
+    '" instead of ' + EXPECTED_RUN_ACCOUNT + '"). No action was taken. This means a trigger for ' +
+    callerName + ' exists under a different Google account -- see deleteAllMyTriggers() in ' +
+    'setup_all_triggers.gs (that account has to run it themselves; this account cannot see or ' +
+    'delete another user\'s triggers).';
+  Logger.log('ABORT (' + callerName + '): ' + message);
+  sendOpsAlert('Wrong-account trigger fired: ' + callerName, message);
+  throw new Error(message);
+}
+
+// ---------- GMAIL ADVANCED SERVICE GUARD (18 Aug 2026, real incident) ----------
+// createThreadedDraft_() in Code.gs requires the Gmail Advanced Service
+// (Services > + > Gmail API in the editor -- a manual, per-project setting
+// that a Git Pull silently undoes since appsscript.json in the repo doesn't
+// declare it). Without this guard, a run with the service missing would
+// spend its whole runtime budget calling the LLM for every candidate thread
+// and only fail at the final draft-creation step each time -- 0 drafts
+// created, full API cost paid anyway, and no clear signal why. Checking
+// `typeof Gmail` once up front catches this before any of that spend.
+function assertGmailAdvancedServiceEnabled(callerName) {
+  if (typeof Gmail !== 'undefined') return true;
+
+  const message = callerName + ' aborted: the Gmail Advanced Service is not enabled on this project ' +
+    '("Gmail is not defined"). This gets silently wiped by Git Pull (appsscript.json in the repo has ' +
+    'an empty dependencies block, and pulling overwrites the live manifest) -- re-enable it manually: ' +
+    'Services (+ icon in the editor sidebar) > Gmail API > Add, then click into it and hit Save even if ' +
+    'it already shows as added, to force it to actually persist. No threads were scanned and no LLM ' +
+    'calls were made this run.';
+  Logger.log('ABORT (' + callerName + '): ' + message);
+  sendOpsAlert('Gmail Advanced Service missing -- run aborted: ' + callerName, message);
+  throw new Error(message);
 }
 
 // PAUSED (17 Aug 2026, real incident): classifyAndDraft() in Code.gs has
@@ -560,6 +623,11 @@ const HUB_GUEST_FOLLOWUPS_ENABLED = false;
 
 function runLeadFollowUpCycle() {
   if (!assertRunningAsJoana('runLeadFollowUpCycle')) return;
+  // Same Gmail Advanced Service dependency as runReplyDrafter -- see the
+  // guard's own comment in lead_followup_sequences.gs for why this keeps
+  // getting silently wiped by Git Pull. Both draft-creation paths below
+  // (Podcast Sales and Hub Guest follow-ups) go through createThreadedDraft_().
+  if (!assertGmailAdvancedServiceEnabled('runLeadFollowUpCycle')) return;
   ensureFollowUpTabsExistV2();
   // SELF-HEAL (15 Aug 2026): reconcile BEFORE registering/advancing, so any
   // row stuck at "_APPROVAL" whose draft was deleted (manually or via a wipe)
@@ -717,6 +785,7 @@ function registerNewHubGuestInvites(lookbackDaysOverride) {
   const draftsData = draftsLogTab.getDataRange().getValues().slice(1);
   const stateDirectory = loadStateDirectory();
   let enrolled = 0;
+  const ambiguousFlags = []; // accumulated for ONE batched alert at the end, not one email per lead
 
   draftsData.forEach(row => {
     const [timestamp, threadId, subject] = row;
@@ -763,8 +832,21 @@ function registerNewHubGuestInvites(lookbackDaysOverride) {
       return;
     }
 
-    const name = extractNameFromSubject(subject) || 'there';
     const originalReplyMsg = messages[0];
+
+    // SAFETY NET (17 Aug 2026, real incident): re-scan the prospect's ACTUAL
+    // original reply text (not the AI's drafted reply) before trusting a
+    // no_decline classification enough to auto-enroll it. See
+    // AMBIGUOUS_NO_DECLINE_SIGNALS above for why.
+    const prospectReplyText = extractProspectFreshReplyText(originalReplyMsg);
+    if (AMBIGUOUS_NO_DECLINE_SIGNALS.test(prospectReplyText)) {
+      Logger.log('registerNewHubGuestInvites -- SKIPPED (ambiguous no_decline, looks like a scheduling constraint or info request -- flagged for human review instead): ' + threadId + ' -- "' + prospectReplyText.slice(0, 200) + '"');
+      const wasNew = flagAmbiguousNoDeclineForReview(threadId, subject, realEmail, prospectReplyText);
+      if (wasNew) ambiguousFlags.push({ threadId: threadId, subject: subject, email: realEmail, excerpt: prospectReplyText.slice(0, 200) });
+      return;
+    }
+
+    const name = extractNameFromSubject(subject) || 'there';
     const originalReplyTime = originalReplyMsg.getDate();
 
     queueTab.appendRow([
@@ -777,7 +859,43 @@ function registerNewHubGuestInvites(lookbackDaysOverride) {
     enrolled++;
   });
 
-  Logger.log('registerNewHubGuestInvites complete. Enrolled ' + enrolled + ' new lead(s).');
+  Logger.log('registerNewHubGuestInvites complete. Enrolled ' + enrolled + ' new lead(s), flagged ' + ambiguousFlags.length + ' ambiguous no_decline(s) for review.');
+
+  if (ambiguousFlags.length > 0) {
+    const lines = ambiguousFlags
+      .map(f => '- "' + f.subject + '" (' + f.email + '): "' + f.excerpt + '" -- https://mail.google.com/mail/u/0/#all/' + f.threadId)
+      .join('\n');
+    sendOpsAlert(
+      ambiguousFlags.length + ' ambiguous no_decline(s) need a human look',
+      'classifyAndDraft() categorized these as no_decline, but the prospect\'s actual reply looks like it might be a ' +
+      'scheduling constraint or info request instead of a real decline -- exactly the pattern that caused ' +
+      'Montell/Mariann/Mumu to get drafted as declines earlier. Registration into the Hub Guest follow-up queue was ' +
+      'skipped for all of these; logged in the "' + NEEDS_CLASSIFICATION_REVIEW_TAB + '" tab for a manual check:\n\n' + lines
+    );
+  }
+}
+
+// Logs an ambiguous no_decline to the review tab, deduped by Thread ID.
+// Returns true if this was a NEW flag (caller batches these into one
+// summary alert rather than emailing per-lead), false if already logged.
+function flagAmbiguousNoDeclineForReview(threadId, subject, email, replyExcerpt) {
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  let tab = ss.getSheetByName(NEEDS_CLASSIFICATION_REVIEW_TAB);
+  if (!tab) {
+    tab = ss.insertSheet(NEEDS_CLASSIFICATION_REVIEW_TAB);
+    tab.appendRow(['Flagged At', 'Thread ID', 'Subject', 'Prospect Email', 'Prospect Reply Excerpt', 'Thread Link', 'Status (pending/confirmed_decline/actually_interested)']);
+  }
+
+  const alreadyFlagged = new Set(
+    tab.getDataRange().getValues().slice(1).map(row => row[1])
+  );
+  if (alreadyFlagged.has(threadId)) return false;
+
+  tab.appendRow([
+    new Date(), threadId, subject, email, replyExcerpt.slice(0, 500),
+    'https://mail.google.com/mail/u/0/#all/' + threadId, 'pending'
+  ]);
+  return true;
 }
 
 // ---------- DRAFT CAP HELPER ----------
@@ -1053,6 +1171,26 @@ function wipeScriptMadeDrafts(applyDeletions) {
 // Run daily (e.g. after Goodness finishes her batch). Safe to re-run:
 // reviewed rows are marked so they aren't re-batched.
 function summarizeFollowUpLearning() {
+  // ADDED (17 Aug 2026, real incident): without a lock, two overlapping
+  // executions could both read the same unreviewed rows before either
+  // marks them reviewed, and both send the same examples to the LLM --
+  // wasted API cost and duplicate rows in "SOP Suggestions". Same fix as
+  // generateSopSuggestions()/runLearningLoop() in learning_loop.gs and
+  // runReplyDrafter() in Code.gs.
+  const lock = LockService.getScriptLock();
+  const gotLock = lock.tryLock(10000);
+  if (!gotLock) {
+    Logger.log('Another summarizeFollowUpLearning execution is already in progress -- skipping this run rather than racing it.');
+    return;
+  }
+  try {
+    summarizeFollowUpLearningInner();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function summarizeFollowUpLearningInner() {
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const logTab = ss.getSheetByName(FOLLOWUP_LEARNING_LOG_TAB);
   let suggestionsTab = ss.getSheetByName('SOP Suggestions');
@@ -1098,13 +1236,27 @@ function summarizeFollowUpLearning() {
     return;
   }
 
-  const examplesText = edits
+  // CAPPED (17 Aug 2026, real incident): same fix as generateSopSuggestions()
+  // in learning_loop.gs -- dumping ALL unreviewed edits into one LLM call
+  // has no ceiling and will eventually exceed any provider's context window
+  // (confirmed there: 74 edits at once produced a 1.2M-token request against
+  // Kimi's 262K limit). Bounding the batch here too, before this cadence
+  // ever accumulates a large enough backlog to hit the same wall.
+  const SOP_SUGGESTIONS_BATCH_SIZE = 5; // start small, verify quality, raise later once trusted
+  const deferredCount = Math.max(0, edits.length - SOP_SUGGESTIONS_BATCH_SIZE);
+  const batchEdits = edits.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
+  const batchRowIndexes = rowIndexesToMark.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
+  if (deferredCount > 0) {
+    Logger.log('summarizeFollowUpLearning -- ' + edits.length + ' unreviewed edits found; processing ' + batchEdits.length + ' this run, deferring ' + deferredCount + ' to the next run(s).');
+  }
+
+  const examplesText = batchEdits
     .map((e, idx) => `EXAMPLE ${idx + 1} (cadence: ${e.cadence}, step: ${e.step})\n--- AI DRAFTED ---\n${e.drafted}\n--- GOODNESS ACTUALLY SENT ---\n${e.sent}`)
     .join('\n\n');
 
   const systemPrompt = `You review edited email follow-up drafts to find patterns in how a human editor changes AI-drafted follow-up emails, and propose specific, concrete updates to the "## FOLLOW-UP DRAFTING" section of the SOP that produced them. You are NOT rewriting the SOP yourself -- you propose changes for a human to review and approve. Be specific: quote the actual phrasing pattern repeated across edits, don't generalize vaguely. If the edits show no clear repeated pattern (all one-off stylistic tweaks with no common thread), say so plainly rather than inventing a pattern.`;
 
-  const userPrompt = `Here are ${edits.length} examples of AI-drafted follow-up emails versus what the human editor actually sent:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested changes to the FOLLOW-UP DRAFTING section. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
+  const userPrompt = `Here are ${batchEdits.length} examples of AI-drafted follow-up emails versus what the human editor actually sent:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested changes to the FOLLOW-UP DRAFTING section. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
 
   const data = callLlmWithFallback(systemPrompt, userPrompt, 2000, 'summarizeFollowUpLearning');
   const textBlock = data.content.find(c => c.type === 'text');
@@ -1124,7 +1276,7 @@ function summarizeFollowUpLearning() {
   suggestions.forEach(s => {
     suggestionsTab.appendRow([
       new Date(),
-      edits.length,
+      batchEdits.length,
       '[FOLLOW-UP][' + s.confidence + '] ' + s.pattern_observed + ' -> ' + s.suggested_change,
       'pending'
     ]);
@@ -1137,11 +1289,11 @@ function summarizeFollowUpLearning() {
     logTab.getRange(1, headers.length + 1).setValue('Reviewed For SOP');
     reviewedColIndex = headers.length;
   }
-  rowIndexesToMark.forEach(rowNum => {
+  batchRowIndexes.forEach(rowNum => {
     logTab.getRange(rowNum, reviewedColIndex + 1).setValue(true);
   });
 
-  Logger.log('summarizeFollowUpLearning -- generated ' + suggestions.length + ' FOLLOW-UP SOP suggestion(s) from ' + edits.length + ' edited example(s). Review them in the "SOP Suggestions" tab.');
+  Logger.log('summarizeFollowUpLearning -- generated ' + suggestions.length + ' FOLLOW-UP SOP suggestion(s) from ' + batchEdits.length + ' edited example(s)' + (deferredCount > 0 ? ' (' + deferredCount + ' more deferred to next run)' : '') + '. Review them in the "SOP Suggestions" tab.');
 }
 
 // Quick read-only status check: how many drafts in THIS Gmail account belong
@@ -1337,7 +1489,14 @@ function advancePodcastSalesFollowUps() {
       const plainBody = markdownLinksToPlain(body);
       const fullDraftText = note + plainBody + buildQuotedHistoryForReply(thread);
 
-      GmailApp.createDraft(email, thread.getFirstMessageSubject().replace(/^(fwd:\s*)+/i, '').trim(), fullDraftText, { cc: CONFIG.NETWORK_CC_ON_REPLY });
+      // FIX (17 Aug 2026, real incident -- Joana's top-priority, repeatedly
+      // flagged complaint): GmailApp.createDraft() composed a brand-new,
+      // unthreaded message every time. See createThreadedDraft_() in
+      // Code.gs for the full history and why the base service can't do
+      // this correctly. Plain-text only here (this cadence doesn't build
+      // an HTML body), so the html part just wraps the same text.
+      const cleanFollowUpSubject = thread.getFirstMessageSubject().replace(/^(fwd:\s*)+/i, '').trim();
+      createThreadedDraft_(thread, last, email, CONFIG.NETWORK_CC_ON_REPLY, cleanFollowUpSubject, fullDraftText, escapeHtml(fullDraftText).replace(/\n/g, '<br>'));
 
       queueTab.getRange(r + 1, 5).setValue(nextStep);
       queueTab.getRange(r + 1, 6).setValue(new Date());
@@ -1451,7 +1610,14 @@ function advanceHubGuestFollowUps() {
       const plainBody = followUp.draftBody;
       const fullDraftText = note + plainBody + buildQuotedHistoryForReply(thread);
 
-      GmailApp.createDraft(email, thread.getFirstMessageSubject().replace(/^(fwd:\s*)+/i, '').trim(), fullDraftText, { cc: CONFIG.NETWORK_CC_ON_REPLY });
+      // FIX (17 Aug 2026, real incident -- Joana's top-priority, repeatedly
+      // flagged complaint): GmailApp.createDraft() composed a brand-new,
+      // unthreaded message every time. See createThreadedDraft_() in
+      // Code.gs for the full history and why the base service can't do
+      // this correctly. Plain-text only here (this cadence doesn't build
+      // an HTML body), so the html part just wraps the same text.
+      const cleanHubGuestSubject = thread.getFirstMessageSubject().replace(/^(fwd:\s*)+/i, '').trim();
+      createThreadedDraft_(thread, last, email, CONFIG.NETWORK_CC_ON_REPLY, cleanHubGuestSubject, fullDraftText, escapeHtml(fullDraftText).replace(/\n/g, '<br>'));
 
       queueTab.getRange(r + 1, 8).setValue(nextStep);
       queueTab.getRange(r + 1, 9).setValue(new Date());
