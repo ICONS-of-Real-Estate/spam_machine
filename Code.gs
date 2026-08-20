@@ -547,26 +547,25 @@ function runReplyDrafterInner() {
   // why this is needed now that the drafter runs on an unattended timer.
   //
   // FIX (20 Aug 2026, real incident, root cause confirmed): the raw 58 from
-  // GmailApp.getDraftMessages() was in fact real -- Joana keeps ~50+
-  // permanent reusable copy-paste template drafts in the same Drafts folder
-  // ("Let's roll!", "See you in 10", "Sales Briefing - LEAD NAME - DATE",
-  // "Lead: Connection/Socials/No Socials", some dating back to Oct 2025).
-  // Those will never go away, so counting the whole mailbox meant this cap
-  // was tripped from day one regardless of actual review backlog. The
-  // AI-Drafted-PendingReview label alone is no better (443 -- stale, per
-  // reconcile_missing_drafts.gs). The correct count intersects both: a
-  // draft that ACTUALLY EXISTS right now, scoped to threads THIS SYSTEM
-  // labeled -- either signal alone is wrong, both together is what
-  // "drafts actually awaiting review" means.
-  const startingDraftCount = labelDrafted
-    ? GmailApp.getDraftMessages().filter(d => {
-        try {
-          return threadHasLabel(d.getThread(), CONFIG.LABEL_AI_DRAFTED);
-        } catch (e) {
-          return false;
-        }
-      }).length
-    : 0;
+  // GmailApp.getDraftMessages() was real -- Joana keeps ~50+ permanent
+  // reusable copy-paste template drafts in the same Drafts folder ("Let's
+  // roll!", "See you in 10", "Sales Briefing - LEAD NAME - DATE", "Lead:
+  // Connection/Socials/No Socials", some dating back to Oct 2025). Those
+  // never go away, so counting the whole mailbox meant this cap was
+  // effectively dead from day one. The AI-Drafted-PendingReview label alone
+  // is no better (443 -- stale, per reconcile_missing_drafts.gs).
+  //
+  // A follow-up attempt intersected the two by iterating
+  // GmailApp.getDraftMessages() and calling .getThread() per draft to check
+  // the label client-side -- but that let 70 drafts through before the cap
+  // supposedly at 25 ever tripped. GmailApp's draft objects throw
+  // intermittently on access (see the "Not found" catch in
+  // draftAlreadyExistsFor() below), and each such exception silently
+  // undercounted here. Switched to one atomic Gmail search query instead --
+  // the same mechanism Gmail's own UI uses to count "in:draft" -- so there's
+  // no per-object iteration to throw and no room for the two signals to
+  // disagree.
+  const startingDraftCount = GmailApp.search('in:draft label:"' + CONFIG.LABEL_AI_DRAFTED + '"').length;
   Logger.log('DIAGNOSTIC -- ' + startingDraftCount + ' draft(s) already in the folder at run start (cap: ' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ').');
 
   pagination:
