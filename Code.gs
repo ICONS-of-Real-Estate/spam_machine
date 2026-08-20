@@ -546,16 +546,27 @@ function runReplyDrafterInner() {
   // MAX_DRAFTS_PER_RUN -- see CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER above for
   // why this is needed now that the drafter runs on an unattended timer.
   //
-  // TEMPORARILY DISABLED (20 Aug 2026, real incident): GmailApp.getDraftMessages()
-  // reported 58, then (after trying to scope it to the AI-Drafted-PendingReview
-  // label instead) 443 -- while Gmail's own "in:draft" search shows 4. Neither
-  // number matches reality and the label-based attempt made it worse (that
-  // label is known-stale -- see reconcile_missing_drafts.gs, which exists
-  // specifically because it doesn't track whether a draft still exists).
-  // Rather than guess again and risk blocking real replies on a metric
-  // nobody trusts, this cap is disabled until the actual discrepancy is
-  // diagnosed properly. MAX_DRAFTS_PER_RUN below still bounds each run.
-  const startingDraftCount = 0;
+  // FIX (20 Aug 2026, real incident, root cause confirmed): the raw 58 from
+  // GmailApp.getDraftMessages() was in fact real -- Joana keeps ~50+
+  // permanent reusable copy-paste template drafts in the same Drafts folder
+  // ("Let's roll!", "See you in 10", "Sales Briefing - LEAD NAME - DATE",
+  // "Lead: Connection/Socials/No Socials", some dating back to Oct 2025).
+  // Those will never go away, so counting the whole mailbox meant this cap
+  // was tripped from day one regardless of actual review backlog. The
+  // AI-Drafted-PendingReview label alone is no better (443 -- stale, per
+  // reconcile_missing_drafts.gs). The correct count intersects both: a
+  // draft that ACTUALLY EXISTS right now, scoped to threads THIS SYSTEM
+  // labeled -- either signal alone is wrong, both together is what
+  // "drafts actually awaiting review" means.
+  const startingDraftCount = labelDrafted
+    ? GmailApp.getDraftMessages().filter(d => {
+        try {
+          return threadHasLabel(d.getThread(), CONFIG.LABEL_AI_DRAFTED);
+        } catch (e) {
+          return false;
+        }
+      }).length
+    : 0;
   Logger.log('DIAGNOSTIC -- ' + startingDraftCount + ' draft(s) already in the folder at run start (cap: ' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ').');
 
   pagination:
