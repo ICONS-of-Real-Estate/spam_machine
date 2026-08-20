@@ -178,7 +178,13 @@ const CONFIG = {
   // Goodness's own draft-vs-sent log showed only light wording polish on
   // review, not a rewrite -- stepping up per the same incremental-trust
   // pattern used throughout this project.
-  MAX_DRAFTS_PER_RUN: 20,
+  // TEMPORARY (20 Aug 2026, real incident): dropped to 0 to halt new draft
+  // creation entirely while CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER's counting
+  // logic is unverified (see runReplyDrafterInner()) -- multiple counting
+  // approaches have undercounted live, letting 70 real drafts pile up past
+  // a supposed cap of 25. Restore to 20 once the diagnostic count is
+  // manually confirmed correct against the real Drafts folder.
+  MAX_DRAFTS_PER_RUN: 0,
 
   // ADDED (19 Aug 2026, per direct request): now that runReplyDrafter is
   // going back on a 5-minute auto-trigger (see setup_all_triggers.gs),
@@ -570,22 +576,28 @@ function runReplyDrafterInner() {
   // working this whole time) -- so `in:draft` combined with `label:` in one
   // query string is what breaks, not the label filter itself.
   //
-  // Fixed by never combining them in one query: two separate, independently
-  // proven-reliable calls, intersected as plain JS thread-ID sets instead of
-  // trusting Gmail's query parser to AND them.
-  const draftThreadIds = new Set(
-    GmailApp.getDraftMessages().map(d => {
-      try {
-        return d.getThread().getId();
-      } catch (e) {
-        return null;
-      }
-    }).filter(Boolean)
-  );
-  const labeledThreadCount = GmailApp.search('label:"' + CONFIG.LABEL_AI_DRAFTED + '"')
+  // Fixed attempt #3 (never combine in:draft with label: in one query
+  // string, intersect separately) -- STILL WRONG live: reported 11 while
+  // 44+ real drafts existed. GmailApp.getDraftMessages() itself is the
+  // common thread across every failed attempt so far -- this account's
+  // draft objects throw "Not found" on individual access frequently enough
+  // (confirmed separately in draftAlreadyExistsFor()'s own catch block)
+  // that ANY iteration touching them one-by-one silently undercounts.
+  //
+  // This next attempt drops GmailApp.getDraftMessages() ENTIRELY and stays
+  // at the thread level for both signals -- GmailApp.search('in:draft')
+  // returns threads, not message objects, so there's no per-draft object to
+  // throw. Still run as two separate calls (not combined in one query
+  // string, since that combination was independently confirmed broken).
+  //
+  // UNVERIFIED as of this commit -- could not execute Apps Script directly
+  // to confirm before pushing. CONFIG.MAX_DRAFTS_PER_RUN should be at 0
+  // (temporary, real incident) until this line's logged count is manually
+  // checked against the real Drafts folder count and confirmed correct.
+  const draftThreadIds = new Set(GmailApp.search('in:draft').map(t => t.getId()));
+  const startingDraftCount = GmailApp.search('label:"' + CONFIG.LABEL_AI_DRAFTED + '"')
     .filter(t => draftThreadIds.has(t.getId()))
     .length;
-  const startingDraftCount = labeledThreadCount;
   Logger.log('DIAGNOSTIC -- ' + startingDraftCount + ' draft(s) already in the folder at run start (cap: ' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ').');
 
   pagination:
