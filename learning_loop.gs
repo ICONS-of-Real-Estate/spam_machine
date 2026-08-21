@@ -122,7 +122,22 @@ function runLearningLoopInner() {
     // cause: a genuine sent reply can only have a timestamp AFTER the draft
     // was created.
     const draftCreatedAt = row[timestampCol];
-    const sentReply = findSentReplyAfterDraft(thread, draftCreatedAt);
+    // FIX (20 Aug 2026, real incident): findSentReplyAfterDraft() checked
+    // only that a message was sent FROM Joana's own account, never that it
+    // was sent TO the lead. Many threads have Joana send two things after a
+    // draft: the real reply to the lead, and a separate internal forward to
+    // a teammate (e.g. sean@iconsofrealestate.com) for handoff. Walking
+    // newest-first and returning the first match from her account grabbed
+    // whichever came later -- confirmed live: ~40% of Learning Log rows
+    // (skewed heavily toward yes_general, exactly the needs_teammate_routing
+    // category) logged that internal forward's blank/quote-only body as if
+    // it were "what Joana sent the lead." Per this project's own standing
+    // rule, never trust the stored Prospect Email column (~27% historically
+    // poisoned) -- re-derive the real lead email from the thread the same
+    // way every other Gmail-touching entry point does.
+    const forwardInfo = extractForwardedLeadInfo(thread.getMessages()[0]);
+    const leadEmail = forwardInfo ? forwardInfo.email : null;
+    const sentReply = findSentReplyAfterDraft(thread, draftCreatedAt, leadEmail);
     if (!sentReply) continue; // Joana hasn't sent it yet — check again tomorrow
 
     const draftText = row[draftTextCol];
@@ -147,7 +162,7 @@ function runLearningLoopInner() {
   Logger.log('Learning loop run complete. Newly compared: ' + compared);
 }
 
-function findSentReplyAfterDraft(thread, draftCreatedAt) {
+function findSentReplyAfterDraft(thread, draftCreatedAt, leadEmail) {
   const messages = thread.getMessages();
   // Look from the end for a message sent by our own account (i.e. Joana actually replied)
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -174,7 +189,23 @@ function findSentReplyAfterDraft(thread, draftCreatedAt) {
     // across every category (83-92% empty in a full audit). Only Joana's
     // own sending address is ever a genuine reply.
     const isOwnAccount = from.indexOf(EXPECTED_RUN_ACCOUNT) !== -1;
-    if (isOwnAccount) return messages[i];
+    if (!isOwnAccount) continue;
+
+    // FIX (20 Aug 2026, real incident): being sent by Joana's own account is
+    // NOT enough on its own -- she also sends internal handoff forwards to
+    // teammates (e.g. sean@iconsofrealestate.com) from this same account,
+    // in this same thread, sometimes AFTER the real reply to the lead. Only
+    // a message actually addressed to the lead's real email counts as "the
+    // reply." Skip the recipient check entirely if leadEmail couldn't be
+    // determined (extractForwardedLeadInfo() failed) rather than reject
+    // every candidate -- an unverifiable match is better than none here,
+    // and this loop already tolerates some noise (see textsRoughlyMatch()).
+    if (leadEmail) {
+      const recipients = (messages[i].getTo() + ' ' + messages[i].getCc()).toLowerCase();
+      if (recipients.indexOf(leadEmail) === -1) continue;
+    }
+
+    return messages[i];
   }
   return null;
 }
