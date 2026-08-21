@@ -180,11 +180,13 @@ const CONFIG = {
   // pattern used throughout this project.
   // TEMPORARY (20 Aug 2026, real incident): dropped to 0 to halt new draft
   // creation entirely while CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER's counting
-  // logic is unverified (see runReplyDrafterInner()) -- multiple counting
-  // approaches have undercounted live, letting 70 real drafts pile up past
-  // a supposed cap of 25. Restore to 20 once the diagnostic count is
-  // manually confirmed correct against the real Drafts folder.
-  MAX_DRAFTS_PER_RUN: 0,
+  // RESTORED to 10 (20 Aug 2026) -- countPendingAiDrafts_() is now the real
+  // Gmail REST API count, verified correct twice against the actual Drafts
+  // folder (63 reported vs 63 counted by hand). Set to 10 rather than the
+  // prior 20 per direct request, since the drafter runs on a 5-minute timer
+  // -- 10 per run is plenty of throughput without piling up faster than it
+  // can be reviewed.
+  MAX_DRAFTS_PER_RUN: 10,
 
   // ADDED (19 Aug 2026, per direct request): now that runReplyDrafter is
   // going back on a 5-minute auto-trigger (see setup_all_triggers.gs),
