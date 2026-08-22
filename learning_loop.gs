@@ -151,6 +151,9 @@ function runLearningLoopInner() {
       continue; // thread may have been deleted
     }
     if (!thread) continue;
+    // SELF-TRACKED QUOTA COUNTER (22 Aug 2026, per direct request): see the
+    // fuller comment in quota_guard_and_alerting.gs.
+    recordGmailQuotaUsage_(1);
 
     // FIX (18 Aug 2026, real incident): findSentReplyAfterDraft() relied on
     // isDraft() to skip the still-unsent draft itself, but that

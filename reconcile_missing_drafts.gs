@@ -73,6 +73,9 @@ function reconcileMissingDrafts() {
       return;
     }
 
+    // SELF-TRACKED QUOTA COUNTER (22 Aug 2026, per direct request): see the
+    // fuller comment in quota_guard_and_alerting.gs.
+    recordGmailQuotaUsage_(1);
     const messages = thread.getMessages();
     const forwardMsg = messages[0];
     const forwardInfo = extractForwardedLeadInfo(forwardMsg);

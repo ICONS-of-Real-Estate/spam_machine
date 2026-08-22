@@ -607,6 +607,15 @@ function runReplyDrafterInner() {
         Logger.log('Approaching Apps Script\'s execution time limit -- stopping this run early so it completes cleanly instead of getting killed mid-run. Remaining threads will be picked up next run.');
         break pagination;
       }
+      // ADDED (22 Aug 2026, per direct request): recordGmailQuotaUsage_()
+      // below can flip isGmailQuotaExhausted() to true mid-run (self-imposed
+      // soft cap) -- check it here too, not just once at the top of
+      // runReplyDrafter(), so a long-running page loop actually stops the
+      // moment that happens instead of grinding through the rest of the page.
+      if (isGmailQuotaExhausted()) {
+        Logger.log('Gmail quota marked exhausted mid-run -- stopping cleanly. Remaining threads will be picked up next run.');
+        break pagination;
+      }
 
     // PERMANENT (17 Aug 2026, real incident): checked BEFORE
     // thread.getMessages() specifically. getFirstMessageSubject() is cheap
@@ -639,6 +648,11 @@ function runReplyDrafterInner() {
     }
 
     const messages = thread.getMessages();
+    // SELF-TRACKED QUOTA COUNTER (22 Aug 2026, per direct request): see the
+    // fuller comment in quota_guard_and_alerting.gs -- this is a per-thread
+    // proxy, not an exact Gmail API call count, meant to self-stop BEFORE
+    // Google's real daily limit throws instead of only reacting after.
+    recordGmailQuotaUsage_(1);
     const lastMsg = lastNonDraftMessage_(messages) || messages[messages.length - 1];
 
     if (!isCcdToNetworkGroup(lastMsg)) {

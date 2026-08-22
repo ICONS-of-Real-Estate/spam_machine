@@ -116,6 +116,11 @@ function runDailyReport() {
     'Averages:\n' +
     '  Per day (last 7 days): ' + (drafts7d.length / 7).toFixed(1) + ' drafted\n' +
     '  Per day (last 30 days): ' + (drafts30d.length / 30).toFixed(1) + ' drafted\n\n' +
+    // ADDED (22 Aug 2026, per direct request): surface the self-tracked
+    // Gmail quota counter (see quota_guard_and_alerting.gs) so someone
+    // actually sees it day to day, instead of it only mattering silently
+    // behind the scenes.
+    'Gmail quota usage today (self-tracked, approximate): ' + getGmailQuotaUsageToday_() + ' / ' + GMAIL_CALL_SOFT_CAP + ' soft cap\n\n' +
     'Full detail is always available in the "AI Drafts Log" and "Learning Log" tabs: ' +
     'https://docs.google.com/spreadsheets/d/' + CONFIG.SPREADSHEET_ID + '/edit';
 

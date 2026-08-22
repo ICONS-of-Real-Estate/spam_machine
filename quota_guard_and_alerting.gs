@@ -23,6 +23,16 @@
  *    alerts can still go out even when Gmail access itself is dead.
  *    Deliberately rate-limited to once per (subject + day) so it
  *    can't spam you every time something checks in.
+ * 3. recordGmailQuotaUsage_() / getGmailQuotaUsageToday_() (ADDED 22 Aug
+ *    2026, per direct request) -- a SELF-TRACKED running count of Gmail
+ *    operations today, since Google gives no API to ask "how much quota is
+ *    left." Every heavy Gmail-touching loop (runReplyDrafterInner,
+ *    runLearningLoopInner, runMissedLeadsAudit, reconcileMissingDrafts)
+ *    calls this once per thread/row processed. Crossing GMAIL_CALL_SOFT_CAP
+ *    proactively calls markGmailQuotaExhausted() -- stopping BEFORE Google's
+ *    real limit throws, not just reacting after. See the fuller comment
+ *    above that constant for why this is a conservative proxy, not an exact
+ *    count.
  *
  * HOW TO WIRE THIS INTO EXISTING FUNCTIONS:
  * At the very top of runReplyDrafterInner(), runLeadFollowUpCycle(),
@@ -60,6 +70,53 @@ function todayPacificDateString() {
   return Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd');
 }
 
+// ---------- SELF-TRACKED CALL COUNTER (22 Aug 2026, per direct request) ----------
+//
+// PROBLEM THIS ADDS TO THE ABOVE: until now, the circuit breaker only ever
+// tripped AFTER Google had already thrown "too many times for one day" --
+// reactive, not preventive. Apps Script exposes no API to ask Google "how
+// much of today's Gmail read/write quota is left" (MailApp.getRemainingDailyQuota()
+// is a DIFFERENT quota -- send recipients, not read/write), so there's no way
+// to ask Google directly. The next best thing: track our OWN running count of
+// Gmail-touching operations across every job today, in Script Properties (the
+// same account-wide, resets-at-Pacific-midnight mechanism the exhausted-flag
+// above already uses), and self-stop BEFORE reaching Google's real 50,000/day
+// Workspace ceiling -- see CONFIG or the constant below for the actual number.
+//
+// THIS IS A PROXY, NOT AN EXACT COUNT: Google doesn't bill quota "per thread"
+// or "per function call" -- each thread.getMessages(), message.getFrom(),
+// label operation, etc. is its own call under the hood, and this project
+// doesn't wrap every single one. recordGmailQuotaUsage_() is called once per
+// THREAD (or per row, in learning_loop.gs) processed in each job's main loop
+// as a deliberately conservative stand-in for "some number of real API calls
+// just happened." Treat the soft cap below as a safety margin, not a precise
+// budget -- the reactive circuit breaker above is still the real backstop if
+// this undercounts.
+const GMAIL_CALL_COUNT_PROPERTY_PREFIX = 'GMAIL_CALL_COUNT_';
+const GMAIL_CALL_SOFT_CAP = 40000; // ~80% of the real 50,000/day Workspace ceiling, leaving headroom for jobs/manual use this counter doesn't see
+
+function recordGmailQuotaUsage_(count) {
+  const props = PropertiesService.getScriptProperties();
+  const key = GMAIL_CALL_COUNT_PROPERTY_PREFIX + todayPacificDateString();
+  const current = Number(props.getProperty(key) || 0);
+  const updated = current + (count || 1);
+  props.setProperty(key, String(updated));
+  if (updated >= GMAIL_CALL_SOFT_CAP && current < GMAIL_CALL_SOFT_CAP) {
+    Logger.log('SELF-IMPOSED GMAIL QUOTA SOFT CAP (' + GMAIL_CALL_SOFT_CAP + ') reached for ' + todayPacificDateString() + ' -- marking exhausted proactively, before Google\'s real limit throws.');
+    markGmailQuotaExhausted();
+    sendOpsAlert(
+      'Gmail quota soft cap reached (self-tracked)',
+      'Today\'s self-tracked Gmail operation count crossed ' + GMAIL_CALL_SOFT_CAP + ' (our own conservative estimate, not an exact Google count). All Gmail-touching triggers will now skip themselves for the rest of today, same as if Google had thrown the real quota error -- this is meant to happen BEFORE that, not after.'
+    );
+  }
+  return updated;
+}
+
+function getGmailQuotaUsageToday_() {
+  const props = PropertiesService.getScriptProperties();
+  return Number(props.getProperty(GMAIL_CALL_COUNT_PROPERTY_PREFIX + todayPacificDateString()) || 0);
+}
+
 function isGmailQuotaExhausted() {
   const props = PropertiesService.getScriptProperties();
   const markedDate = props.getProperty(QUOTA_EXHAUSTED_PROPERTY_KEY);
@@ -83,8 +140,13 @@ function markGmailQuotaExhausted() {
  * todayPacificDateString() rolls over.
  */
 function clearGmailQuotaExhaustedFlag() {
-  PropertiesService.getScriptProperties().deleteProperty(QUOTA_EXHAUSTED_PROPERTY_KEY);
-  Logger.log('Quota-exhausted flag cleared manually.');
+  const props = PropertiesService.getScriptProperties();
+  props.deleteProperty(QUOTA_EXHAUSTED_PROPERTY_KEY);
+  // Also reset today's self-tracked counter -- otherwise the very next
+  // recordGmailQuotaUsage_() call just re-trips the soft cap immediately and
+  // undoes this manual clear.
+  props.deleteProperty(GMAIL_CALL_COUNT_PROPERTY_PREFIX + todayPacificDateString());
+  Logger.log('Quota-exhausted flag cleared manually (and today\'s self-tracked call counter reset).');
 }
 
 // ---------- LLM PROVIDER FALLBACK CHAIN (17 Aug 2026) ----------
