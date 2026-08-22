@@ -23,6 +23,14 @@
  */
 
 function runDailyReport() {
+  // ADDED (20 Aug 2026, real incident): this calls GmailApp.search() but
+  // never checked the quota circuit breaker -- only runReplyDrafter did.
+  // Same gap as runLearningLoop; see that fix for the full incident.
+  if (isGmailQuotaExhausted()) {
+    Logger.log('Skipping runDailyReport -- Gmail quota already known exhausted today.');
+    return;
+  }
+
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const draftsTab = ss.getSheetByName('AI Drafts Log');
   const learningTab = ss.getSheetByName('Learning Log');

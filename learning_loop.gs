@@ -48,6 +48,18 @@ function runLearningLoop() {
   // mailbox specifically) rather than silently doing something useful.
   if (!assertRunningAsJoana('runLearningLoop')) return;
 
+  // ADDED (20 Aug 2026, real incident): this is a Gmail-touching entry point
+  // (getThreadById/getMessages per row) that never checked the quota
+  // circuit breaker -- only runReplyDrafter did. Confirmed live: reprocessing
+  // 302 rows here exhausted the account's daily Gmail quota mid-run, and
+  // without this check, every subsequent scheduled fire today would have
+  // kept trying and failing instead of skipping cleanly like runReplyDrafter
+  // already does.
+  if (isGmailQuotaExhausted()) {
+    Logger.log('Skipping runLearningLoop -- Gmail quota already known exhausted today.');
+    return;
+  }
+
   // ADDED (17 Aug 2026): this function's dedup (skip a Thread ID already
   // present in "Learning Log") is correct for a SINGLE execution, but
   // nothing stopped two overlapping executions from both reading the log

@@ -63,6 +63,14 @@ function runWeekendDeepMissedLeadsAudit() {
 function runMissedLeadsAudit(daysBack) {
   const lookback = daysBack || 14;
 
+  // ADDED (20 Aug 2026, real incident): this calls GmailApp.search() but
+  // never checked the quota circuit breaker -- only runReplyDrafter did.
+  // Same gap as runLearningLoop; see that fix for the full incident.
+  if (isGmailQuotaExhausted()) {
+    Logger.log('Skipping runMissedLeadsAudit -- Gmail quota already known exhausted today.');
+    return;
+  }
+
   if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') {
     Logger.log('CONFIG.SPREADSHEET_ID not set -- skipping missed leads audit.');
     return;

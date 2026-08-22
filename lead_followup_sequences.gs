@@ -623,6 +623,16 @@ const HUB_GUEST_FOLLOWUPS_ENABLED = false;
 
 function runLeadFollowUpCycle() {
   if (!assertRunningAsJoana('runLeadFollowUpCycle')) return;
+
+  // ADDED (20 Aug 2026, real incident): this is a heavy Gmail-touching entry
+  // point (search + draft creation across two cadences) that never checked
+  // the quota circuit breaker -- only runReplyDrafter did. Same gap as
+  // runLearningLoop; see that fix for the full incident.
+  if (isGmailQuotaExhausted()) {
+    Logger.log('Skipping runLeadFollowUpCycle -- Gmail quota already known exhausted today.');
+    return;
+  }
+
   // Same Gmail Advanced Service dependency as runReplyDrafter -- see the
   // guard's own comment in lead_followup_sequences.gs for why this keeps
   // getting silently wiped by Git Pull. Both draft-creation paths below
