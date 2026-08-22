@@ -5,10 +5,16 @@
  * podcast_reply_drafter.gs (it shares that file's CONFIG object, so both
  * files must be in one project). It does two things, on its own schedule:
  *
- * 1. runLearningLoop() — run this daily. It looks at every thread logged
- *    in the "AI Drafts Log" tab, checks Joana's Sent folder for the reply
- *    that actually went out, and records whether she sent the draft as-is
- *    or changed it — logging both versions side by side in "Learning Log".
+ * 1. runLearningLoop() — run this weekly (MOVED off daily 22 Aug 2026, per
+ *    direct request -- maildoso outreach only sends weekdays, so there's no
+ *    daily-outreach reason to burn Gmail quota checking every single day;
+ *    see setup_all_triggers.gs). It looks at every thread logged in the
+ *    "AI Drafts Log" tab, checks Joana's Sent folder for the reply that
+ *    actually went out, and records whether she sent the draft as-is or
+ *    changed it — logging both versions side by side in "Learning Log". Its
+ *    dedup makes runs cumulative, and it now stops-and-resumes within a
+ *    wall-clock budget (see runLearningLoopInner()) the same way
+ *    runReplyDrafter does, so a full week's backlog in one run is safe.
  *
  * 2. generateSopSuggestions() — run this daily (18 Aug -> 19 Aug 2026:
  *    switched from weekly to daily, per direct request, once the doc+email
@@ -30,7 +36,7 @@
  *
  * Add both as time-driven triggers in the same project (see
  * setup_all_triggers.gs):
- *   - runLearningLoop      -> Day timer, once daily (e.g. overnight)
+ *   - runLearningLoop      -> weekly, Saturday morning
  *   - generateSopSuggestions -> Day timer, once daily, timed so the email
  *     lands around 6 PM Pacific (see the timezone note in
  *     setup_all_triggers.gs -- the script's own trigger clock runs on
@@ -109,7 +115,31 @@ function runLearningLoopInner() {
 
   let compared = 0;
 
+  // ADDED (22 Aug 2026, per direct request): moved from a daily trigger to a
+  // weekly one (see setup_all_triggers.gs) to stop burning Gmail quota every
+  // day when there's no daily-outreach reason to. That means a single run
+  // can now face a full week's backlog instead of one day's, so it needs the
+  // same wall-clock stop-and-resume pattern runReplyDrafterInner() already
+  // uses -- otherwise a big backlog either gets killed mid-run by Apps
+  // Script's 6-minute hard limit, or burns the whole day's Gmail quota in
+  // one execution (the exact incident that started this fix, 20 Aug 2026).
+  // The dedup above (alreadyCompared, keyed by Thread ID already in
+  // "Learning Log") already makes this naturally resumable across runs --
+  // whatever's left when the budget runs out just gets picked up on next
+  // Saturday's run.
+  const RUNTIME_BUDGET_MS = 5 * 60 * 1000; // 5 min, leaving a 1-min buffer before the 6-min hard limit
+  const runStartTime = Date.now();
+
   for (let i = 1; i < draftRows.length; i++) {
+    if (Date.now() - runStartTime > RUNTIME_BUDGET_MS) {
+      Logger.log('Approaching Apps Script\'s execution time limit -- stopping this run early so it completes cleanly instead of getting killed mid-run. Remaining rows will be picked up next run.');
+      break;
+    }
+    if (isGmailQuotaExhausted()) {
+      Logger.log('Gmail quota hit mid-run -- stopping cleanly so the rest of today\'s attempts don\'t keep failing. Remaining rows will be picked up next run.');
+      break;
+    }
+
     const row = draftRows[i];
     const threadId = row[threadIdCol];
     if (!threadId || alreadyCompared.has(threadId)) continue;

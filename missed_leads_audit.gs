@@ -32,8 +32,14 @@
  *
  * SCHEDULING:
  *   - Run runMissedLeadsAudit(730) manually, once, for the historical sweep.
- *   - Add a trigger: runMissedLeadsAudit -> Time-driven -> Day timer -> daily,
- *     for ongoing coverage (uses the 14-day default lookback).
+ *   - Add a trigger: runMissedLeadsAudit -> Time-driven -> Weekly (Sunday),
+ *     for ongoing coverage (uses the 14-day default lookback, so a weekly
+ *     cadence still leaves no gap). MOVED off daily (22 Aug 2026, per direct
+ *     request) -- maildoso outreach only sends weekdays, so this was burning
+ *     Gmail quota daily competing with runReplyDrafter/runLeadFollowUpCycle
+ *     for the same account-wide budget with no daily-outreach reason to.
+ *     Its own dedup (alreadyLogged, by Thread ID) already makes runs
+ *     cumulative, so nothing is lost by checking weekly instead of daily.
  */
 
 const NON_HUMAN_SENDER_PATTERNS = /\b(no-?reply|donotreply|do-not-reply|mailer-daemon|postmaster|catch-all|catchall|automated|autoreply)\b/i;

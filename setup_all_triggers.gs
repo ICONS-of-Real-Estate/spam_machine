@@ -6,9 +6,11 @@
  * Deletes any existing trigger for these same functions first (so running
  * this twice doesn't create duplicates), then creates:
  *   - runReplyDrafter          -- every 5 minutes
- *   - runLearningLoop          -- daily
+ *   - runLearningLoop          -- weekly (Saturday -- moved off daily 22 Aug 2026,
+ *     see note at the trigger below)
  *   - generateSopSuggestions   -- daily (~6 PM Pacific -- see timezone note below)
- *   - runMissedLeadsAudit      -- daily
+ *   - runMissedLeadsAudit      -- weekly (Sunday -- moved off daily 22 Aug 2026,
+ *     see note at the trigger below)
  *   - runLeadFollowUpCycle     -- daily (6 AM Europe/Paris -- batch ready before Goodness starts)
  *   - summarizeFollowUpLearning -- daily (8 PM Europe/Paris -- turns the day's edits into SOP suggestions)
  *   - runDailyReport           -- daily (emails Kris, Tomas, Joana)
@@ -69,12 +71,25 @@ function setupAllTriggers() {
     .create();
   Logger.log('Created: runReplyDrafter, every 5 minutes (interval, no fixed clock time).');
 
+  // MOVED off daily to weekly (22 Aug 2026, per direct request): maildoso
+  // outreach only sends on weekdays, so this and runMissedLeadsAudit were
+  // burning Gmail read/write quota every single day competing with
+  // runReplyDrafter/runLeadFollowUpCycle for the same 50,000/day account-wide
+  // budget, even though there's no outreach-driven reason to check daily.
+  // runLearningLoopInner()'s dedup (skip any Thread ID already in "Learning
+  // Log") already makes it naturally cumulative across runs, and it now has
+  // the same wall-clock RUNTIME_BUDGET_MS stop-and-resume pattern
+  // runReplyDrafter uses (see learning_loop.gs) -- so batching a full week's
+  // worth of comparisons into one Saturday run is safe even if it can't
+  // finish in one execution; whatever's left over just picks up on the
+  // NEXT Saturday's run, same as runReplyDrafter already does across
+  // 5-minute runs.
   ScriptApp.newTrigger('runLearningLoop')
     .timeBased()
-    .everyDays(1)
-    .atHour(6)
+    .onWeekDay(ScriptApp.WeekDay.SATURDAY)
+    .atHour(9)
     .create();
-  Logger.log('Created: runLearningLoop, daily around 6 AM ' + TZ + '.');
+  Logger.log('Created: runLearningLoop, weekly on Saturday around 9 AM ' + TZ + ' (after runWeekendDeepMissedLeadsAudit at 8 AM).');
 
   // SWITCHED to daily (19 Aug 2026, per direct request), now that it emails
   // a same-day reviewable doc to Goodness/Joana/Kris instead of just
@@ -95,12 +110,21 @@ function setupAllTriggers() {
     .create();
   Logger.log('Created: generateSopSuggestions, daily around 3 AM ' + TZ + ' (~6 PM Pacific the previous day).');
 
+  // MOVED off daily to weekly (22 Aug 2026, per direct request -- same
+  // quota reasoning as runLearningLoop above: maildoso only sends weekdays,
+  // so there's no new-outreach reason to re-check for missed leads every
+  // single day). Its own dedup (alreadyLogged, keyed by Thread ID already in
+  // the "Missed Leads Audit" tab) already makes runs cumulative, and its
+  // 14-day lookback comfortably covers the week between Sundays. Put on
+  // Sunday rather than doubling up with runWeekendDeepMissedLeadsAudit's
+  // Saturday run, so the two heaviest weekly Gmail-quota jobs aren't
+  // competing for the same day's budget.
   ScriptApp.newTrigger('runMissedLeadsAudit')
     .timeBased()
-    .everyDays(1)
+    .onWeekDay(ScriptApp.WeekDay.SUNDAY)
     .atHour(8)
     .create();
-  Logger.log('Created: runMissedLeadsAudit, daily around 8 AM ' + TZ + '.');
+  Logger.log('Created: runMissedLeadsAudit, weekly on Sunday around 8 AM ' + TZ + '.');
 
   // 6 AM so the day's batch of ~100 follow-up drafts is READY before Goodness
   // starts her European workday, rather than drafting right as she sits down.
