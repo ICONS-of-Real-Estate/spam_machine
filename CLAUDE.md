@@ -7,6 +7,7 @@ Google Apps Script automation that drafts podcast-outreach replies with Claude i
 - **NEVER sends email. It only ever creates Gmail drafts.** A human reviews and sends every one. Never add an auto-send path.
 - **One global scope.** All `.gs` files live in a single Apps Script project and share a global `CONFIG` and global helpers. Never redefine an existing global function name in a second file — a duplicate silently shadows the real one and has caused real bugs here.
 - **SOP lives in a Google Doc** fetched at runtime (cached). Edit the Doc, not the code, to change drafting behavior. Don't hardcode SOP text.
+- **Proposing an SOP change:** no available tool can edit the live Google Doc's body in place (only read/download + file-metadata rename exist here) — so don't describe the edit in chat and stop there. Write a file under `sop_change_requests/` (see `TEMPLATE.md`) with the target doc's live link, the exact search text, the exact replacement text, and the change-log line to append. A human applies it via Find & Replace; Google Docs' version history captures the diff.
 - **Every Gmail-touching entry point** must call `assertRunningAsJoana()` first and respect the `isGmailQuotaExhausted()` circuit breaker.
 - **Never trust the stored "Prospect Email" column** (~27% historically poisoned). Always re-derive the real lead email from the thread via `extractForwardedLeadInfo()`.
 - **Keep the heavy defensive `Logger.log` lines** — the owner explicitly wants every skip/decision logged.
