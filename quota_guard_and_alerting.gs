@@ -219,10 +219,38 @@ function callLlmWithFallback(systemPrompt, userPrompt, maxTokens, callerLabel) {
 
 function attemptLlmCall_(url, headers, model, systemPrompt, userPrompt, maxTokens, extraPayloadFields) {
   try {
+    // PROMPT CACHING (22 Aug 2026, per direct request -- see the false-comment
+    // fix earlier this same day for how this gap was found): systemPrompt is
+    // Code.gs's full SOP text plus one of exactly two stable append blocks
+    // (buildSystemPromptForMode's "joana" or "hormozi" variant) -- large
+    // (thousands of words, well above every model's cacheable minimum) and
+    // byte-identical across every classifyAndDraft call in a given mode until
+    // Kris edits the SOP Doc or the 6h CacheService TTL expires. Per-thread
+    // dynamic content (today's date, subject, lead email, thread text) lives
+    // entirely in userPrompt, never here -- so this reshape is safe: it
+    // doesn't move anything that changes per-call into the cached prefix.
+    //
+    // ttl: "1h" chosen over the 5-min default specifically because
+    // runReplyDrafter fires every 5 minutes -- the default TTL would often
+    // lapse in the exact gap between runs and never get reused across runs,
+    // only (at best) across threads within the same run. A 1-hour TTL survives
+    // that gap and gets reused across many runs before the SOP doc's own 6h
+    // cache would force a rewrite anyway.
+    //
+    // NOT YET CONFIRMED to actually cache on Kimi (the primary provider) --
+    // Moonshot's Anthropic-compatible endpoint may or may not honor
+    // cache_control. Harmless either way (worst case it's silently ignored),
+    // but check the "Cache check" log line classifyAndDraft() already prints
+    // (cache_read_input_tokens / cache_creation_input_tokens) after deploying
+    // to see which provider is actually returning cache hits.
     const payload = Object.assign({
       model: model,
       max_tokens: maxTokens,
-      system: systemPrompt,
+      system: [{
+        type: 'text',
+        text: systemPrompt,
+        cache_control: { type: 'ephemeral', ttl: '1h' },
+      }],
       messages: [{ role: 'user', content: userPrompt }],
     }, extraPayloadFields || {});
 

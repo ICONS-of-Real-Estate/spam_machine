@@ -1439,17 +1439,16 @@ IMPORTANT on no_decline (REAL INCIDENT, 17 Aug 2026): no_decline means a genuine
 // after the cache expires (max ~6h stale), or immediately via
 // clearSopCache().
 //
-// CORRECTED (22 Aug 2026): this comment used to claim a SEPARATE
-// "cache_control: ephemeral" Anthropic prompt-caching mechanism also exists
-// on the LLM call itself, "untouched by this change." Checked
-// attemptLlmCall_() in quota_guard_and_alerting.gs directly -- no such thing
-// exists there. The system prompt is sent as a plain string on every single
-// call (every 5 minutes, every thread), so the full SOP text is billed as
-// fresh input tokens every time -- there is no Anthropic-side caching at
-// all right now, only this Doc-fetch cache above. Real cache_control would
-// need the system field reshaped into a content-block array with
-// cache_control set on it, which hasn't been done -- flagging accurately
-// here instead of leaving a false claim in place.
+// CORRECTED then IMPLEMENTED (22 Aug 2026): this comment used to claim a
+// separate "cache_control: ephemeral" Anthropic prompt-caching mechanism
+// already existed on the LLM call itself -- it didn't (checked
+// attemptLlmCall_() directly, system was a plain string). That's now fixed
+// for real: attemptLlmCall_() in quota_guard_and_alerting.gs sends this SOP
+// text as a cache_control: {type: "ephemeral", ttl: "1h"} content block, a
+// SEPARATE cache from this Doc-fetch one -- this one avoids re-fetching the
+// Google Doc, that one avoids re-billing the full SOP as input tokens on
+// every LLM call. See the comment in attemptLlmCall_() for why 1h TTL and
+// how to verify it's actually hitting.
 const SOP_CACHE_KEY = 'SOP_FULL_TEXT';
 const SOP_CACHE_TTL_SECONDS = 6 * 60 * 60; // 6 hours (CacheService max)
 
