@@ -1437,9 +1437,19 @@ IMPORTANT on no_decline (REAL INCIDENT, 17 Aug 2026): no_decline means a genuine
 // day for a doc that changes once. Now cached in CacheService for
 // SOP_CACHE_TTL_SECONDS. A same-day Doc edit is picked up on the next run
 // after the cache expires (max ~6h stale), or immediately via
-// clearSopCache(). This is the in-memory prompt cache; the separate
-// cache_control: ephemeral on the Anthropic API call (which saves input-token
-// cost on the long system prompt) is untouched by this change.
+// clearSopCache().
+//
+// CORRECTED (22 Aug 2026): this comment used to claim a SEPARATE
+// "cache_control: ephemeral" Anthropic prompt-caching mechanism also exists
+// on the LLM call itself, "untouched by this change." Checked
+// attemptLlmCall_() in quota_guard_and_alerting.gs directly -- no such thing
+// exists there. The system prompt is sent as a plain string on every single
+// call (every 5 minutes, every thread), so the full SOP text is billed as
+// fresh input tokens every time -- there is no Anthropic-side caching at
+// all right now, only this Doc-fetch cache above. Real cache_control would
+// need the system field reshaped into a content-block array with
+// cache_control set on it, which hasn't been done -- flagging accurately
+// here instead of leaving a false claim in place.
 const SOP_CACHE_KEY = 'SOP_FULL_TEXT';
 const SOP_CACHE_TTL_SECONDS = 6 * 60 * 60; // 6 hours (CacheService max)
 
