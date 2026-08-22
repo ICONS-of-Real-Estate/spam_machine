@@ -13,6 +13,9 @@
  *   - summarizeFollowUpLearning -- daily (8 PM Europe/Paris -- turns the day's edits into SOP suggestions)
  *   - runDailyReport           -- daily (emails Kris, Tomas, Joana)
  *   - runWeekendDeepMissedLeadsAudit -- weekly (Saturday, 180-day lookback)
+ *   - reconcileMissingDrafts   -- daily (ADDED 22 Aug 2026, per direct request --
+ *     was manual-only; now runs unattended so the phantom-label gap can't sit
+ *     open for days between manual runs)
  *
  * Must be run under the account that should own these triggers (Joana's,
  * since the script needs to run against her inbox). Run it the same way as
@@ -31,7 +34,8 @@ function setupAllTriggers() {
     'runLeadFollowUpCycle',
     'summarizeFollowUpLearning',
     'runDailyReport',
-    'runWeekendDeepMissedLeadsAudit'
+    'runWeekendDeepMissedLeadsAudit',
+    'reconcileMissingDrafts'
     // NOTE (17 Aug 2026, real incident): 'runStalledBookingsAudit' used to be
     // listed here, but that function was never actually built -- Task 2 from
     // the original handoff, design proposed, still awaiting sign-off. Every
@@ -129,6 +133,16 @@ function setupAllTriggers() {
     .atHour(8)
     .create();
   Logger.log('Created: runWeekendDeepMissedLeadsAudit, weekly on Saturday around 8 AM ' + TZ + ' (looks back 180 days).');
+
+  // Runs after runReplyDrafter has had all day to create real drafts for
+  // anything reconciled the PREVIOUS day, and before runMissedLeadsAudit at
+  // 8 AM so a freshly-unlabeled thread doesn't get double-flagged.
+  ScriptApp.newTrigger('reconcileMissingDrafts')
+    .timeBased()
+    .everyDays(1)
+    .atHour(5)
+    .create();
+  Logger.log('Created: reconcileMissingDrafts, daily around 5 AM ' + TZ + '.');
 
   Logger.log('All ' + functionsToSchedule.length + ' triggers created, all clock times in ' + TZ + '. Check the Triggers page (clock icon) to confirm.');
 }

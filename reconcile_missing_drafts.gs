@@ -33,6 +33,18 @@
  */
 
 function reconcileMissingDrafts() {
+  // ADDED (22 Aug 2026, per direct request -- "shouldn't this be on a
+  // timer?"): this was a manual-only utility until now, meaning the phantom-
+  // label gap it fixes (see header comment) could sit open for days between
+  // manual runs. Every Gmail-touching entry point in this project must have
+  // both of these guards -- this one never did, since nobody expected it to
+  // run unattended. Now scheduled daily in setupAllTriggers().
+  assertRunningAsJoana();
+  if (isGmailQuotaExhausted()) {
+    Logger.log('Skipping reconcileMissingDrafts -- Gmail quota already known exhausted today.');
+    return;
+  }
+
   const labelDrafted = GmailApp.getUserLabelByName(CONFIG.LABEL_AI_DRAFTED);
   if (!labelDrafted) {
     Logger.log('AI-Drafted-PendingReview label not found -- nothing to reconcile.');
