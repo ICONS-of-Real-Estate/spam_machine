@@ -240,9 +240,11 @@ function emailStalledBookingsAlert(stalled, threshold) {
       '<p style="color:#555;">These are logged in the "' + STALLED_BOOKINGS_TAB + '" tab. Worth a manual check -- these might just be waiting on a call that already happened outside email, or might genuinely need a nudge.</p>' +
     '</div>';
 
+  // CHANGED (23 Aug 2026, per direct request -- "all emails need to be CC
+  // kris & Tomas"): added Tomas to cc.
   MailApp.sendEmail({
     to: 'kris@iconsofrealestate.com',
-    cc: 'joana@iconsofrealestate.com',
+    cc: 'joana@iconsofrealestate.com,tomas@iconsofrealestate.com',
     subject: subject,
     body: plainBody,
     htmlBody: htmlBody

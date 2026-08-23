@@ -177,9 +177,11 @@ function emailMissedLeadsAlert(missed) {
     '\n\nThese are logged in the "Missed Leads Audit" tab in the "Icons Podcast Reply Drafter -- Logs" spreadsheet.\n\n' +
     'Worth a manual look -- these are old enough or unusual enough that they fell outside the automatic drafting flow.';
 
+  // CHANGED (23 Aug 2026, per direct request -- "all emails need to be CC
+  // kris & Tomas"): added Tomas to cc.
   MailApp.sendEmail({
     to: 'kris@iconsofrealestate.com',
-    cc: 'joana@iconsofrealestate.com',
+    cc: 'joana@iconsofrealestate.com,tomas@iconsofrealestate.com',
     subject: subject,
     body: body
   });
