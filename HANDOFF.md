@@ -73,7 +73,7 @@ A **Google Apps Script** project (V8, `Europe/Paris`) running inside **Joana's G
 | `summarizeFollowUpLearning` | daily 8 PM |
 | `runDailyReport` | daily 7 AM |
 | `runWeekendDeepMissedLeadsAudit` | weekly Sat 8 AM |
-| `runStalledBookingsAudit` | weekly Sat 8 AM — **⚠ NOT DEFINED anywhere** |
+| `runStalledBookingsAudit` | not scheduled — exists (`stalled_bookings_audit.gs`), run manually until draft quality is proven out |
 
 `runHeartbeatCheck` (hourly) + `runTriggerHealthCheck` (daily 6 AM) are created by `setupHeartbeatTriggers()`.
 
@@ -88,7 +88,7 @@ A **Google Apps Script** project (V8, `Europe/Paris`) running inside **Joana's G
 
 ## Known issues (verified)
 
-- **`runStalledBookingsAudit` referenced but undefined.** In `EXPECTED_TRIGGER_FUNCTIONS` and given a trigger in `setup_all_triggers.gs`, but no function exists. Trigger health check will flag it; the trigger will error. **Resolve first.**
+- **`runStalledBookingsAudit`** now exists (`stalled_bookings_audit.gs`, merged in 23 Aug 2026), but is deliberately not wired to a trigger yet — run manually until draft quality is proven out, then add to `setupAllTriggers()`.
 - **Duplicate definitions:** `isQuotaExceededError()` (in `cleanup_poisoned_emails.gs.gs` AND `quota_guard_and_alerting.gs`); `wipeFollowUpQueuesClean()` (in `wipe_followup_queues.gs` AND `lead_followup_sequences.gs`). JS uses last-loaded; a prior duplicate of `registerNewHubGuestInvites()` already caused a real bug this way.
 - **`cleanup_poisoned_emails.gs.gs`** double extension (rename artifact).
 - **`guest_booking_followups.gs`** uses `thread.createDraftReply()` (the wrong-recipient bug). Confirm if still triggered; likely dead code.
@@ -97,7 +97,7 @@ A **Google Apps Script** project (V8, `Europe/Paris`) running inside **Joana's G
 
 ## Suggested first tasks
 
-1. Resolve `runStalledBookingsAudit` (restore or remove references/trigger).
+1. Decide when `runStalledBookingsAudit` is proven-out enough to wire into `setupAllTriggers()`.
 2. De-duplicate `isQuotaExceededError()` and `wipeFollowUpQueuesClean()`.
 3. Rename `cleanup_poisoned_emails.gs.gs` → single `.gs`.
 4. Confirm `guest_booking_followups.gs` is dead; delete or quarantine.

@@ -1,0 +1,5 @@
+**/.git/**
+.git/**
+.gitignore
+README.md
+.clasp.json

@@ -38,12 +38,13 @@ function setupAllTriggers() {
     'runDailyReport',
     'runWeekendDeepMissedLeadsAudit',
     'reconcileMissingDrafts'
-    // NOTE (17 Aug 2026, real incident): 'runStalledBookingsAudit' used to be
-    // listed here, but that function was never actually built -- Task 2 from
-    // the original handoff, design proposed, still awaiting sign-off. Every
-    // time that trigger fired (it showed up in the Executions view under
-    // "Other user"), it errored immediately since the function doesn't
-    // exist. Add it back here once runStalledBookingsAudit is real.
+    // NOTE (17 Aug 2026, real incident; updated 23 Aug 2026 on merge):
+    // 'runStalledBookingsAudit' used to be listed here, but errored on every
+    // fire since the function didn't exist yet -- removed. It now DOES exist
+    // (stalled_bookings_audit.gs, Task 2 from the original handoff) but is
+    // deliberately still NOT wired to a trigger -- run it manually
+    // (runStalledBookingsAudit()) until draft quality is proven out, then
+    // add it here.
   ];
 
   // Delete any existing triggers for these functions first, so re-running
