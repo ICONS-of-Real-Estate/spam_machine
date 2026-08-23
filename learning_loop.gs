@@ -490,7 +490,10 @@ function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount) {
   // failed, not just that one entry, so nobody ever got shared. Filter the
   // owner out of the list before sharing.
   const ownerEmail = file.getOwner() ? file.getOwner().getEmail() : null;
-  const viewers = ['goodness@iconsofrealestate.com', 'joana@iconsofrealestate.com', 'kris@iconsofrealestate.com']
+  // ADDED (23 Aug 2026, per direct request): Tomás is now CC'd on the email
+  // below, so he needs view access to the doc the email links to as well --
+  // otherwise he's CC'd a link he can't open.
+  const viewers = ['goodness@iconsofrealestate.com', 'joana@iconsofrealestate.com', 'kris@iconsofrealestate.com', 'tomas@iconsofrealestate.com']
     .filter(addr => addr.toLowerCase() !== (ownerEmail || '').toLowerCase());
   if (viewers.length > 0) {
     file.addViewers(viewers);
@@ -507,11 +510,16 @@ function emailSopSuggestionsDoc(docFile, suggestionsCount) {
     docFile.getUrl() + '\n\n' +
     'Please review and decide whether to add any of these to the live SOP -- nothing here has been applied automatically.';
 
+  // CHANGED (23 Aug 2026, per direct request -- "Make sure Tomas and Kris
+  // are on CC too"): Kris moved from `to` into `cc`, Tomás added to `cc`.
+  // Joana/Goodness are the actual reviewers who'd act on this; Kris/Tomás
+  // are kept in the loop but not the primary "please review" audience.
   MailApp.sendEmail({
-    to: 'goodness@iconsofrealestate.com,joana@iconsofrealestate.com,kris@iconsofrealestate.com',
+    to: 'goodness@iconsofrealestate.com,joana@iconsofrealestate.com',
+    cc: 'kris@iconsofrealestate.com,tomas@iconsofrealestate.com',
     subject: '[Written by Claude] Daily SOP Suggestions -- ' + dateStr,
     body: body
   });
 
-  Logger.log('SOP suggestions doc emailed to Goodness, Joana, and Kris: ' + docFile.getUrl());
+  Logger.log('SOP suggestions doc emailed to Goodness and Joana, CC Kris and Tomas: ' + docFile.getUrl());
 }
