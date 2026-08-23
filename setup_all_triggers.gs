@@ -5,7 +5,8 @@
  * ---------------------------------------------------------------------------
  * Deletes any existing trigger for these same functions first (so running
  * this twice doesn't create duplicates), then creates:
- *   - runReplyDrafter          -- every 5 minutes
+ *   - runReplyDrafter          -- every 15 minutes (slowed from 5 min, 23 Aug
+ *     2026, per direct request -- see note at the trigger below)
  *   - runLearningLoop          -- weekly (Saturday -- moved off daily 22 Aug 2026,
  *     see note at the trigger below)
  *   - generateSopSuggestions   -- daily (~6 PM Pacific -- see timezone note below)
@@ -66,11 +67,23 @@ function setupAllTriggers() {
   // time is runReplyDrafter (an interval trigger).
   const TZ = 'Europe/Paris';
 
+  // SLOWED from 5 to 15 minutes (23 Aug 2026, per direct request): the
+  // MAX_PENDING_DRAFTS_IN_FOLDER cap check in runReplyDrafter runs BEFORE any
+  // per-thread processing, so a capped-out run isn't free -- it still costs
+  // a quota-check REST call and a GmailApp.search() pulling metadata for
+  // hundreds of threads, just to immediately bail (confirmed live, 23 Aug
+  // 2026: 327 threads fetched, 0 drafts created, folder already at its cap
+  // of 25). That's pure waste during any stretch where the queue outpaces
+  // review -- overnight, weekends, or just a busy day. 15 minutes cuts that
+  // to a third as many wasted calls; the only real cost is a fresh reply
+  // landing right as the folder drains waiting up to 15 min instead of 5 to
+  // get drafted, trivial next to how long a human takes to review a batch
+  // anyway. 15 is one of Apps Script's supported interval steps (1/5/10/15/30).
   ScriptApp.newTrigger('runReplyDrafter')
     .timeBased()
-    .everyMinutes(5)
+    .everyMinutes(15)
     .create();
-  Logger.log('Created: runReplyDrafter, every 5 minutes (interval, no fixed clock time).');
+  Logger.log('Created: runReplyDrafter, every 15 minutes (interval, no fixed clock time).');
 
   // MOVED off daily to weekly (22 Aug 2026, per direct request): maildoso
   // outreach only sends on weekdays, so this and runMissedLeadsAudit were
