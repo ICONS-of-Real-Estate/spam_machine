@@ -138,6 +138,17 @@ function runStalledBookingsAudit(daysThresholdOverride) {
       daysStalled: daysSinceLastActivity,
       link: 'https://mail.google.com/mail/u/0/#all/' + threadId
     });
+
+    // FIXED (23 Aug 2026, real incident): confirmed live -- "AI Drafts Log"
+    // has multiple rows referencing the same thread (an original reply row
+    // plus follow-up rows pointing at the same Gmail thread), and
+    // alreadyFlagged was only ever populated from PAST runs' audit rows, so
+    // the same thread got pushed into `stalled` -- and would have been
+    // written as duplicate audit rows and duplicate lines in the alert
+    // email -- every time it recurred later in THIS SAME run. Mark it
+    // flagged immediately so a later duplicate row for the same thread in
+    // this run is skipped by the existing alreadyFlagged.has() check above.
+    alreadyFlagged.add(threadId);
   }
 
   Logger.log('runStalledBookingsAudit -- finished scanning. ' + candidateCount + ' candidate(s) checked (' + threadFetchFailures + ' thread lookup failure(s)), ' + stalled.length + ' newly stalled.');
