@@ -60,12 +60,14 @@ A **Google Apps Script** project (V8, `Europe/Paris`) running inside **Joana's G
 | `heartbeat_and_trigger_healthcheck.gs` | `runHeartbeatCheck` (3h-stale alert), `runTriggerHealthCheck` | hourly / daily |
 | `quota_guard_and_alerting.gs` | Quota circuit breaker + `sendOpsAlert` (MailApp, separate quota) | library |
 | `setup_all_triggers.gs` | `setupAllTriggers()` — creates all 9 triggers | manual once |
-| `reconcile_missing_drafts.gs` | `reconcileMissingDrafts()` — clear phantom labels | as-needed |
-| `cleanup_poisoned_emails.gs.gs` | One-off queue email fix (batched). **Note double extension.** | manual |
-| `wipe_followup_queues.gs` | One-off `wipeFollowUpQueuesClean()`. **Duplicate.** | manual |
-| `guest_booking_followups.gs` | **Legacy/superseded** guest sequence (uses buggy `createDraftReply`) | legacy |
+| `reconcile_missing_drafts.gs` | `reconcileMissingDrafts()` — clear phantom labels | daily |
+| `stalled_bookings_audit.gs` | `runStalledBookingsAudit()` — flags leads stalled after penciled/handed-off | not wired yet (run manually) |
+| `cleanup_poisoned_emails.gs` | One-off queue email fix (batched) | manual |
+| `cleanup_learning_log_garbage.gs` | One-off cleanup for garbage Learning Log rows | manual |
 | `emoji_*_diagnostic.gs` ×3 | One-off emoji-corruption debug tools (reference only) | none |
-| `README.md` | **EMPTY** | — |
+| `.clasp.json` / `.claspignore` | Fallback sync path around the broken Git UI | — |
+| `sop_change_requests/` | Proposed SOP edits for a human to Find & Replace into the live Doc (see `CLAUDE.md`) | as-needed |
+| `README.md` | Populated — quick facts + repo layout | — |
 
 ## Global state
 
@@ -102,16 +104,12 @@ A **Google Apps Script** project (V8, `Europe/Paris`) running inside **Joana's G
 ## Known issues (verified)
 
 - **`runStalledBookingsAudit`** now exists (`stalled_bookings_audit.gs`, merged in 23 Aug 2026), but is deliberately not wired to a trigger yet — run manually until draft quality is proven out, then add to `setupAllTriggers()`.
-- **Duplicate definitions:** `isQuotaExceededError()` (in `cleanup_poisoned_emails.gs.gs` AND `quota_guard_and_alerting.gs`); `wipeFollowUpQueuesClean()` (in `wipe_followup_queues.gs` AND `lead_followup_sequences.gs`). JS uses last-loaded; a prior duplicate of `registerNewHubGuestInvites()` already caused a real bug this way.
-- **`cleanup_poisoned_emails.gs.gs`** double extension (rename artifact).
-- **`guest_booking_followups.gs`** uses `thread.createDraftReply()` (the wrong-recipient bug). Confirm if still triggered; likely dead code.
 - **Hardcoded personal data** (Zoom link, @iconsofrealestate.com addresses) — scrub before external sharing.
 - **Caps:** `FOLLOWUP_DRAFT_CAP=100`, `FOLLOWUP_DAILY_DRAFT_CAP=100`, `CLEANUP_BATCH_SIZE=40`, wipe batch 100, `MAX_THREADS_PER_RUN=50`. ~6-min execution limit → long jobs are batched + resumable.
+
+(Resolved as of 23 Aug 2026: the `isQuotaExceededError()`/`wipeFollowUpQueuesClean()` duplicate definitions, the double `.gs.gs` extension, and `guest_booking_followups.gs` are all gone — each now has exactly one definition/file, confirmed by grep against the live tree.)
 
 ## Suggested first tasks
 
 1. Decide when `runStalledBookingsAudit` is proven-out enough to wire into `setupAllTriggers()`.
-2. De-duplicate `isQuotaExceededError()` and `wipeFollowUpQueuesClean()`.
-3. Rename `cleanup_poisoned_emails.gs.gs` → single `.gs`.
-4. Confirm `guest_booking_followups.gs` is dead; delete or quarantine.
-5. Populate `README.md`.
+2. Scrub hardcoded personal data before any external sharing of this repo.
