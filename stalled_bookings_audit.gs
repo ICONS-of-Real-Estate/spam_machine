@@ -200,21 +200,51 @@ function runStalledBookingsAudit(daysThresholdOverride) {
 // subject line -- which includes a variable count and would basically
 // never repeat verbatim -- wouldn't actually rate-limit anything
 // meaningful, just add an inconsistent extra layer.
+// CHANGED (23 Aug 2026, per direct request -- "This is poorly formatted"):
+// this was a single run-on plain-text paragraph with no visual separation
+// between leads, confirmed live to be hard to read in Gmail. Sends real
+// HTML now (bold labels, spacing, a clear block per lead) with a plain-text
+// fallback for any client that can't render HTML. Also sorted worst-first
+// (most days stalled) so the most overdue leads are the first thing seen.
 function emailStalledBookingsAlert(stalled, threshold) {
   const subject = '[Written by Claude] ' + stalled.length + ' potential booking' + (stalled.length === 1 ? '' : 's') + ' gone quiet (' + threshold + '+ days)';
-  const lines = stalled
+  const sorted = stalled.slice().sort((a, b) => b.daysStalled - a.daysStalled);
+
+  const plainLines = sorted
     .map(s => '- "' + s.subject + '" (' + s.email + ') -- category: ' + s.category + (s.needsRouting ? ', handed to teammate' : '') + ', ' + s.daysStalled + ' days since last activity: ' + s.link)
     .join('\n');
-  const body =
+  const plainBody =
     'This email was written by Claude.\n\n' +
     'Found ' + stalled.length + ' lead(s) that got as far as penciling in a call or being handed to a teammate, but have gone quiet for ' + threshold + '+ days:\n\n' +
-    lines +
+    plainLines +
     '\n\nThese are logged in the "' + STALLED_BOOKINGS_TAB + '" tab. Worth a manual check -- these might just be waiting on a call that already happened outside email, or might genuinely need a nudge.';
+
+  const htmlBlocks = sorted.map(s =>
+    '<div style="margin:0 0 18px 0; padding:0 0 14px 0; border-bottom:1px solid #e0e0e0;">' +
+      '<div style="font-size:14px; font-weight:bold; margin-bottom:6px;">' + escapeHtml(s.subject) + '</div>' +
+      '<div style="line-height:1.6;">' +
+        '<b>Email:</b> ' + escapeHtml(s.email) + '<br>' +
+        '<b>Category:</b> ' + escapeHtml(String(s.category)) + (s.needsRouting ? ' (handed to teammate)' : '') + '<br>' +
+        '<b>Days since last activity:</b> ' + s.daysStalled + '<br>' +
+        '<a href="' + s.link + '">Open thread in Gmail</a>' +
+      '</div>' +
+    '</div>'
+  ).join('');
+
+  const htmlBody =
+    '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' +
+      '<p>This email was written by Claude.</p>' +
+      '<p>Found <b>' + stalled.length + '</b> lead(s) that got as far as penciling in a call or being handed to a teammate, but have gone quiet for <b>' + threshold + '+ days</b>. Sorted worst-first:</p>' +
+      '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
+      htmlBlocks +
+      '<p style="color:#555;">These are logged in the "' + STALLED_BOOKINGS_TAB + '" tab. Worth a manual check -- these might just be waiting on a call that already happened outside email, or might genuinely need a nudge.</p>' +
+    '</div>';
 
   MailApp.sendEmail({
     to: 'kris@iconsofrealestate.com',
     cc: 'joana@iconsofrealestate.com',
     subject: subject,
-    body: body
+    body: plainBody,
+    htmlBody: htmlBody
   });
 }
