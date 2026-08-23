@@ -459,11 +459,63 @@ function generateSopSuggestionsInner(opts) {
   // not one per 5-example batch. Skipped entirely during backlog catch-up
   // mode (opts.skipDocAndEmail) -- see runSopSuggestionsCatchup() below.
   if (!skipDocAndEmail) {
-    const docFile = createSopSuggestionsDoc(allBatchEdits, allSuggestions, deferredCount);
-    emailSopSuggestionsDoc(docFile, allSuggestions.length);
+    // ADDED (23 Aug 2026, per direct request -- "every time it runs the
+    // script, it merges duplicates before sending to the team"): each
+    // 5-example batch is analyzed by the LLM in total isolation from every
+    // other batch, so the same real pattern (e.g. a specific emoji
+    // placement, a specific CTA phrasing) can get independently
+    // rediscovered and separately worded by many different batches in one
+    // run. Confirmed live: the 23 Aug backlog catch-up sent 548 raw
+    // findings, most of them the same handful of real patterns repeated.
+    // Merge before building the doc/email that goes to the team -- the
+    // "SOP Suggestions" sheet tab above still keeps every raw finding,
+    // unmerged, as the permanent audit trail.
+    const suggestionLines = allSuggestions.map(s => '[' + s.confidence + '] ' + s.pattern_observed + ' -> ' + s.suggested_change);
+    const merged = mergeDuplicateSuggestions_(suggestionLines, 'generateSopSuggestions');
+    const finalSuggestions = merged || allSuggestions;
+    const docFile = createSopSuggestionsDoc(allBatchEdits, finalSuggestions, deferredCount);
+    emailSopSuggestionsDoc(docFile, finalSuggestions.length);
   }
 
   return deferredCount === 0;
+}
+
+// ADDED (23 Aug 2026, per direct request): consolidates a list of proposed
+// SOP changes that may contain duplicates/near-duplicates -- the same real
+// pattern discovered independently by different batches and worded
+// slightly differently. Used by both the normal per-run doc/email above
+// and the backlog catch-up finalize step below, so EVERY doc/email that
+// reaches the team is deduplicated, not just this one-time backlog.
+// Returns an array of merged suggestions ({pattern_observed,
+// suggested_change, confidence}), or null on any failure -- callers should
+// fall back to sending the unmerged list rather than losing the run's
+// findings entirely over a merge-step hiccup.
+function mergeDuplicateSuggestions_(suggestionLines, callerLabel) {
+  if (!suggestionLines || suggestionLines.length <= 1) return null;
+
+  const systemPrompt = `You consolidate a list of proposed SOP changes that may contain duplicate or near-duplicate entries -- the same underlying behavioral pattern independently discovered multiple times and worded slightly differently. Merge duplicates/near-duplicates into a single clear entry each. Keep genuinely distinct suggestions separate. When merging, keep the clearest wording and the highest confidence level seen among the merged entries. Do not invent new suggestions -- only consolidate what is given.`;
+
+  const listText = suggestionLines.map((t, i) => (i + 1) + '. ' + t).join('\n');
+  const userPrompt = `Here are ${suggestionLines.length} proposed SOP changes, which may contain duplicates or near-duplicates describing the same underlying pattern:\n\n${listText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble -- the consolidated, deduplicated list. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}.`;
+
+  try {
+    const data = callLlmWithFallback(systemPrompt, userPrompt, 8000, callerLabel + ':merge');
+    const textBlock = data.content.find(c => c.type === 'text');
+    if (!textBlock) {
+      Logger.log(callerLabel + ' -- merge step got no text block back, sending unmerged (' + suggestionLines.length + ' items).');
+      return null;
+    }
+    const merged = JSON.parse(textBlock.text.trim());
+    if (!Array.isArray(merged) || merged.length === 0) {
+      Logger.log(callerLabel + ' -- merge step returned no usable list, sending unmerged (' + suggestionLines.length + ' items).');
+      return null;
+    }
+    Logger.log(callerLabel + ' -- merged ' + suggestionLines.length + ' suggestion(s) down to ' + merged.length + '.');
+    return merged;
+  } catch (e) {
+    Logger.log(callerLabel + ' -- merge step failed, sending unmerged (' + suggestionLines.length + ' items): ' + e);
+    return null;
+  }
 }
 
 // ---------- 2b. BACKLOG CATCH-UP MODE (added 23 Aug 2026, per direct request) ----------
@@ -537,24 +589,39 @@ function finalizeSopSuggestionsCatchup() {
     ? suggestionsTab.getDataRange().getValues().slice(1).filter(r => r[0] instanceof Date && r[0] >= startDate)
     : [];
 
+  // ADDED (23 Aug 2026, per direct request -- "merge duplicates before
+  // sending to the team"): each 5-example batch analyzed the LLM in
+  // isolation from every other batch, so the same real pattern got
+  // independently rediscovered and separately worded across ~110 batches.
+  // Merge before this goes to the team -- the sheet rows above (the
+  // permanent audit trail) are untouched, still one row per raw finding.
+  const rawSuggestionLines = newSuggestionRows.map(r => String(r[2]));
+  const merged = mergeDuplicateSuggestions_(rawSuggestionLines, 'runSopSuggestionsCatchup');
+  const finalSuggestions = merged || rawSuggestionLines.map(line => ({ pattern_observed: line, suggested_change: '', confidence: '' }));
+
   const dateStr = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'MMMM d, yyyy');
   const doc = DocumentApp.create('SOP Suggestions -- Backlog Catch-up -- ' + dateStr);
   const body = doc.getBody();
   body.appendParagraph('SOP Suggestions -- Backlog Catch-up').setHeading(DocumentApp.ParagraphHeading.HEADING1);
   body.appendParagraph(
     'The Learning Log backlog that built up while the SOP-suggestions email was silently ' +
-    'failing has now been fully processed. ' + newSuggestionRows.length + ' suggestion' +
-    (newSuggestionRows.length === 1 ? '' : 's') + ' were generated across the whole catch-up run:'
+    'failing has now been fully processed. ' + finalSuggestions.length + ' distinct suggestion' +
+    (finalSuggestions.length === 1 ? '' : 's') + ' remain after merging duplicates (from ' +
+    newSuggestionRows.length + ' raw finding' + (newSuggestionRows.length === 1 ? '' : 's') +
+    ' across the whole catch-up run):'
   );
   body.appendParagraph('PROPOSALS ONLY -- nothing here has been applied to the live SOP. Review each one and copy anything real into the live SOP doc by hand.');
   body.appendHorizontalRule();
 
-  if (newSuggestionRows.length === 0) {
+  if (finalSuggestions.length === 0) {
     body.appendParagraph('No suggestions were generated from the backlog.');
   } else {
-    newSuggestionRows.forEach((r, idx) => {
-      body.appendParagraph('Suggestion ' + (idx + 1)).setHeading(DocumentApp.ParagraphHeading.HEADING2);
-      body.appendParagraph(String(r[2])); // "[confidence] pattern observed -> suggested change"
+    finalSuggestions.forEach((s, idx) => {
+      body.appendParagraph('Suggestion ' + (idx + 1) + (s.confidence ? ' -- ' + String(s.confidence).toUpperCase() + ' confidence' : '')).setHeading(DocumentApp.ParagraphHeading.HEADING2);
+      body.appendParagraph('Pattern observed: ' + s.pattern_observed);
+      if (s.suggested_change) {
+        body.appendParagraph('Suggested change: ' + s.suggested_change);
+      }
     });
   }
 
@@ -573,15 +640,94 @@ function finalizeSopSuggestionsCatchup() {
     subject: '[Written by Claude] SOP Suggestions -- backlog fully processed -- ' + dateStr,
     body:
       'This email was written by Claude.\n\n' +
-      'The Learning Log backlog has been fully processed. ' + newSuggestionRows.length +
-      ' potential SOP update' + (newSuggestionRows.length === 1 ? '' : 's') +
-      ' were found across the whole catch-up run:\n\n' +
+      'The Learning Log backlog has been fully processed. ' + finalSuggestions.length +
+      ' distinct potential SOP update' + (finalSuggestions.length === 1 ? '' : 's') +
+      ' remain after merging duplicates (from ' + newSuggestionRows.length + ' raw finding' +
+      (newSuggestionRows.length === 1 ? '' : 's') + ' across the whole catch-up run):\n\n' +
       file.getUrl() + '\n\n' +
       'Please review and decide whether to add any of these to the live SOP -- nothing here has been applied automatically.'
   });
 
   props.deleteProperty(SOP_CATCHUP_START_PROP);
-  Logger.log('SOP suggestions backlog catch-up complete -- ' + newSuggestionRows.length + ' suggestions, one email sent: ' + file.getUrl());
+  Logger.log('SOP suggestions backlog catch-up complete -- ' + newSuggestionRows.length + ' raw findings merged to ' + finalSuggestions.length + ', one email sent: ' + file.getUrl());
+}
+
+// ONE-OFF (23 Aug 2026, per direct request): the backlog catch-up trigger
+// already finished and sent its email BEFORE the merge step above existed
+// -- 548 raw, un-deduplicated findings went out. Run this ONCE, manually,
+// to send a corrected, deduplicated doc+email covering everything logged
+// today, superseding that earlier one. Not part of any schedule -- delete
+// or ignore once run. (finalizeSopSuggestionsCatchup()'s own start-time
+// marker was already cleared when that run completed, so this filters by
+// today's calendar date instead, which covers the same rows.)
+function mergeAndResendTodaysSopSuggestions() {
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const suggestionsTab = ss.getSheetByName('SOP Suggestions');
+  if (!suggestionsTab) {
+    Logger.log('mergeAndResendTodaysSopSuggestions -- "SOP Suggestions" tab not found.');
+    return;
+  }
+
+  const todayStr = Utilities.formatDate(new Date(), 'Europe/Paris', 'yyyy-MM-dd');
+  const todaysRows = suggestionsTab.getDataRange().getValues().slice(1)
+    .filter(r => r[0] instanceof Date && Utilities.formatDate(r[0], 'Europe/Paris', 'yyyy-MM-dd') === todayStr);
+
+  if (todaysRows.length === 0) {
+    Logger.log('mergeAndResendTodaysSopSuggestions -- no suggestions logged today, nothing to merge.');
+    return;
+  }
+
+  const rawLines = todaysRows.map(r => String(r[2]));
+  Logger.log('mergeAndResendTodaysSopSuggestions -- merging ' + rawLines.length + ' suggestion(s) logged today.');
+
+  const merged = mergeDuplicateSuggestions_(rawLines, 'mergeAndResendTodaysSopSuggestions');
+  const finalSuggestions = merged || rawLines.map(line => ({ pattern_observed: line, suggested_change: '', confidence: '' }));
+
+  const dateStr = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'MMMM d, yyyy');
+  const doc = DocumentApp.create('SOP Suggestions -- Backlog Catch-up (Deduplicated) -- ' + dateStr);
+  const body = doc.getBody();
+  body.appendParagraph('SOP Suggestions -- Backlog Catch-up (Deduplicated)').setHeading(DocumentApp.ParagraphHeading.HEADING1);
+  body.appendParagraph(
+    'This supersedes the earlier "backlog fully processed" email sent today, which listed ' +
+    rawLines.length + ' raw, un-deduplicated findings -- most of the ~110 independent batches ' +
+    'rediscovered the same real pattern worded slightly differently. Same underlying findings, ' +
+    'merged down to ' + finalSuggestions.length + ' distinct suggestion' + (finalSuggestions.length === 1 ? '' : 's') + ':'
+  );
+  body.appendParagraph('PROPOSALS ONLY -- nothing here has been applied to the live SOP. Review each one and copy anything real into the live SOP doc by hand.');
+  body.appendHorizontalRule();
+
+  finalSuggestions.forEach((s, idx) => {
+    body.appendParagraph('Suggestion ' + (idx + 1) + (s.confidence ? ' -- ' + String(s.confidence).toUpperCase() + ' confidence' : '')).setHeading(DocumentApp.ParagraphHeading.HEADING2);
+    body.appendParagraph('Pattern observed: ' + s.pattern_observed);
+    if (s.suggested_change) {
+      body.appendParagraph('Suggested change: ' + s.suggested_change);
+    }
+  });
+
+  doc.saveAndClose();
+  const file = DriveApp.getFileById(doc.getId());
+  const ownerEmail = file.getOwner() ? file.getOwner().getEmail() : null;
+  const viewers = ['goodness@iconsofrealestate.com', 'joana@iconsofrealestate.com', 'kris@iconsofrealestate.com', 'tomas@iconsofrealestate.com']
+    .filter(addr => addr.toLowerCase() !== (ownerEmail || '').toLowerCase());
+  if (viewers.length > 0) {
+    file.addViewers(viewers);
+  }
+
+  MailApp.sendEmail({
+    to: 'goodness@iconsofrealestate.com,joana@iconsofrealestate.com',
+    cc: 'kris@iconsofrealestate.com,tomas@iconsofrealestate.com',
+    subject: '[Written by Claude] SOP Suggestions -- deduplicated (supersedes earlier email) -- ' + dateStr,
+    body:
+      'This email was written by Claude.\n\n' +
+      'The earlier "backlog fully processed" email sent today listed ' + rawLines.length +
+      ' raw findings -- most were the same real pattern rediscovered independently by different ' +
+      'batches. Same findings, merged down to ' + finalSuggestions.length + ' distinct, reviewable ' +
+      'suggestion' + (finalSuggestions.length === 1 ? '' : 's') + ':\n\n' +
+      file.getUrl() + '\n\n' +
+      'This supersedes the earlier email today -- please review this one instead.'
+  });
+
+  Logger.log('mergeAndResendTodaysSopSuggestions -- done. ' + rawLines.length + ' raw -> ' + finalSuggestions.length + ' merged. Emailed: ' + file.getUrl());
 }
 
 // ---------- 3. DAILY REVIEWABLE DOC + EMAIL (added 19 Aug 2026) ----------
