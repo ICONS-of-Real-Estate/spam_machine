@@ -450,7 +450,19 @@ function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount) {
   // Share with just the three reviewers, not "anyone with the link" --
   // this is real lead-reply content, no reason to widen access beyond who
   // actually needs to review it.
-  file.addViewers(['goodness@iconsofrealestate.com', 'joana@iconsofrealestate.com', 'kris@iconsofrealestate.com']);
+  // FIXED (23 Aug 2026, real incident): confirmed live -- this threw
+  // "Access denied: DriveApp." on every run. Root cause: the doc is created
+  // (and owned) by whichever account the trigger runs as -- Joana's -- and
+  // Drive rejects addViewers() outright if the list includes the file's own
+  // owner (you can't add an owner as a mere viewer). The whole batch call
+  // failed, not just that one entry, so nobody ever got shared. Filter the
+  // owner out of the list before sharing.
+  const ownerEmail = file.getOwner() ? file.getOwner().getEmail() : null;
+  const viewers = ['goodness@iconsofrealestate.com', 'joana@iconsofrealestate.com', 'kris@iconsofrealestate.com']
+    .filter(addr => addr.toLowerCase() !== (ownerEmail || '').toLowerCase());
+  if (viewers.length > 0) {
+    file.addViewers(viewers);
+  }
   return file;
 }
 
