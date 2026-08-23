@@ -2,6 +2,19 @@
 
 > Context for an incoming engineer / AI pair. Read this before editing any file.
 
+## Branch note (23 Aug 2026)
+
+`main`, `claude/project-codebase-review-wrrcn3`, and `claude/project-onboarding-4twkmg`
+are now all at the same commit (`ac508dd`) — a merge reconciling 21 commits that had
+landed on `main` (a live threading fix, a stale Zoom-link fix, opt-out detection
+broadening, `stalled_bookings_audit.gs`, lock protection on the learning loop, etc.)
+with everything built on `wrrcn3`/`onboarding` in parallel (prompt caching, the
+self-tracked quota guard, learning-loop batching, the `sop_change_requests/` process).
+Nothing was dropped from either side — see the merge commit message for the
+per-file conflict reasoning. If you're picking this repo back up: pull `main`
+(or `wrrcn3`) fresh rather than rebasing old local work onto either, since both
+already contain each other's history as of this merge.
+
 ## What this is
 
 A **Google Apps Script** project (V8, `Europe/Paris`) running inside **Joana's Gmail** (`joana@iconsofrealestate.com`). It is an AI email-triage-and-drafting pipeline for podcast-outreach replies. Kris operates it; Joana / Goodness review and send its output.
