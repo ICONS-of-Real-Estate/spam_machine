@@ -48,6 +48,14 @@ function runStalledBookingsAudit(daysThresholdOverride) {
     return;
   }
 
+  // ADDED (23 Aug 2026, per direct request -- "Needs more logging"):
+  // confirmed live that a manual run went completely silent between the
+  // opening assertRunningAsJoana() log line and "Execution cancelled" 21
+  // seconds later, with nothing in between to show what it was doing --
+  // this loop does a live GmailApp.getThreadById() + getMessages() call
+  // per matching row, so a large "AI Drafts Log" with many penciled/routed
+  // rows can spend real time here with zero visibility. Logging every
+  // stage now so a slow or stuck run actually shows where it is.
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const draftsTab = ss.getSheetByName('AI Drafts Log');
   if (!draftsTab) {
@@ -59,11 +67,13 @@ function runStalledBookingsAudit(daysThresholdOverride) {
   if (!auditTab) {
     auditTab = ss.insertSheet(STALLED_BOOKINGS_TAB);
     auditTab.appendRow(['Flagged At', 'Thread ID', 'Prospect Email', 'Subject', 'Category', 'Needs Teammate Routing', 'Last Activity Date', 'Days Stalled', 'Thread Link']);
+    Logger.log('runStalledBookingsAudit -- created "' + STALLED_BOOKINGS_TAB + '" tab (first run).');
   }
 
   const alreadyFlagged = new Set(
     auditTab.getDataRange().getValues().slice(1).map(row => row[1]) // Thread ID column
   );
+  Logger.log('runStalledBookingsAudit -- ' + alreadyFlagged.size + ' thread(s) already flagged in a previous run, will be skipped.');
 
   const rows = draftsTab.getDataRange().getValues();
   const headers = rows[0];
@@ -73,7 +83,11 @@ function runStalledBookingsAudit(daysThresholdOverride) {
   const categoryCol = headers.indexOf('Category');
   const routingCol = headers.indexOf('Needs Teammate Routing');
 
+  Logger.log('runStalledBookingsAudit -- scanning ' + (rows.length - 1) + ' row(s) in "AI Drafts Log" for penciled/routed leads, threshold ' + threshold + ' days.');
+
   const stalled = [];
+  let candidateCount = 0;
+  let threadFetchFailures = 0;
 
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
@@ -85,19 +99,34 @@ function runStalledBookingsAudit(daysThresholdOverride) {
     const looksLikeABooking = category === 'yes_penciled' || needsRouting;
     if (!looksLikeABooking) continue;
 
+    candidateCount++;
+    // Progress marker every 20 live Gmail lookups -- this is the part that
+    // actually makes network calls, so it's the part that can go quiet.
+    if (candidateCount % 20 === 0) {
+      Logger.log('runStalledBookingsAudit -- still checking Gmail threads: ' + candidateCount + ' candidate(s) looked up so far (row ' + (i + 1) + ' of ' + rows.length + ').');
+    }
+
     let thread;
     try {
       thread = GmailApp.getThreadById(threadId);
     } catch (e) {
-      continue; // thread may have been deleted
+      threadFetchFailures++;
+      Logger.log('runStalledBookingsAudit -- could not load thread ' + threadId + ' (' + row[emailCol] + ') -- likely deleted, skipping: ' + e);
+      continue;
     }
-    if (!thread) continue;
+    if (!thread) {
+      threadFetchFailures++;
+      Logger.log('runStalledBookingsAudit -- thread ' + threadId + ' (' + row[emailCol] + ') returned null, skipping.');
+      continue;
+    }
 
     const messages = thread.getMessages();
     const lastReal = lastNonDraftMessage_(messages) || messages[messages.length - 1];
     const daysSinceLastActivity = Math.floor((Date.now() - lastReal.getDate().getTime()) / (1000 * 60 * 60 * 24));
 
     if (daysSinceLastActivity < threshold) continue;
+
+    Logger.log('runStalledBookingsAudit -- FLAGGING ' + threadId + ' (' + row[emailCol] + '): ' + daysSinceLastActivity + ' days since last activity, category=' + category + (needsRouting ? ', handed to teammate' : ''));
 
     stalled.push({
       threadId: threadId,
@@ -111,11 +140,14 @@ function runStalledBookingsAudit(daysThresholdOverride) {
     });
   }
 
+  Logger.log('runStalledBookingsAudit -- finished scanning. ' + candidateCount + ' candidate(s) checked (' + threadFetchFailures + ' thread lookup failure(s)), ' + stalled.length + ' newly stalled.');
+
   stalled.forEach(s => {
     auditTab.appendRow([new Date(), s.threadId, s.email, s.subject, s.category, s.needsRouting, s.lastActivityDate, s.daysStalled, s.link]);
   });
 
   if (stalled.length > 0) {
+    Logger.log('runStalledBookingsAudit -- sending alert email for ' + stalled.length + ' newly stalled lead(s).');
     emailStalledBookingsAlert(stalled, threshold);
   }
 
