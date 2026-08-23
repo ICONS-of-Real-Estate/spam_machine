@@ -126,11 +126,39 @@ function runStalledBookingsAudit(daysThresholdOverride) {
 
     if (daysSinceLastActivity < threshold) continue;
 
-    Logger.log('runStalledBookingsAudit -- FLAGGING ' + threadId + ' (' + row[emailCol] + '): ' + daysSinceLastActivity + ' days since last activity, category=' + category + (needsRouting ? ', handed to teammate' : ''));
+    // FIXED (23 Aug 2026, real incident): confirmed live -- this was
+    // displaying row[emailCol] (the stored "Prospect Email" column)
+    // directly, which CLAUDE.md already documents as ~27% poisoned. Real
+    // output: dozens of rows showed 'network@ardorseo.com' (the internal
+    // routing alias, not a lead) as the "prospect", and several showed
+    // spoofed lookalike domains impersonating Joana/Kris (dronezilla.site,
+    // iconsrealestatepro.com/.site, iconsofrealestateadmin.com). Every
+    // other Gmail-touching file in this project re-derives the real lead
+    // email via extractForwardedLeadInfo() instead of trusting that
+    // column -- this one didn't. Same fallback pattern as
+    // learning_loop.gs: log if it couldn't be resolved rather than reject
+    // the row outright (a booking that's genuinely stalled is still worth
+    // flagging even if the email itself can't be re-derived cleanly).
+    let realEmail = row[emailCol];
+    try {
+      const forwardInfo = extractForwardedLeadInfo(messages[0]);
+      if (forwardInfo && forwardInfo.email) {
+        if (forwardInfo.email !== String(row[emailCol]).toLowerCase()) {
+          Logger.log('runStalledBookingsAudit -- ' + threadId + ': stored Prospect Email (' + row[emailCol] + ') differs from re-derived lead email (' + forwardInfo.email + ') -- using the re-derived one.');
+        }
+        realEmail = forwardInfo.email;
+      } else {
+        Logger.log('runStalledBookingsAudit -- ' + threadId + ': could not re-derive lead email, falling back to stored Prospect Email (' + row[emailCol] + ') -- may be poisoned.');
+      }
+    } catch (e) {
+      Logger.log('runStalledBookingsAudit -- ' + threadId + ': extractForwardedLeadInfo() threw, falling back to stored Prospect Email (' + row[emailCol] + '): ' + e);
+    }
+
+    Logger.log('runStalledBookingsAudit -- FLAGGING ' + threadId + ' (' + realEmail + '): ' + daysSinceLastActivity + ' days since last activity, category=' + category + (needsRouting ? ', handed to teammate' : ''));
 
     stalled.push({
       threadId: threadId,
-      email: row[emailCol],
+      email: realEmail,
       subject: row[subjectCol],
       category: category,
       needsRouting: needsRouting,
