@@ -5,8 +5,11 @@
  * ---------------------------------------------------------------------------
  * Deletes any existing trigger for these same functions first (so running
  * this twice doesn't create duplicates), then creates:
- *   - runReplyDrafter          -- every 15 minutes (slowed from 5 min, 23 Aug
- *     2026, per direct request -- see note at the trigger below)
+ *   - runReplyDrafter          -- every 15 minutes weekdays, effectively
+ *     hourly on weekends (slowed from a flat 5 min, 23 Aug 2026, per direct
+ *     request -- the weekend throttle is a code-level check in
+ *     runReplyDrafter() itself, not a second trigger; see the note there
+ *     and at the trigger below for why)
  *   - runLearningLoop          -- weekly (Saturday -- moved off daily 22 Aug 2026,
  *     see note at the trigger below)
  *   - generateSopSuggestions   -- daily (~6 PM Pacific -- see timezone note below)
@@ -79,6 +82,13 @@ function setupAllTriggers() {
   // landing right as the folder drains waiting up to 15 min instead of 5 to
   // get drafted, trivial next to how long a human takes to review a batch
   // anyway. 15 is one of Apps Script's supported interval steps (1/5/10/15/30).
+  //
+  // WEEKEND THROTTLE (23 Aug 2026, same request): this ONE trigger still
+  // fires every 15 min all 7 days -- Apps Script has no "every 15 min, but
+  // only Mon-Fri" interval option. runReplyDrafter() itself checks the day
+  // and, on Sat/Sun, no-ops 3 of every 4 firings (keeping only the one
+  // landing in each hour's first 15 minutes), so the real-world effect is
+  // ~hourly on weekends without needing a second trigger.
   ScriptApp.newTrigger('runReplyDrafter')
     .timeBased()
     .everyMinutes(15)

@@ -435,6 +435,26 @@ function saveSkipCache(ss, cacheMap) {
 // ---------- MAIN ENTRY POINT ----------
 
 function runReplyDrafter() {
+  // ADDED (23 Aug 2026, per direct request): weekdays stay on the 15-min
+  // cadence set in setup_all_triggers.gs, but on weekends -- when nobody's
+  // reviewing drafts -- there's no reason to check that often. Apps Script's
+  // interval triggers (everyMinutes/everyHours) can't be restricted to
+  // specific days (only a single daily .onWeekDay().atHour() fire supports
+  // that), so rather than juggling two triggers, this single 15-min trigger
+  // keeps firing all week, but on Saturday/Sunday only the firing that lands
+  // in each hour's first 15-minute window actually proceeds -- the other
+  // three quietly no-op right here, before ANY Gmail API call, which is the
+  // whole point: this check is pure Date math, essentially free either way.
+  const nowInTz = new Date();
+  const dayName = Utilities.formatDate(nowInTz, 'Europe/Paris', 'EEE');
+  if (dayName === 'Sat' || dayName === 'Sun') {
+    const minuteOfHour = Number(Utilities.formatDate(nowInTz, 'Europe/Paris', 'mm'));
+    if (minuteOfHour >= 15) {
+      Logger.log('Skipping runReplyDrafter -- weekend throttle (effectively hourly): not this run\'s turn (minute ' + minuteOfHour + ').');
+      return;
+    }
+  }
+
   // ADDED (17 Aug 2026, real incident): this was the one Gmail-touching
   // entry point in the whole project that DIDN'T call assertRunningAsJoana()
   // -- a real gap, confirmed live when the Executions view showed this exact
