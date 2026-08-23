@@ -402,7 +402,14 @@ function generateSopSuggestionsInner(opts) {
 
     const userPrompt = `Here are ${batchEdits.length} examples of AI-drafted replies versus what Joana actually sent instead:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested SOP changes. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
 
-    const data = callLlmWithFallback(systemPrompt, userPrompt, 2000, 'generateSopSuggestions');
+    // RAISED (23 Aug 2026, real incident): confirmed live -- 2000 was too
+    // small. A single 5-example batch produced 9 detailed suggestions and
+    // got cut off mid-JSON-array, JSON.parse() threw, and that whole
+    // batch's suggestions were silently lost (rows still marked reviewed,
+    // but nothing to show for the LLM call that found them -- not
+    // retried). Raised to a size that comfortably fits the largest batches
+    // seen in practice, with headroom.
+    const data = callLlmWithFallback(systemPrompt, userPrompt, 8000, 'generateSopSuggestions');
     const textBlock = data.content.find(c => c.type === 'text');
     if (!textBlock) break;
 
