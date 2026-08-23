@@ -307,13 +307,24 @@ function generateSopSuggestions() {
   }
 }
 
-function generateSopSuggestionsInner() {
-  if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') return;
+function generateSopSuggestionsInner(opts) {
+  // ADDED (23 Aug 2026, per direct request): opts.skipDocAndEmail lets the
+  // backlog catch-up trigger below (runSopSuggestionsCatchup()) reuse this
+  // exact same batching/marking logic without sending a doc+email after
+  // every single run -- it wants ONE email for the whole catch-up, not one
+  // per run. The normal daily caller (generateSopSuggestions()) doesn't
+  // pass this, so its behavior is unchanged. Either way, this returns
+  // whether the backlog is now fully drained (deferredCount === 0), which
+  // the catch-up trigger uses to know when to finalize and stop.
+  opts = opts || {};
+  const skipDocAndEmail = opts.skipDocAndEmail === true;
+
+  if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') return true;
 
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const learningTab = ss.getSheetByName('Learning Log');
   const suggestionsTab = ss.getSheetByName('SOP Suggestions');
-  if (!learningTab || !suggestionsTab) return;
+  if (!learningTab || !suggestionsTab) return true;
 
   const rows = learningTab.getDataRange().getValues();
   const headers = rows[0];
@@ -339,7 +350,7 @@ function generateSopSuggestionsInner() {
 
   if (unreviewedEdits.length === 0) {
     Logger.log('No new edited examples to review.');
-    return;
+    return true;
   }
 
   // CAPPED (17 Aug 2026, real incident): this function was designed around a
@@ -428,7 +439,7 @@ function generateSopSuggestionsInner() {
   const deferredCount = remaining.length;
   Logger.log('generateSopSuggestions -- ' + unreviewedEdits.length + ' unreviewed edits found; processed ' + allBatchEdits.length + ' across ' + Math.ceil(allBatchEdits.length / SOP_SUGGESTIONS_BATCH_SIZE) + ' batch(es) this run, deferring ' + deferredCount + ' to the next run(s).');
 
-  if (allBatchEdits.length === 0) return;
+  if (allBatchEdits.length === 0) return deferredCount === 0;
 
   Logger.log('Generated ' + allSuggestions.length + ' SOP suggestions from ' + allBatchEdits.length + ' edited examples' + (deferredCount > 0 ? ' (' + deferredCount + ' more deferred to next run).' : '.'));
 
@@ -438,9 +449,132 @@ function generateSopSuggestionsInner() {
   // document for today's batch and emails it directly, so review is a
   // reply to an email, not a "remember to go check the sheet" chore.
   // ONE doc + ONE email per run now, covering every batch processed above,
-  // not one per 5-example batch.
-  const docFile = createSopSuggestionsDoc(allBatchEdits, allSuggestions, deferredCount);
-  emailSopSuggestionsDoc(docFile, allSuggestions.length);
+  // not one per 5-example batch. Skipped entirely during backlog catch-up
+  // mode (opts.skipDocAndEmail) -- see runSopSuggestionsCatchup() below.
+  if (!skipDocAndEmail) {
+    const docFile = createSopSuggestionsDoc(allBatchEdits, allSuggestions, deferredCount);
+    emailSopSuggestionsDoc(docFile, allSuggestions.length);
+  }
+
+  return deferredCount === 0;
+}
+
+// ---------- 2b. BACKLOG CATCH-UP MODE (added 23 Aug 2026, per direct request) ----------
+// A ~500-example backlog built up in the Learning Log while
+// generateSopSuggestions was silently failing on the doc/email step (see the
+// DriveApp fixes above it was never actually losing data, just never
+// notifying anyone). Direct request: "Bump the trigger to run regularly and
+// finish all today. Only email once when the backlog is finished." This is
+// a TEMPORARY, SELF-REMOVING trigger, separate from generateSopSuggestions's
+// normal daily trigger (unaffected, keeps running as-is):
+//   - installSopSuggestionsCatchupTrigger() -- run this ONCE, manually, from
+//     the script editor to start it. Records a start timestamp and installs
+//     a frequent trigger.
+//   - runSopSuggestionsCatchup() -- what that trigger fires. Reuses the
+//     exact same batching/marking logic as the normal path (via
+//     generateSopSuggestionsInner's skipDocAndEmail option), but sends NO
+//     email itself. The run that finds the backlog fully drained builds ONE
+//     doc covering every suggestion generated since the start timestamp,
+//     emails it once, and removes its own trigger -- so this never keeps
+//     firing after the backlog is gone.
+//   - removeSopSuggestionsCatchupTrigger() -- manual safety valve to abort
+//     early if needed; also called automatically once the backlog clears.
+
+const SOP_CATCHUP_START_PROP = 'SOP_CATCHUP_START_ISO';
+const SOP_CATCHUP_TRIGGER_FN = 'runSopSuggestionsCatchup';
+
+function installSopSuggestionsCatchupTrigger() {
+  removeSopSuggestionsCatchupTrigger(); // safe to call twice
+  PropertiesService.getScriptProperties().setProperty(SOP_CATCHUP_START_PROP, new Date().toISOString());
+  ScriptApp.newTrigger(SOP_CATCHUP_TRIGGER_FN)
+    .timeBased()
+    .everyMinutes(5)
+    .create();
+  Logger.log('Installed SOP suggestions backlog catch-up trigger (every 5 min) -- will self-remove and send one email once the backlog clears.');
+}
+
+function removeSopSuggestionsCatchupTrigger() {
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === SOP_CATCHUP_TRIGGER_FN) {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+}
+
+function runSopSuggestionsCatchup() {
+  const lock = LockService.getScriptLock();
+  const gotLock = lock.tryLock(10000);
+  if (!gotLock) {
+    Logger.log('Another generateSopSuggestions/catch-up execution is already in progress -- skipping this run rather than racing it.');
+    return;
+  }
+  try {
+    const backlogCleared = generateSopSuggestionsInner({ skipDocAndEmail: true });
+    if (backlogCleared) {
+      finalizeSopSuggestionsCatchup();
+      removeSopSuggestionsCatchupTrigger();
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function finalizeSopSuggestionsCatchup() {
+  const props = PropertiesService.getScriptProperties();
+  const startIso = props.getProperty(SOP_CATCHUP_START_PROP);
+  const startDate = startIso ? new Date(startIso) : new Date(0);
+
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const suggestionsTab = ss.getSheetByName('SOP Suggestions');
+  const newSuggestionRows = suggestionsTab
+    ? suggestionsTab.getDataRange().getValues().slice(1).filter(r => r[0] instanceof Date && r[0] >= startDate)
+    : [];
+
+  const dateStr = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'MMMM d, yyyy');
+  const doc = DocumentApp.create('SOP Suggestions -- Backlog Catch-up -- ' + dateStr);
+  const body = doc.getBody();
+  body.appendParagraph('SOP Suggestions -- Backlog Catch-up').setHeading(DocumentApp.ParagraphHeading.HEADING1);
+  body.appendParagraph(
+    'The Learning Log backlog that built up while the SOP-suggestions email was silently ' +
+    'failing has now been fully processed. ' + newSuggestionRows.length + ' suggestion' +
+    (newSuggestionRows.length === 1 ? '' : 's') + ' were generated across the whole catch-up run:'
+  );
+  body.appendParagraph('PROPOSALS ONLY -- nothing here has been applied to the live SOP. Review each one and copy anything real into the live SOP doc by hand.');
+  body.appendHorizontalRule();
+
+  if (newSuggestionRows.length === 0) {
+    body.appendParagraph('No suggestions were generated from the backlog.');
+  } else {
+    newSuggestionRows.forEach((r, idx) => {
+      body.appendParagraph('Suggestion ' + (idx + 1)).setHeading(DocumentApp.ParagraphHeading.HEADING2);
+      body.appendParagraph(String(r[2])); // "[confidence] pattern observed -> suggested change"
+    });
+  }
+
+  doc.saveAndClose();
+  const file = DriveApp.getFileById(doc.getId());
+  const ownerEmail = file.getOwner() ? file.getOwner().getEmail() : null;
+  const viewers = ['goodness@iconsofrealestate.com', 'joana@iconsofrealestate.com', 'kris@iconsofrealestate.com', 'tomas@iconsofrealestate.com']
+    .filter(addr => addr.toLowerCase() !== (ownerEmail || '').toLowerCase());
+  if (viewers.length > 0) {
+    file.addViewers(viewers);
+  }
+
+  MailApp.sendEmail({
+    to: 'goodness@iconsofrealestate.com,joana@iconsofrealestate.com',
+    cc: 'kris@iconsofrealestate.com,tomas@iconsofrealestate.com',
+    subject: '[Written by Claude] SOP Suggestions -- backlog fully processed -- ' + dateStr,
+    body:
+      'This email was written by Claude.\n\n' +
+      'The Learning Log backlog has been fully processed. ' + newSuggestionRows.length +
+      ' potential SOP update' + (newSuggestionRows.length === 1 ? '' : 's') +
+      ' were found across the whole catch-up run:\n\n' +
+      file.getUrl() + '\n\n' +
+      'Please review and decide whether to add any of these to the live SOP -- nothing here has been applied automatically.'
+  });
+
+  props.deleteProperty(SOP_CATCHUP_START_PROP);
+  Logger.log('SOP suggestions backlog catch-up complete -- ' + newSuggestionRows.length + ' suggestions, one email sent: ' + file.getUrl());
 }
 
 // ---------- 3. DAILY REVIEWABLE DOC + EMAIL (added 19 Aug 2026) ----------
