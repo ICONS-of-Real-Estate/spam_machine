@@ -359,56 +359,88 @@ function generateSopSuggestionsInner() {
   // in this project. Raise it once a few days of daily docs have come back
   // clean.
   const SOP_SUGGESTIONS_BATCH_SIZE = 5; // start small, verify quality, raise later once trusted
-  const deferredCount = Math.max(0, unreviewedEdits.length - SOP_SUGGESTIONS_BATCH_SIZE);
-  const batchEdits = unreviewedEdits.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
-  const batchRowIndexes = rowIndexesToMark.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
-  if (deferredCount > 0) {
-    Logger.log('generateSopSuggestions -- ' + unreviewedEdits.length + ' unreviewed edits found; processing ' + batchEdits.length + ' this run, deferring ' + deferredCount + ' to the next run(s).');
+
+  // CHANGED (23 Aug 2026, per direct request -- "Don't email every freaking
+  // time"): a 500-example backlog built up while generateSopSuggestions was
+  // silently failing on the doc/email step (see the DriveApp fix above). The
+  // per-LLM-call size above still needs to stay small (that's what the 17
+  // Aug incident was about -- each example can be a huge quoted forwarded
+  // thread), but this run used to email a doc after EVERY 5-example batch,
+  // so burning down a backlog this size at real speed would have meant one
+  // email per handful of examples -- tens of them a day. Instead, loop
+  // multiple 5-example LLM calls inside ONE execution, accumulate everything
+  // into one doc + one email at the end. Time-boxed well under Apps Script's
+  // ~6-min limit so a slow LLM call can't blow the run.
+  const SOP_SUGGESTIONS_RUN_TIME_BUDGET_MS = 4.5 * 60 * 1000; // leave headroom under the ~6-min execution limit
+  const runStart = new Date().getTime();
+
+  const allBatchEdits = [];
+  const allSuggestions = [];
+  let remaining = unreviewedEdits.slice();
+  let remainingRowIndexes = rowIndexesToMark.slice();
+
+  while (remaining.length > 0 && (new Date().getTime() - runStart) < SOP_SUGGESTIONS_RUN_TIME_BUDGET_MS) {
+    const batchEdits = remaining.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
+    const batchRowIndexes = remainingRowIndexes.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
+
+    const examplesText = batchEdits
+      .map((e, idx) => `EXAMPLE ${idx + 1} (category: ${e.category})\n--- AI DRAFTED ---\n${e.original}\n--- JOANA ACTUALLY SENT ---\n${e.final}`)
+      .join('\n\n');
+
+    const systemPrompt = `You review edited email drafts to find patterns in how a human editor (Joana) changes AI-drafted sales replies, and propose specific, concrete updates to the SOP that produced the drafts. You are NOT rewriting the SOP yourself — you are proposing changes for a human to review and approve. Be specific: quote the actual phrasing pattern you see repeated across edits, don't generalize vaguely. If the edits don't show a clear repeated pattern (e.g. they're all one-off stylistic tweaks with no common thread), say so plainly rather than inventing a pattern.`;
+
+    const userPrompt = `Here are ${batchEdits.length} examples of AI-drafted replies versus what Joana actually sent instead:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested SOP changes. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
+
+    const data = callLlmWithFallback(systemPrompt, userPrompt, 2000, 'generateSopSuggestions');
+    const textBlock = data.content.find(c => c.type === 'text');
+    if (!textBlock) break;
+
+    let suggestions;
+    try {
+      suggestions = JSON.parse(textBlock.text.trim());
+    } catch (e) {
+      Logger.log('Failed to parse suggestions JSON: ' + textBlock.text);
+      suggestions = [];
+    }
+
+    suggestions.forEach(s => {
+      suggestionsTab.appendRow([
+        new Date(),
+        batchEdits.length,
+        `[${s.confidence}] ${s.pattern_observed} -> ${s.suggested_change}`,
+        'pending',
+      ]);
+    });
+
+    // Mark these rows as reviewed immediately -- if the run dies partway
+    // through the loop (timeout, quota, crash), whatever's already been
+    // processed and logged stays marked so it's never re-sent to the LLM.
+    batchRowIndexes.forEach(rowNum => {
+      learningTab.getRange(rowNum, reviewedCol + 1).setValue(true);
+    });
+
+    allBatchEdits.push(...batchEdits);
+    allSuggestions.push(...suggestions);
+    remaining = remaining.slice(SOP_SUGGESTIONS_BATCH_SIZE);
+    remainingRowIndexes = remainingRowIndexes.slice(SOP_SUGGESTIONS_BATCH_SIZE);
   }
 
-  const examplesText = batchEdits
-    .map((e, idx) => `EXAMPLE ${idx + 1} (category: ${e.category})\n--- AI DRAFTED ---\n${e.original}\n--- JOANA ACTUALLY SENT ---\n${e.final}`)
-    .join('\n\n');
+  const deferredCount = remaining.length;
+  Logger.log('generateSopSuggestions -- ' + unreviewedEdits.length + ' unreviewed edits found; processed ' + allBatchEdits.length + ' across ' + Math.ceil(allBatchEdits.length / SOP_SUGGESTIONS_BATCH_SIZE) + ' batch(es) this run, deferring ' + deferredCount + ' to the next run(s).');
 
-  const systemPrompt = `You review edited email drafts to find patterns in how a human editor (Joana) changes AI-drafted sales replies, and propose specific, concrete updates to the SOP that produced the drafts. You are NOT rewriting the SOP yourself — you are proposing changes for a human to review and approve. Be specific: quote the actual phrasing pattern you see repeated across edits, don't generalize vaguely. If the edits don't show a clear repeated pattern (e.g. they're all one-off stylistic tweaks with no common thread), say so plainly rather than inventing a pattern.`;
+  if (allBatchEdits.length === 0) return;
 
-  const userPrompt = `Here are ${batchEdits.length} examples of AI-drafted replies versus what Joana actually sent instead:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested SOP changes. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
-
-  const data = callLlmWithFallback(systemPrompt, userPrompt, 2000, 'generateSopSuggestions');
-  const textBlock = data.content.find(c => c.type === 'text');
-  if (!textBlock) return;
-
-  let suggestions;
-  try {
-    suggestions = JSON.parse(textBlock.text.trim());
-  } catch (e) {
-    Logger.log('Failed to parse suggestions JSON: ' + textBlock.text);
-    return;
-  }
-
-  suggestions.forEach(s => {
-    suggestionsTab.appendRow([
-      new Date(),
-      batchEdits.length,
-      `[${s.confidence}] ${s.pattern_observed} -> ${s.suggested_change}`,
-      'pending',
-    ]);
-  });
-
-  // Mark these rows as reviewed so they don't get re-batched next week
-  batchRowIndexes.forEach(rowNum => {
-    learningTab.getRange(rowNum, reviewedCol + 1).setValue(true);
-  });
-
-  Logger.log('Generated ' + suggestions.length + ' SOP suggestions from ' + batchEdits.length + ' edited examples' + (deferredCount > 0 ? ' (' + deferredCount + ' more deferred to next run).' : '.'));
+  Logger.log('Generated ' + allSuggestions.length + ' SOP suggestions from ' + allBatchEdits.length + ' edited examples' + (deferredCount > 0 ? ' (' + deferredCount + ' more deferred to next run).' : '.'));
 
   // ADDED (19 Aug 2026, per direct request): the "SOP Suggestions" sheet
   // tab above is kept as the permanent structured log, but nobody reliably
   // opens a sheet tab on their own -- this creates an actual reviewable
   // document for today's batch and emails it directly, so review is a
   // reply to an email, not a "remember to go check the sheet" chore.
-  const docFile = createSopSuggestionsDoc(batchEdits, suggestions, deferredCount);
-  emailSopSuggestionsDoc(docFile, suggestions.length);
+  // ONE doc + ONE email per run now, covering every batch processed above,
+  // not one per 5-example batch.
+  const docFile = createSopSuggestionsDoc(allBatchEdits, allSuggestions, deferredCount);
+  emailSopSuggestionsDoc(docFile, allSuggestions.length);
 }
 
 // ---------- 3. DAILY REVIEWABLE DOC + EMAIL (added 19 Aug 2026) ----------
