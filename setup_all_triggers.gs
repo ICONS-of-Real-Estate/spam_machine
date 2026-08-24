@@ -41,14 +41,18 @@ function setupAllTriggers() {
     'summarizeFollowUpLearning',
     'runDailyReport',
     'runWeekendDeepMissedLeadsAudit',
-    'reconcileMissingDrafts'
-    // NOTE (17 Aug 2026, real incident; updated 23 Aug 2026 on merge):
-    // 'runStalledBookingsAudit' used to be listed here, but errored on every
-    // fire since the function didn't exist yet -- removed. It now DOES exist
-    // (stalled_bookings_audit.gs, Task 2 from the original handoff) but is
-    // deliberately still NOT wired to a trigger -- run it manually
-    // (runStalledBookingsAudit()) until draft quality is proven out, then
-    // add it here.
+    'reconcileMissingDrafts',
+    // WIRED UP (24 Aug 2026, per direct request). History: this was listed
+    // here on 17 Aug before the function existed (so it errored on every
+    // fire) and was removed; stalled_bookings_audit.gs then landed 23 Aug
+    // but was left unscheduled pending "until draft quality is proven out."
+    // That caveat was inherited from the other audits and never actually
+    // applied here -- runStalledBookingsAudit creates NO drafts (verified:
+    // no createDraft, no createThreadedDraft_, no LLM call anywhere in that
+    // file). It reads the AI Drafts Log, checks each thread's real last
+    // message age, writes the "Stalled Bookings Audit" tab, and emails only
+    // when it finds something NEW. There was no draft quality to prove.
+    'runStalledBookingsAudit'
   ];
 
   // Delete any existing triggers for these functions first, so re-running
@@ -192,7 +196,46 @@ function setupAllTriggers() {
     .create();
   Logger.log('Created: reconcileMissingDrafts, daily around 5 AM ' + TZ + '.');
 
+  // ADDED (24 Aug 2026, per direct request): this audit answers "did a lead
+  // get as far as a penciled call time or a teammate handoff and then just
+  // go quiet with nobody chasing it," which is only actionable on a day
+  // someone is actually working -- so Monday morning rather than joining the
+  // weekend audit block. It emails ONLY on new findings (dedup by Thread ID
+  // against its own tab), so a quiet week produces no email at all rather
+  // than a weekly "all clear" nobody reads.
+  ScriptApp.newTrigger('runStalledBookingsAudit')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay.MONDAY)
+    .atHour(8)
+    .create();
+  Logger.log('Created: runStalledBookingsAudit, weekly Monday around 8 AM ' + TZ + '.');
+
   Logger.log('All ' + functionsToSchedule.length + ' triggers created, all clock times in ' + TZ + '. Check the Triggers page (clock icon) to confirm.');
+
+  // ADDED (24 Aug 2026, real gap found in review): runTriggerHealthCheck()
+  // in heartbeat_and_trigger_healthcheck.gs compares the LIVE triggers
+  // against its own hardcoded EXPECTED_TRIGGER_FUNCTIONS list. Those two
+  // lists had silently drifted apart -- this file scheduled nine functions,
+  // that list named seven -- so a vanished summarizeFollowUpLearning or
+  // reconcileMissingDrafts trigger would never have been reported. Keeping
+  // two hand-maintained lists in sync by memory is exactly what failed, so
+  // check it in code instead: this runs at the end of every setupAllTriggers()
+  // and shouts if they ever diverge again. Logged + alerted rather than
+  // thrown, since the triggers themselves are already correctly created by
+  // this point and aborting here would help nobody.
+  const notWatched = functionsToSchedule.filter(fn => EXPECTED_TRIGGER_FUNCTIONS.indexOf(fn) === -1);
+  const watchedButNotScheduled = EXPECTED_TRIGGER_FUNCTIONS.filter(fn => functionsToSchedule.indexOf(fn) === -1);
+  if (notWatched.length > 0 || watchedButNotScheduled.length > 0) {
+    const msg =
+      'setupAllTriggers() and EXPECTED_TRIGGER_FUNCTIONS (heartbeat_and_trigger_healthcheck.gs) have drifted apart. ' +
+      'Scheduled but NOT health-checked (these can vanish unnoticed): ' + (notWatched.join(', ') || 'none') + '. ' +
+      'Health-checked but NOT scheduled (these will alarm as missing every day): ' + (watchedButNotScheduled.join(', ') || 'none') + '. ' +
+      'Fix by editing whichever of the two lists is wrong -- they must name the same functions.';
+    Logger.log('TRIGGER LIST DRIFT -- ' + msg);
+    sendOpsAlert('Trigger list drift between setupAllTriggers and the health check', msg);
+  } else {
+    Logger.log('Trigger list consistency check OK -- setupAllTriggers() and EXPECTED_TRIGGER_FUNCTIONS name the same ' + functionsToSchedule.length + ' functions.');
+  }
 }
 
 // ---------- TRIGGER CLEANUP (17 Aug 2026, real incident) ----------

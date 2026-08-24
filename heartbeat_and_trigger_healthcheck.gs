@@ -35,17 +35,39 @@ const HEARTBEAT_STALE_HOURS = 3;
 const BUSINESS_HOURS_START_ET = 8;   // 8 AM Eastern
 const BUSINESS_HOURS_END_ET = 19;    // 7 PM Eastern
 
+// FIX (24 Aug 2026, real gap found in review): this list is the ONLY thing
+// standing between "a trigger silently disappeared" and nobody noticing, so
+// it has to match setupAllTriggers() exactly. It didn't -- setupAllTriggers()
+// creates NINE triggers, this listed seven. summarizeFollowUpLearning and
+// reconcileMissingDrafts were both missing, meaning either one could vanish
+// and runTriggerHealthCheck() would still report "all expected triggers
+// present" every single day. That is the exact failure mode this function
+// exists to catch, so the check was quietly blind in two of nine places.
+//
+// IF YOU ADD A TRIGGER TO setupAllTriggers(), ADD IT HERE TOO. There is a
+// consistency check at the bottom of setupAllTriggers() that fails loudly if
+// these two lists ever drift apart again, precisely because keeping them in
+// sync by memory is what broke it the first time.
 const EXPECTED_TRIGGER_FUNCTIONS = [
   'runReplyDrafter',
   'runLearningLoop',
   'generateSopSuggestions',
   'runMissedLeadsAudit',
   'runLeadFollowUpCycle',
+  'summarizeFollowUpLearning',
   'runDailyReport',
-  'runWeekendDeepMissedLeadsAudit'
-  // NOTE: runStalledBookingsAudit was removed -- it is not defined anywhere in the
-  // project, so it can never have a valid trigger. Listing it here made the health
-  // check report a false "missing trigger" alarm every single day.
+  'runWeekendDeepMissedLeadsAudit',
+  'reconcileMissingDrafts',
+  // ADDED (24 Aug 2026, per direct request): runStalledBookingsAudit is now
+  // wired to a real weekly trigger in setupAllTriggers(). The previous note
+  // here claimed it "is not defined anywhere in the project" -- that stopped
+  // being true on 23 Aug 2026 when stalled_bookings_audit.gs landed. It was
+  // held back from a trigger on the grounds of "prove draft quality first,"
+  // but that caveat never actually applied: the audit creates no drafts at
+  // all (verified -- no createDraft/createThreadedDraft_/LLM call anywhere in
+  // that file). It reads the AI Drafts Log, checks thread recency, writes a
+  // sheet tab, and emails ONLY when it finds something new.
+  'runStalledBookingsAudit'
 ];
 
 function setupHeartbeatTriggers() {

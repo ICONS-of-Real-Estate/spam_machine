@@ -46,6 +46,21 @@ const STALLED_DAYS_THRESHOLD = 7;
 function runStalledBookingsAudit(daysThresholdOverride) {
   if (!assertRunningAsJoana('runStalledBookingsAudit')) return;
 
+  // ADDED (24 Aug 2026, alongside wiring this to a real trigger): this was
+  // the last Gmail-touching entry point in the project without the quota
+  // circuit breaker. That was survivable while it only ever ran manually --
+  // a human running it by hand sees it fail and stops. Now that it fires
+  // unattended every Monday it needs the same guard as everything else: it
+  // loops GmailApp.getThreadById() + getMessages() over every penciled/
+  // handed-off row in the AI Drafts Log, which is exactly the call pattern
+  // that exhausted the Gmail quota in the original 17 Aug incident. Without
+  // this it would grind through the whole list burning quota that
+  // runReplyDrafter needs, on a morning when the breaker is already tripped.
+  if (isGmailQuotaExhausted()) {
+    Logger.log('Skipping runStalledBookingsAudit -- Gmail quota already known exhausted today. Will run again on next week\'s trigger, or run it manually once the quota resets.');
+    return;
+  }
+
   const threshold = daysThresholdOverride || STALLED_DAYS_THRESHOLD;
 
   if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') {
