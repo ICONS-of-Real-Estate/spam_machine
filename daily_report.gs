@@ -113,75 +113,6 @@ function runDailyReport() {
     );
   }
 
-  // ADDED (24 Aug 2026, per direct request -- "we are meant to be split
-  // testing Anthropic and Kimi to see quality and price, make sure that is
-  // measured"). Both halves were being recorded but neither was being
-  // REPORTED, so answering "which one is winning" meant opening two tabs and
-  // doing arithmetic by hand -- which is why a 7x cost difference ran for
-  // nine hours unnoticed. This puts both numbers in the email that already
-  // lands every morning.
-  //
-  // PRICE comes from the LLM Cost Log tab, and deliberately counts the
-  // 'billed_no_output' rows too -- a provider that charges for a call that
-  // came back unusable is really costing that money, and excluding those is
-  // exactly what made the sheet disagree with the billing dashboard.
-  // QUALITY comes from the Learning Log: how often a human changed the draft
-  // before sending, and how much of it survived (see draftSimilarityPercent
-  // in learning_loop.gs). Neither number means anything until a provider has
-  // a few dozen rows, so sample sizes are printed alongside rather than
-  // hidden behind a percentage.
-  function buildSplitTestSection(sinceDate, label) {
-    const costTab = ss.getSheetByName('LLM Cost Log');
-    if (!costTab) return label + ':\n  (no "LLM Cost Log" tab yet -- nothing recorded)';
-
-    const costRows = costTab.getDataRange().getValues().slice(1)
-      .filter(r => r[0] instanceof Date && r[0] >= sinceDate);
-
-    const learningRows = learningData.filter(r => r[0] instanceof Date && r[0] >= sinceDate);
-    const draftRows = rowsSince(draftsData, sinceDate);
-
-    const lines = ['kimi', 'anthropic'].map(provider => {
-      const calls = costRows.filter(r => String(r[2] || '').toLowerCase() === provider);
-      const spend = calls.reduce((sum, r) => sum + (Number(r[8]) || 0), 0);
-      // Outcome column (J, index 9) is blank on rows written before it
-      // existed -- treat those as 'ok', which is what they were.
-      const outcomeOf = r => String(r[9] || 'ok').toLowerCase();
-      const wasted = calls.filter(r => outcomeOf(r) === 'billed_no_output');
-      const wastedSpend = wasted.reduce((sum, r) => sum + (Number(r[8]) || 0), 0);
-      const failed = calls.filter(r => outcomeOf(r) === 'failed');
-
-      // Drafts attributed to this provider (AI Drafts Log column J, index 9).
-      const drafts = draftRows.filter(r => String(r[9] || '').toLowerCase() === provider);
-      const costPerDraft = drafts.length > 0 ? spend / drafts.length : null;
-
-      // Quality (Learning Log: J = provider index 9, G = was edited index 6,
-      // K = similarity index 10).
-      const judged = learningRows.filter(r => String(r[9] || '').toLowerCase() === provider);
-      const editedCount = judged.filter(r => r[6] === true).length;
-      const similarities = judged.map(r => Number(r[10])).filter(n => !isNaN(n));
-      const avgSimilarity = similarities.length > 0
-        ? Math.round(similarities.reduce((a, b) => a + b, 0) / similarities.length)
-        : null;
-
-      return (
-        '  ' + provider.toUpperCase() + ':\n' +
-        '    Spend: $' + spend.toFixed(4) + ' across ' + calls.length + ' call(s)\n' +
-        '    Wasted (billed but returned nothing usable): $' + wastedSpend.toFixed(4) +
-          ' across ' + wasted.length + ' call(s)\n' +
-        '    Outright failures (no charge, fell back to the other provider): ' + failed.length + '\n' +
-        '    Drafts produced: ' + drafts.length +
-          (costPerDraft !== null ? ' -- $' + costPerDraft.toFixed(4) + ' per draft' : ' -- no cost-per-draft yet') + '\n' +
-        '    Edited before sending: ' + (judged.length > 0
-            ? editedCount + ' of ' + judged.length + ' (' + Math.round((editedCount / judged.length) * 100) + '%)'
-            : 'no reviewed drafts yet') + '\n' +
-        '    Avg of draft surviving into what was sent: ' + (avgSimilarity !== null
-            ? avgSimilarity + '% (n=' + similarities.length + ')'
-            : 'not enough data yet')
-      );
-    });
-
-    return label + ':\n' + lines.join('\n');
-  }
 
   const body =
     'This email was written by Claude.\n\n' +
@@ -201,8 +132,8 @@ function runDailyReport() {
     'Gmail quota usage today (self-tracked, approximate): ' + getGmailQuotaUsageToday_() + ' / ' + GMAIL_CALL_SOFT_CAP + ' soft cap\n\n' +
     'KIMI vs ANTHROPIC SPLIT TEST (price and quality; ' +
       (LLM_COST_TEST_MODE ? 'test ACTIVE -- providers alternate 50/50 by call' : 'test OFF -- Kimi first always') + ')\n' +
-    buildSplitTestSection(todayStart, 'TODAY') + '\n\n' +
-    buildSplitTestSection(sevenDaysAgo, 'LAST 7 DAYS') + '\n\n' +
+    buildSplitTestSection_(ss, draftsData, learningData, rowsSince, todayStart, 'TODAY') + '\n\n' +
+    buildSplitTestSection_(ss, draftsData, learningData, rowsSince, sevenDaysAgo, 'LAST 7 DAYS') + '\n\n' +
     'Reading this: cost-per-draft is the price answer. Edit rate and % surviving\n' +
     'are the quality answer -- lower edit rate and higher % surviving is better.\n' +
     'A cheap provider that gets rewritten every time is not actually cheaper.\n\n' +
@@ -217,4 +148,125 @@ function runDailyReport() {
   });
 
   Logger.log('Daily report sent. Today: ' + draftsToday.length + ' drafted, ' + leadsReceivedToday + ' leads received.');
+}
+
+// ---------- SPLIT-TEST REPORTING (24 Aug 2026) ----------
+//
+// EXTRACTED to a global from inside runDailyReport() so the on-demand
+// checker below can share it. Two copies of this arithmetic drifting apart
+// would be worse than useless -- it would produce two different answers to
+// the one question the split test exists to settle.
+// ADDED (24 Aug 2026, per direct request -- "we are meant to be split
+// testing Anthropic and Kimi to see quality and price, make sure that is
+// measured"). Both halves were being recorded but neither was being
+// REPORTED, so answering "which one is winning" meant opening two tabs and
+// doing arithmetic by hand -- which is why a 7x cost difference ran for
+// nine hours unnoticed. This puts both numbers in the email that already
+// lands every morning.
+//
+// PRICE comes from the LLM Cost Log tab, and deliberately counts the
+// 'billed_no_output' rows too -- a provider that charges for a call that
+// came back unusable is really costing that money, and excluding those is
+// exactly what made the sheet disagree with the billing dashboard.
+// QUALITY comes from the Learning Log: how often a human changed the draft
+// before sending, and how much of it survived (see draftSimilarityPercent
+// in learning_loop.gs). Neither number means anything until a provider has
+// a few dozen rows, so sample sizes are printed alongside rather than
+// hidden behind a percentage.
+function buildSplitTestSection_(ss, draftsData, learningData, rowsSince, sinceDate, label) {
+  const costTab = ss.getSheetByName('LLM Cost Log');
+  if (!costTab) return label + ':\n  (no "LLM Cost Log" tab yet -- nothing recorded)';
+
+  const costRows = costTab.getDataRange().getValues().slice(1)
+    .filter(r => r[0] instanceof Date && r[0] >= sinceDate);
+
+  const learningRows = learningData.filter(r => r[0] instanceof Date && r[0] >= sinceDate);
+  const draftRows = rowsSince(draftsData, sinceDate);
+
+  const lines = ['kimi', 'anthropic'].map(provider => {
+    const calls = costRows.filter(r => String(r[2] || '').toLowerCase() === provider);
+    const spend = calls.reduce((sum, r) => sum + (Number(r[8]) || 0), 0);
+    // Outcome column (J, index 9) is blank on rows written before it
+    // existed -- treat those as 'ok', which is what they were.
+    const outcomeOf = r => String(r[9] || 'ok').toLowerCase();
+    const wasted = calls.filter(r => outcomeOf(r) === 'billed_no_output');
+    const wastedSpend = wasted.reduce((sum, r) => sum + (Number(r[8]) || 0), 0);
+    const failed = calls.filter(r => outcomeOf(r) === 'failed');
+
+    // Drafts attributed to this provider (AI Drafts Log column J, index 9).
+    const drafts = draftRows.filter(r => String(r[9] || '').toLowerCase() === provider);
+    const costPerDraft = drafts.length > 0 ? spend / drafts.length : null;
+
+    // Quality (Learning Log: J = provider index 9, G = was edited index 6,
+    // K = similarity index 10).
+    const judged = learningRows.filter(r => String(r[9] || '').toLowerCase() === provider);
+    const editedCount = judged.filter(r => r[6] === true).length;
+    const similarities = judged.map(r => Number(r[10])).filter(n => !isNaN(n));
+    const avgSimilarity = similarities.length > 0
+      ? Math.round(similarities.reduce((a, b) => a + b, 0) / similarities.length)
+      : null;
+
+    return (
+      '  ' + provider.toUpperCase() + ':\n' +
+      '    Spend: $' + spend.toFixed(4) + ' across ' + calls.length + ' call(s)\n' +
+      '    Wasted (billed but returned nothing usable): $' + wastedSpend.toFixed(4) +
+        ' across ' + wasted.length + ' call(s)\n' +
+      '    Outright failures (no charge, fell back to the other provider): ' + failed.length + '\n' +
+      '    Drafts produced: ' + drafts.length +
+        (costPerDraft !== null ? ' -- $' + costPerDraft.toFixed(4) + ' per draft' : ' -- no cost-per-draft yet') + '\n' +
+      '    Edited before sending: ' + (judged.length > 0
+          ? editedCount + ' of ' + judged.length + ' (' + Math.round((editedCount / judged.length) * 100) + '%)'
+          : 'no reviewed drafts yet') + '\n' +
+      '    Avg of draft surviving into what was sent: ' + (avgSimilarity !== null
+          ? avgSimilarity + '% (n=' + similarities.length + ')'
+          : 'not enough data yet')
+    );
+  });
+
+  return label + ':\n' + lines.join('\n');
+}
+
+// ADDED (24 Aug 2026, per direct request -- "we can see if Kimi did good
+// with $2.42 or still burning money"): the daily report only lands at 7 AM,
+// and the remaining Kimi balance is worth roughly 90 minutes of runtime. A
+// summary that arrives after the money is gone cannot inform a decision
+// about the money. Run this from the editor whenever you want the current
+// numbers; it only reads sheets, sends nothing, and is safe to run as often
+// as you like.
+//
+// WHAT TO LOOK FOR, in priority order:
+//   1. Kimi's "Cache Read Tokens" -- if ~0 while Anthropic's is large for
+//      the same caller, prompt caching is not working on Moonshot's endpoint
+//      and Kimi is re-billing the full SOP at full rate on every call. That
+//      alone can account for the entire observed cost gap, and it is not
+//      something a cheaper per-token rate can win back.
+//   2. "billed_no_output" call count -- calls the provider charged for that
+//      returned nothing usable, then fell back to the other provider. These
+//      were invisible before today.
+//   3. Cost per draft -- the actual price answer, as opposed to the rate card.
+function logSplitTestSummary() {
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const draftsTab = ss.getSheetByName('AI Drafts Log');
+  const learningTab = ss.getSheetByName('Learning Log');
+  if (!draftsTab) {
+    Logger.log('logSplitTestSummary -- no "AI Drafts Log" tab found, nothing to report.');
+    return;
+  }
+
+  const draftsData = draftsTab.getDataRange().getValues().slice(1);
+  const learningData = learningTab ? learningTab.getDataRange().getValues().slice(1) : [];
+  function rowsSince(rows, sinceDate) {
+    return rows.filter(r => r[0] instanceof Date && r[0] >= sinceDate);
+  }
+
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const lastHour = new Date(now.getTime() - 60 * 60 * 1000);
+
+  Logger.log('=== KIMI vs ANTHROPIC -- ' + (LLM_COST_TEST_MODE
+    ? 'test ACTIVE (providers alternate 50/50 by call)'
+    : 'test OFF (Kimi first always)') + ' ===');
+  Logger.log(buildSplitTestSection_(ss, draftsData, learningData, rowsSince, lastHour, 'LAST HOUR'));
+  Logger.log(buildSplitTestSection_(ss, draftsData, learningData, rowsSince, todayStart, 'TODAY'));
+  Logger.log('Quality figures stay empty until runLearningLoop() has compared drafts against what was actually sent. That trigger is WEEKLY (Saturday) -- run runLearningLoop() by hand once Joana has sent a few of these drafts if you want the quality numbers before then.');
 }
