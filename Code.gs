@@ -109,6 +109,20 @@ const CONFIG = {
   // that fact can't change. Labeling it stops both the repeated Gmail API
   // cost of re-fetching it every run AND its repeated appearance in the log.
   LABEL_SUBJECT_MISMATCH: 'AI-Skipped-NotPodcastOutreach',
+
+  // ADDED (24 Aug 2026, per direct request -- Joana): the AI should only
+  // ever draft the LEAD's very first reply to the cold-outreach sequence
+  // (the one Maildoso forwards in). If that lead writes back a SECOND time
+  // -- whether to a sent reply, a still-pending draft, or anything else --
+  // that's a real, ongoing conversation now and should go to a human, not
+  // get auto-drafted again. Checked via hasAlreadySentReplyTo_() (has our
+  // account ever sent this lead anything before), not thread state, since
+  // thread-ID fragmentation (mismatched Subject/References headers between
+  // what we send and what the lead's client threads their reply under --
+  // the same class of issue documented throughout this project) means a
+  // second reply doesn't reliably land back in the same Gmail thread that
+  // carries LABEL_AI_DRAFTED, so a thread-level check alone would miss it.
+  LABEL_ALREADY_REPLIED_ONCE: 'AI-Skipped-AlreadyRepliedOnce',
   LABEL_PRIORITY: '0. PRIORITY - Reply First', // ADDED 13 Aug 2026 -- label already exists in Gmail
 
   // Only ever act on threads CC'd to the network group -- this is the
@@ -180,13 +194,20 @@ const CONFIG = {
   // pattern used throughout this project.
   // TEMPORARY (20 Aug 2026, real incident): dropped to 0 to halt new draft
   // creation entirely while CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER's counting
-  // RESTORED to 10 (20 Aug 2026) -- countPendingAiDrafts_() is now the real
-  // Gmail REST API count, verified correct twice against the actual Drafts
-  // folder (63 reported vs 63 counted by hand). Set to 10 rather than the
-  // prior 20 per direct request, since the drafter runs on a 5-minute timer
-  // -- 10 per run is plenty of throughput without piling up faster than it
-  // can be reviewed.
-  MAX_DRAFTS_PER_RUN: 10,
+  // was being verified, then RESTORED to 10 (20 Aug 2026) once
+  // countPendingAiDrafts_() was confirmed to be the real Gmail REST API
+  // count, verified correct twice against the actual Drafts folder (63
+  // reported vs 63 counted by hand).
+  //
+  // LOWERED to 5 (24 Aug 2026, real incident): 20-per-run combined with the
+  // 5-minute auto-trigger had produced 43 drafts in one ~30-minute burst
+  // before the folder-wide cap below was actually live on the deployed
+  // script -- per-run and folder caps are independent safety nets, and even
+  // 10 is too high a per-run ceiling on its own once a run fires every 5
+  // minutes. Matches FOLLOWUP_DRAFT_CAP in lead_followup_sequences.gs, same
+  // reasoning: small steady batches every 5 minutes reach the folder cap
+  // gradually instead of in one shot.
+  MAX_DRAFTS_PER_RUN: 5,
 
   // ADDED (19 Aug 2026, per direct request): now that runReplyDrafter is
   // going back on a 5-minute auto-trigger (see setup_all_triggers.gs),
@@ -277,7 +298,7 @@ function setup() {
     }
   });
 
-  [CONFIG.LABEL_AI_DRAFTED, CONFIG.LABEL_NEEDS_ROUTING, CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM, CONFIG.LABEL_SUBJECT_MISMATCH].forEach(name => {
+  [CONFIG.LABEL_AI_DRAFTED, CONFIG.LABEL_NEEDS_ROUTING, CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM, CONFIG.LABEL_SUBJECT_MISMATCH, CONFIG.LABEL_ALREADY_REPLIED_ONCE].forEach(name => {
     if (!GmailApp.getUserLabelByName(name)) {
       GmailApp.createLabel(name);
       Logger.log('Created internal tracking label: ' + name);
@@ -517,6 +538,7 @@ function runReplyDrafterInner() {
   const labelNeedsRouting = GmailApp.getUserLabelByName(CONFIG.LABEL_NEEDS_ROUTING);
   const labelAlreadyAnsweredByTeam = getOrWarnLabel(CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM);
   const labelSubjectMismatch = getOrWarnLabel(CONFIG.LABEL_SUBJECT_MISMATCH);
+  const labelAlreadyRepliedOnce = getOrWarnLabel(CONFIG.LABEL_ALREADY_REPLIED_ONCE);
 
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const skipCache = loadSkipCache(ss);
@@ -534,7 +556,7 @@ function runReplyDrafterInner() {
   // gap but only EMAILS an alert, it never drafts. 180d matches the
   // furthest missed-leads lookback (runWeekendDeepMissedLeadsAudit), so
   // nothing genuinely reachable by either system falls in a gap between them.
-  const searchQuery = '(' + addressClauses + ') newer_than:180d -label:"' + CONFIG.LABEL_AI_DRAFTED + '" -label:"' + CONFIG.LABEL_STOP + '" -label:"' + CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM + '" -label:"' + CONFIG.LABEL_SUBJECT_MISMATCH + '"';
+  const searchQuery = '(' + addressClauses + ') newer_than:180d -label:"' + CONFIG.LABEL_AI_DRAFTED + '" -label:"' + CONFIG.LABEL_STOP + '" -label:"' + CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM + '" -label:"' + CONFIG.LABEL_SUBJECT_MISMATCH + '" -label:"' + CONFIG.LABEL_ALREADY_REPLIED_ONCE + '"';
 
   Logger.log('DIAGNOSTIC -- search query: ' + searchQuery);
 
@@ -720,6 +742,21 @@ function runReplyDrafterInner() {
       continue;
     }
 
+    // ADDED (24 Aug 2026, per direct request -- Joana): only ever draft a
+    // lead's FIRST reply to the cold-outreach sequence. If we've ever sent
+    // this lead anything before -- an earlier AI-drafted reply, or a fully
+    // manual one -- this is now an ongoing conversation and goes to a human,
+    // not back through the AI. Checked against the real Sent folder by lead
+    // email address (not thread/label state) specifically because a second
+    // reply doesn't reliably land back in the same Gmail thread that carries
+    // LABEL_AI_DRAFTED -- see CONFIG.LABEL_ALREADY_REPLIED_ONCE's comment.
+    if (hasAlreadySentReplyTo_(leadEmail)) {
+      if (labelAlreadyRepliedOnce) thread.addLabel(labelAlreadyRepliedOnce);
+      delete skipCache[threadId]; // now permanently excluded via label -- any earlier cache entry is moot
+      Logger.log('DIAGNOSTIC -- skipped (already sent a reply to ' + leadEmail + ' before -- this is a follow-up reply, per policy leaving it for the team), labeled so it stops reappearing: ' + subject);
+      continue;
+    }
+
     const replyBody = extractProspectFreshReplyText(lastMsg);
 
     const alreadyLabeledStop = threadHasLabel(thread, CONFIG.LABEL_STOP);
@@ -832,7 +869,7 @@ function runReplyDrafterInner() {
       }
     }
 
-    logDraftToSheet(thread.getId(), subject, leadEmail, result.category, result.needsTeammateRouting, result.draftBody, draftLink, sopMode);
+    logDraftToSheet(thread.getId(), subject, leadEmail, result.category, result.needsTeammateRouting, result.draftBody, draftLink, sopMode, result.llmProvider, result.llmCostUsd);
 
       processed++;
     }
@@ -845,13 +882,21 @@ function runReplyDrafterInner() {
   Logger.log('Run complete. Threads processed: ' + processed + ', drafts created: ' + draftsCreated);
 }
 
-function logDraftToSheet(threadId, subject, prospectEmail, category, needsRouting, draftText, draftLink, sopMode) {
+function logDraftToSheet(threadId, subject, prospectEmail, category, needsRouting, draftText, draftLink, sopMode, llmProvider, llmCostUsd) {
   if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') return;
   try {
     const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
     const tab = ss.getSheetByName('AI Drafts Log');
     if (!tab) return;
-    tab.appendRow([new Date(), threadId, subject, prospectEmail, category, !!needsRouting, draftText, draftLink || '', sopMode || 'joana']);
+    // ADDED (24 Aug 2026, per direct request -- "cost per draft"): these two
+    // columns land AFTER the existing ones on purpose -- the tab already has
+    // 275+ historical rows and a fixed header row; appending past the
+    // existing header just means older rows show blank in these two columns
+    // (there's no real cost data for them anyway) rather than risking a
+    // rewrite of a header humans may have already customized. Add "LLM
+    // Provider" and "Estimated Cost USD" as header labels for columns J/K
+    // once, by hand, in the Sheet -- this code doesn't touch row 1.
+    tab.appendRow([new Date(), threadId, subject, prospectEmail, category, !!needsRouting, draftText, draftLink || '', sopMode || 'joana', llmProvider || '', llmCostUsd != null ? llmCostUsd : '']);
   } catch (e) {
     Logger.log('Failed to log draft to sheet: ' + e);
   }
@@ -1301,6 +1346,15 @@ function draftAlreadyExistsFor(leadEmail) {
   return false;
 }
 
+// ADDED (24 Aug 2026, per direct request -- Joana): ground truth for
+// "have we ever sent this lead a reply before," checked directly against
+// the Sent folder rather than any label or sheet-row state. GmailApp.search
+// returning at least one match is enough -- this only needs a yes/no, not
+// the actual message.
+function hasAlreadySentReplyTo_(leadEmail) {
+  return GmailApp.search('in:sent to:"' + leadEmail + '"', 0, 1).length > 0;
+}
+
 function buildThreadContext(messages) {
   const recent = messages.slice(-6);
   return recent
@@ -1435,6 +1489,16 @@ IMPORTANT on no_decline (REAL INCIDENT, 17 Aug 2026): no_decline means a genuine
     return null;
   }
 
+  // ADDED (24 Aug 2026, per direct request): attach real cost-per-draft
+  // data using this specific call's own usage, not an average -- see
+  // providerFromModel_()/estimateCallCostUsd_() in
+  // quota_guard_and_alerting.gs. This is the SAME number already written to
+  // the "LLM Cost Log" tab for this call; carrying it here too means it
+  // lands directly on the AI Drafts Log row (via logDraftToSheet below)
+  // instead of requiring a join between two tabs to answer "cost per draft."
+  const llmProvider = providerFromModel_(data.model);
+  const llmCostUsd = estimateCallCostUsd_(llmProvider, data.usage);
+
   return {
     category: parsed.category,
     needsTeammateRouting: !!parsed.needs_teammate_routing,
@@ -1448,6 +1512,8 @@ IMPORTANT on no_decline (REAL INCIDENT, 17 Aug 2026): no_decline means a genuine
     reasoning: parsed.reasoning || '(no reasoning given)',
     draftBody: parsed.draft_body,
     candidateVariationIndex: candidateVariation.index,
+    llmProvider: llmProvider,
+    llmCostUsd: llmCostUsd,
   };
 }
 

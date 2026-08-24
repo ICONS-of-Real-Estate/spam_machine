@@ -172,42 +172,162 @@ function clearGmailQuotaExhaustedFlag() {
 // provider -- Moonshot's /anthropic endpoint returns Anthropic-shaped
 // responses, so callers' existing data.content.find(...) parsing needs no
 // changes). Throws on total failure -- let it propagate.
+// ---------- COST TEST (24 Aug 2026, per direct request) ----------
+//
+// Kris put $20 on both Kimi and Anthropic specifically to find out which is
+// actually cheaper per real draft, not just per-MTok list price -- token
+// counts per call differ by provider (different tokenizers, and Kimi
+// auto-caches while Anthropic needs the cache_control block added today).
+// Kimi has been the sole PRIMARY since 17 Aug, so a straight A/B needs this
+// flag: while true, callLlmWithFallback() alternates which provider goes
+// FIRST on every call (a persistent Script Properties counter, not a
+// per-thread hash, so the split stays an exact 50/50 by call count) --
+// whichever isn't first is still the fallback if the first one fails. Every
+// successful call, from either provider, gets its real token usage and
+// computed cost logged to the "LLM Cost Log" tab regardless of this flag,
+// so turning it off later doesn't lose visibility into ongoing spend.
+//
+// TO END THE TEST: once $20 is close to spent on one/both sides (check the
+// LLM Cost Log tab, or each provider's own billing page), set this back to
+// false -- callLlmWithFallback() reverts to the exact pre-test behavior,
+// Kimi always first.
+const LLM_COST_TEST_MODE = true;
+
+const LLM_TEST_COUNTER_PROPERTY_KEY = 'LLM_COST_TEST_CALL_COUNTER';
+
+function nextTestPrimaryProvider_() {
+  const props = PropertiesService.getScriptProperties();
+  const count = Number(props.getProperty(LLM_TEST_COUNTER_PROPERTY_KEY) || '0') + 1;
+  props.setProperty(LLM_TEST_COUNTER_PROPERTY_KEY, String(count));
+  return (count % 2 === 0) ? 'kimi' : 'anthropic';
+}
+
+// Anthropic pricing confirmed via the claude-api skill (cached 2026-06-24,
+// checked live 24 Aug 2026): Sonnet 5 is $2.00/$10.00 per MTok in/out under
+// the introductory rate through 2026-08-31, reverting to $3.00/$15.00 after.
+// Cache economics are fixed regardless of the intro rate: reads cost 0.1x
+// the input price, 5-minute-TTL writes cost 1.25x (see shared/prompt-caching.md).
+// Kimi (Moonshot) pricing confirmed via web search 24 Aug 2026 (developer.puter.com,
+// openrouter.ai): kimi-k2.6 is $0.95/$4.00 per MTok in/out, with automatic
+// context caching billing cached input at $0.16/MTok -- Moonshot caches
+// automatically server-side, no cache_control needed on their endpoint,
+// which is why "Cache check" log lines have shown nonzero reads even though
+// this code never requested caching from Kimi specifically.
+// UPDATE THIS after 2026-08-31 (Sonnet reverts to $3/$15) or if either
+// provider changes pricing -- these are USD per million tokens.
+const LLM_PRICING_PER_MTOK = {
+  kimi: { input: 0.95, output: 4.00, cacheRead: 0.16 },
+  anthropic: { input: 2.00, output: 10.00, cacheRead: 0.20, cacheWrite: 2.50 }, // cacheRead = 0.1x, cacheWrite = 1.25x of the $2.00 intro input rate
+};
+
+// ADDED (24 Aug 2026, per direct request -- "cost per draft"): callers that
+// want per-draft cost attribution (not just the aggregate LLM Cost Log)
+// need to know which provider actually served a given classifyAndDraft()
+// call. callLlmWithFallback()'s return value is unchanged (still the raw
+// API response body, so every existing call site keeps working with no
+// changes) -- but that raw body's own `model` field already says which
+// model responded, so a caller can derive the provider from `data.model`
+// directly instead of needing a new return shape.
+function providerFromModel_(model) {
+  return model === CONFIG.MODEL ? 'kimi' : 'anthropic';
+}
+
+function estimateCallCostUsd_(provider, usage) {
+  const p = LLM_PRICING_PER_MTOK[provider];
+  if (!p || !usage) return null;
+  const inputTokens = usage.input_tokens || 0;
+  const outputTokens = usage.output_tokens || 0;
+  const cacheReadTokens = usage.cache_read_input_tokens || 0;
+  const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
+  const cost =
+    (inputTokens / 1e6) * p.input +
+    (outputTokens / 1e6) * p.output +
+    (cacheReadTokens / 1e6) * p.cacheRead +
+    (cacheCreationTokens / 1e6) * (p.cacheWrite || 0);
+  return Math.round(cost * 1e6) / 1e6; // round to 6 decimals -- these are fractions of a cent per call
+}
+
+function ensureLlmCostLogTabExists_(ss) {
+  let tab = ss.getSheetByName('LLM Cost Log');
+  if (!tab) {
+    tab = ss.insertSheet('LLM Cost Log');
+    tab.appendRow(['Timestamp', 'Caller', 'Provider', 'Model', 'Input Tokens', 'Output Tokens', 'Cache Read Tokens', 'Cache Creation Tokens', 'Estimated Cost USD']);
+    Logger.log('ensureLlmCostLogTabExists_ -- created tab: LLM Cost Log');
+  }
+  return tab;
+}
+
+function logLlmCallCost_(callerLabel, provider, model, usage) {
+  if (!usage) return;
+  const costUsd = estimateCallCostUsd_(provider, usage);
+  try {
+    const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+    const tab = ensureLlmCostLogTabExists_(ss);
+    tab.appendRow([
+      new Date(), callerLabel, provider, model,
+      usage.input_tokens || 0, usage.output_tokens || 0,
+      usage.cache_read_input_tokens || 0, usage.cache_creation_input_tokens || 0,
+      costUsd,
+    ]);
+  } catch (e) {
+    Logger.log('logLlmCallCost_ -- failed to log (non-fatal, continuing): ' + e);
+  }
+}
+
 function callLlmWithFallback(systemPrompt, userPrompt, maxTokens, callerLabel) {
   const props = PropertiesService.getScriptProperties();
   const kimiKey = props.getProperty('KIMI_API_KEY');
   const anthropicKey = props.getProperty('ANTHROPIC_API_KEY');
 
-  if (kimiKey) {
-    const kimiResult = attemptLlmCall_(
-      'https://api.moonshot.ai/anthropic/v1/messages',
-      { 'Authorization': 'Bearer ' + kimiKey },
-      CONFIG.MODEL,
-      systemPrompt, userPrompt, maxTokens,
-      // kimi-k2.6 defaults to "Thinking" mode -- visible chain-of-thought that
-      // counts against max_tokens. Confirmed in production (17 Aug 2026): every
-      // call came back stop_reason: max_tokens, content types: ["thinking"],
-      // with NO text block at all -- the model spent the entire budget
-      // reasoning and never got to write the actual answer. This task only
-      // needs the direct JSON output, so thinking mode is switched off.
-      { thinking: { type: 'disabled' } }
-    );
-    if (kimiResult.ok) return kimiResult.data;
-    Logger.log(callerLabel + ' -- Kimi call failed, falling back to Anthropic: ' + kimiResult.error);
-  } else {
-    Logger.log(callerLabel + ' -- KIMI_API_KEY not set in Script Properties, going straight to Anthropic fallback.');
-  }
+  const providers = {
+    kimi: kimiKey ? {
+      name: 'kimi',
+      model: CONFIG.MODEL,
+      call: () => attemptLlmCall_(
+        'https://api.moonshot.ai/anthropic/v1/messages',
+        { 'Authorization': 'Bearer ' + kimiKey },
+        CONFIG.MODEL,
+        systemPrompt, userPrompt, maxTokens,
+        // kimi-k2.6 defaults to "Thinking" mode -- visible chain-of-thought that
+        // counts against max_tokens. Confirmed in production (17 Aug 2026): every
+        // call came back stop_reason: max_tokens, content types: ["thinking"],
+        // with NO text block at all -- the model spent the entire budget
+        // reasoning and never got to write the actual answer. This task only
+        // needs the direct JSON output, so thinking mode is switched off.
+        { thinking: { type: 'disabled' } }
+      ),
+    } : null,
+    anthropic: anthropicKey ? {
+      name: 'anthropic',
+      model: CONFIG.ANTHROPIC_FALLBACK_MODEL,
+      call: () => attemptLlmCall_(
+        'https://api.anthropic.com/v1/messages',
+        { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
+        CONFIG.ANTHROPIC_FALLBACK_MODEL,
+        systemPrompt, userPrompt, maxTokens
+      ),
+    } : null,
+  };
 
-  if (anthropicKey) {
-    const anthropicResult = attemptLlmCall_(
-      'https://api.anthropic.com/v1/messages',
-      { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
-      CONFIG.ANTHROPIC_FALLBACK_MODEL,
-      systemPrompt, userPrompt, maxTokens
-    );
-    if (anthropicResult.ok) return anthropicResult.data;
-    Logger.log(callerLabel + ' -- Anthropic fallback ALSO failed: ' + anthropicResult.error);
-  } else {
-    Logger.log(callerLabel + ' -- ANTHROPIC_API_KEY not set in Script Properties, no fallback available.');
+  // Order: normally Kimi first (unchanged pre-test behavior). During the
+  // cost test, alternate which one goes first so both get real, comparable
+  // first-attempt volume rather than Anthropic only ever seeing Kimi's
+  // failures.
+  const firstName = LLM_COST_TEST_MODE ? nextTestPrimaryProvider_() : 'kimi';
+  const order = firstName === 'kimi' ? ['kimi', 'anthropic'] : ['anthropic', 'kimi'];
+
+  for (const name of order) {
+    const provider = providers[name];
+    if (!provider) {
+      Logger.log(callerLabel + ' -- ' + (name === 'kimi' ? 'KIMI_API_KEY' : 'ANTHROPIC_API_KEY') + ' not set in Script Properties, skipping ' + name + '.');
+      continue;
+    }
+    const result = provider.call();
+    if (result.ok) {
+      logLlmCallCost_(callerLabel, provider.name, provider.model, result.data.usage);
+      return result.data;
+    }
+    Logger.log(callerLabel + ' -- ' + name + ' call failed' + (name === order[0] ? ', trying ' + order[1] + ': ' : ' (both attempted): ') + result.error);
   }
 
   sendOpsAlert(
@@ -219,9 +339,14 @@ function callLlmWithFallback(systemPrompt, userPrompt, maxTokens, callerLabel) {
 
 function attemptLlmCall_(url, headers, model, systemPrompt, userPrompt, maxTokens, extraPayloadFields) {
   try {
-    // PROMPT CACHING (22 Aug 2026, per direct request -- see the false-comment
-    // fix earlier this same day for how this gap was found): systemPrompt is
-    // Code.gs's full SOP text plus one of exactly two stable append blocks
+    // PROMPT CACHING (22 Aug 2026, per direct request; re-verified working
+    // 24 Aug 2026 after an earlier version of this comment falsely claimed
+    // caching was already active while system was still being sent as a
+    // plain string -- the Anthropic Console's Caching page showed zero
+    // activity, and daily spend had been climbing ($0.47 -> $43.74 over a
+    // week) as the SOP text grew (27k -> 35k chars) and got resent in full
+    // on every single classification call). systemPrompt is Code.gs's full
+    // SOP text plus one of exactly two stable append blocks
     // (buildSystemPromptForMode's "joana" or "hormozi" variant) -- large
     // (thousands of words, well above every model's cacheable minimum) and
     // byte-identical across every classifyAndDraft call in a given mode until
