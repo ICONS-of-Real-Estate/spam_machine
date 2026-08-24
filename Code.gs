@@ -221,14 +221,21 @@ const CONFIG = {
   // run stops the moment either limit is hit, whichever comes first.
   MAX_PENDING_DRAFTS_IN_FOLDER: 25,
 
-  // TEMPORARY (18 Aug 2026, per direct request): skip no_decline and
-  // no_data_error replies for now so the cap of 10 is spent entirely on
-  // positive-category drafts, since the hub-guest-invite close on declines
-  // is already confirmed working well and doesn't need more review right
-  // now. These threads aren't excluded permanently -- see the skip-cache
-  // check in runReplyDrafterInner. Set back to false to resume drafting
-  // declines.
-  DRAFT_ONLY_POSITIVE_FOR_NOW: true,
+  // FLIPPED BACK (24 Aug 2026, per direct request -- "handle declines
+  // too"): was TEMPORARY since 18 Aug so the review cap could be spent
+  // entirely on positive-category drafts while the hub-guest-invite close
+  // on declines was still unproven. That close has been live and confirmed
+  // working for weeks now, and the actual cost concern this flag protected
+  // against -- paying the full SOP-sized call to classify a decline just to
+  // throw the draft away -- is now handled earlier and more cheaply by
+  // looksLikeDeclineCheaply_() (added the same day, see the call site in
+  // runReplyDrafterInner): an unambiguous decline is now caught by a short,
+  // SOP-free pre-check before the expensive call ever runs, so drafting
+  // declines again doesn't reopen that waste. This flag now only controls
+  // whether a decline THAT PASSES the cheap pre-check (i.e. the model
+  // itself is not confident it's a clear decline) still gets a real draft
+  // -- which is exactly the ambiguous case most worth a human seeing.
+  DRAFT_ONLY_POSITIVE_FOR_NOW: false,
 
   // SWITCHED (17 Aug 2026): Kimi is now the PRIMARY model (via Moonshot's
   // Anthropic-compatible endpoint), Anthropic is the automatic fallback --
@@ -908,9 +915,15 @@ function runReplyDrafterInner() {
     // whenever there is any doubt at all; anything but a confident "decline"
     // falls through to the full path unchanged.
     //
-    // Only runs while DRAFT_ONLY_POSITIVE_FOR_NOW is on. Flip that back to
-    // false and this gate switches itself off with it -- there is no waste to
-    // prevent once declines are being drafted again.
+    // Only runs while DRAFT_ONLY_POSITIVE_FOR_NOW is on -- and as of 24 Aug
+    // 2026 it is off (see CONFIG), so this whole block is currently a no-op.
+    // Left in place rather than deleted: it's a real, tested cost-saver for
+    // exactly the situation the flag describes (declines are being binned,
+    // so don't pay full price to classify one), and turning that situation
+    // back on is one config flip away. Once DRAFT_ONLY_POSITIVE_FOR_NOW is
+    // off, there is nothing being binned, so there is nothing to save by
+    // skipping the full call -- every category, decline included, now gets
+    // a real classification and a real draft.
     if (CONFIG.DRAFT_ONLY_POSITIVE_FOR_NOW) {
       const cheapVerdict = looksLikeDeclineCheaply_(replyBody, subject);
       if (cheapVerdict === 'decline') {
@@ -937,13 +950,13 @@ function runReplyDrafterInner() {
       continue;
     }
 
-    // TEMPORARY (18 Aug 2026, per direct request): deprioritizing no_decline
-    // and no_data_error today to focus review capacity on positive replies
-    // -- the hub-guest-invite close on declines is already confirmed working
-    // well. This is a state-dependent skip (cached, not labeled), so these
-    // threads come back on their own once the cache TTL expires -- nothing
-    // is permanently excluded. Flip CONFIG.DRAFT_ONLY_POSITIVE_FOR_NOW back
-    // to false whenever declines should be drafted again.
+    // OFF as of 24 Aug 2026 (see CONFIG.DRAFT_ONLY_POSITIVE_FOR_NOW -- per
+    // direct request, "handle declines too"). Was TEMPORARY since 18 Aug to
+    // focus review capacity on positive replies while the hub-guest-invite
+    // close on declines was unproven; that close has been live and working
+    // for weeks. This guard, and the cheap pre-check gate above it, both key
+    // off the same flag and both currently no-op -- flip it back to true to
+    // restore the old deprioritize-declines behavior in one place.
     if (CONFIG.DRAFT_ONLY_POSITIVE_FOR_NOW && (result.category === 'no_decline' || result.category === 'no_data_error')) {
       skipCache[threadId] = { reason: 'deprioritized (' + result.category + ') -- focusing on positive replies for now', lastCheckedAt: new Date() };
       Logger.log('DIAGNOSTIC -- skipped (deprioritized ' + result.category + ' per today\'s request), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
