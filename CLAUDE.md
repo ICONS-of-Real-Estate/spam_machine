@@ -15,7 +15,7 @@ Google Apps Script automation that drafts podcast-outreach replies with Claude i
 ## Environment
 
 - Google Apps Script (V8), timezone **Europe/Paris**. No Node/npm/build — edit `.gs` directly.
-- Anthropic Messages API via `UrlFetchApp`; model is `CONFIG.MODEL`; key is `ANTHROPIC_API_KEY` in Script Properties.
+- LLM calls all go through `callLlmWithFallback()` (`quota_guard_and_alerting.gs`) via `UrlFetchApp`. **Kimi/Moonshot is primary** (`CONFIG.MODEL`, key `KIMI_API_KEY`); **Anthropic is the fallback** (`CONFIG.ANTHROPIC_FALLBACK_MODEL`, key `ANTHROPIC_API_KEY`). Both keys required. An A/B test comparing them on price and quality is currently active — if you touch that call path, keep every attempt logged to the "LLM Cost Log" tab, including billed-but-unusable ones.
 - Runs as `joana@iconsofrealestate.com`.
 - Git author identity is configured **repo-local** (`Kris <kris@iconsofrealestate.com>`) — use it as-is.
 - **Do NOT push to origin** unless explicitly asked — commit locally and leave pushing to the user.

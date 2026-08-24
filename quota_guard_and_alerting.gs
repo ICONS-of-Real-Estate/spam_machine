@@ -228,8 +228,24 @@ const LLM_PRICING_PER_MTOK = {
 // changes) -- but that raw body's own `model` field already says which
 // model responded, so a caller can derive the provider from `data.model`
 // directly instead of needing a new return shape.
+// HARDENED (24 Aug 2026, found in review): this used to be
+// `model === CONFIG.MODEL ? 'kimi' : 'anthropic'` -- an exact string match
+// against the model we ASKED for, applied to the model string the provider
+// ECHOED BACK. Those are not the same thing: providers routinely return a
+// decorated or pinned variant of the requested id (`kimi-k2.6-0824`,
+// `claude-sonnet-5-20260501`). Any such variance silently fell through the
+// ternary's else branch and got priced as Anthropic -- which, on a split test
+// whose entire purpose is comparing the two providers' costs, would corrupt
+// the exact number being measured, in the exact direction that hides it
+// (Kimi's spend being attributed to Anthropic). Match on the model family
+// instead, and return null rather than guessing when it's neither, so bad
+// data shows up as blank in the log instead of masquerading as a real figure.
 function providerFromModel_(model) {
-  return model === CONFIG.MODEL ? 'kimi' : 'anthropic';
+  const m = String(model || '').toLowerCase();
+  if (m.indexOf('kimi') !== -1 || m.indexOf('moonshot') !== -1) return 'kimi';
+  if (m.indexOf('claude') !== -1) return 'anthropic';
+  Logger.log('providerFromModel_ -- unrecognized model string "' + model + '", cannot attribute provider. Returning null rather than guessing.');
+  return null;
 }
 
 function estimateCallCostUsd_(provider, usage) {
@@ -247,31 +263,86 @@ function estimateCallCostUsd_(provider, usage) {
   return Math.round(cost * 1e6) / 1e6; // round to 6 decimals -- these are fractions of a cent per call
 }
 
+const LLM_COST_LOG_HEADERS = [
+  'Timestamp', 'Caller', 'Provider', 'Model',
+  'Input Tokens', 'Output Tokens', 'Cache Read Tokens', 'Cache Creation Tokens',
+  'Estimated Cost USD',
+  // ADDED (24 Aug 2026): see logLlmCallCost_ below -- a provider bills for a
+  // call that came back unusable just the same as one that worked, so the log
+  // has to record both or it under-reports real spend.
+  'Outcome', 'Error',
+];
+
 function ensureLlmCostLogTabExists_(ss) {
   let tab = ss.getSheetByName('LLM Cost Log');
   if (!tab) {
     tab = ss.insertSheet('LLM Cost Log');
-    tab.appendRow(['Timestamp', 'Caller', 'Provider', 'Model', 'Input Tokens', 'Output Tokens', 'Cache Read Tokens', 'Cache Creation Tokens', 'Estimated Cost USD']);
+    tab.appendRow(LLM_COST_LOG_HEADERS);
     Logger.log('ensureLlmCostLogTabExists_ -- created tab: LLM Cost Log');
+    return tab;
+  }
+
+  // MIGRATION (24 Aug 2026): the tab was created earlier today with 9
+  // columns; Outcome/Error are new. Extend the header in place rather than
+  // requiring a human to type them -- unlike the 'AI Drafts Log' (275+ rows
+  // of history and a header humans may have customized, hence its
+  // hands-off treatment), this tab is code-generated, hours old, and has a
+  // header nobody has touched. Existing rows read blank in the new columns,
+  // which is accurate: they predate the distinction.
+  try {
+    const width = tab.getLastColumn();
+    const existing = width > 0 ? tab.getRange(1, 1, 1, width).getValues()[0] : [];
+    if (existing.indexOf('Outcome') === -1) {
+      tab.getRange(1, 1, 1, LLM_COST_LOG_HEADERS.length).setValues([LLM_COST_LOG_HEADERS]);
+      Logger.log('ensureLlmCostLogTabExists_ -- migrated LLM Cost Log header to include Outcome/Error.');
+    }
+  } catch (e) {
+    Logger.log('ensureLlmCostLogTabExists_ -- header migration failed (non-fatal, continuing): ' + e);
   }
   return tab;
 }
 
-function logLlmCallCost_(callerLabel, provider, model, usage) {
-  if (!usage) return;
-  const costUsd = estimateCallCostUsd_(provider, usage);
+// REWRITTEN (24 Aug 2026, real incident -- the split test's own numbers were
+// wrong): this used to `return` immediately when `usage` was absent, and was
+// only ever called on the SUCCESS path of callLlmWithFallback(). Both of
+// those hid real money.
+//
+// The failure that matters: attemptLlmCall_() treats an HTTP 200 carrying no
+// text block as a FAILURE (correctly -- see the thinking-mode bug documented
+// there, where kimi-k2.6 spends its entire max_tokens budget reasoning and
+// never writes an answer). But the provider still BILLED that call. Output
+// tokens at Kimi's $4.00/MTok are charged whether the tokens were an answer
+// or abandoned chain-of-thought. So every one of those burned real credit,
+// fell back to Anthropic, and appeared NOWHERE in this log -- the sheet said
+// Kimi was cheap while the Moonshot dashboard said otherwise. On a split test
+// whose whole output is "which provider costs less," a cost log that only
+// counts the calls that worked is not measuring the thing.
+//
+// Now every attempt is logged with an outcome:
+//   ok                  -- usable response, this is the one that did the work
+//   billed_no_output    -- HTTP 200, provider billed it, no usable text came back
+//   failed              -- transport/HTTP error; typically not billed, logged
+//                          anyway so failure RATE per provider is measurable
+//                          (that is a quality signal, not just a cost one)
+function logLlmCallCost_(callerLabel, provider, model, usage, outcome, errorText) {
+  const costUsd = usage ? estimateCallCostUsd_(provider, usage) : 0;
   try {
     const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
     const tab = ensureLlmCostLogTabExists_(ss);
     tab.appendRow([
       new Date(), callerLabel, provider, model,
-      usage.input_tokens || 0, usage.output_tokens || 0,
-      usage.cache_read_input_tokens || 0, usage.cache_creation_input_tokens || 0,
+      usage ? (usage.input_tokens || 0) : 0,
+      usage ? (usage.output_tokens || 0) : 0,
+      usage ? (usage.cache_read_input_tokens || 0) : 0,
+      usage ? (usage.cache_creation_input_tokens || 0) : 0,
       costUsd,
+      outcome || 'ok',
+      errorText ? String(errorText).slice(0, 500) : '',
     ]);
   } catch (e) {
     Logger.log('logLlmCallCost_ -- failed to log (non-fatal, continuing): ' + e);
   }
+  return costUsd;
 }
 
 function callLlmWithFallback(systemPrompt, userPrompt, maxTokens, callerLabel) {
@@ -322,12 +393,39 @@ function callLlmWithFallback(systemPrompt, userPrompt, maxTokens, callerLabel) {
       Logger.log(callerLabel + ' -- ' + (name === 'kimi' ? 'KIMI_API_KEY' : 'ANTHROPIC_API_KEY') + ' not set in Script Properties, skipping ' + name + '.');
       continue;
     }
+    const attemptedFirst = (name === order[0]);
     const result = provider.call();
+
     if (result.ok) {
-      logLlmCallCost_(callerLabel, provider.name, provider.model, result.data.usage);
+      const costUsd = logLlmCallCost_(callerLabel, provider.name, provider.model, result.data.usage, 'ok', '');
+      // ADDED (24 Aug 2026, per direct request -- split test must measure
+      // both price and quality): stamp WHICH provider actually served this
+      // call, and what it cost, directly onto the returned object. Callers
+      // previously re-derived the provider from data.model themselves, which
+      // meant two independent derivations of the same fact that could
+      // disagree (and one of them, providerFromModel_, was doing an exact
+      // string match -- see its comment). This is the authoritative one: we
+      // know which branch we called. The return value is still the same raw
+      // API response object every existing call site already handles, just
+      // with two extra fields hanging off it, so nothing downstream breaks.
+      // Underscore-prefixed to make clear these are ours, not the provider's.
+      result.data._servedByProvider = provider.name;
+      result.data._estimatedCostUsd = costUsd;
+      result.data._servedOnFirstAttempt = attemptedFirst;
       return result.data;
     }
-    Logger.log(callerLabel + ' -- ' + name + ' call failed' + (name === order[0] ? ', trying ' + order[1] + ': ' : ' (both attempted): ') + result.error);
+
+    // A 200 response with no usable content was still billed -- log the
+    // spend under its own outcome so the sheet reconciles against the
+    // provider's real dashboard. A transport/HTTP error generally wasn't
+    // billed, but gets logged too so per-provider failure rate is visible.
+    logLlmCallCost_(
+      callerLabel, provider.name, provider.model,
+      result.data ? result.data.usage : null,
+      result.billed ? 'billed_no_output' : 'failed',
+      result.error
+    );
+    Logger.log(callerLabel + ' -- ' + name + ' call failed' + (attemptedFirst ? ', trying ' + order[1] + ': ' : ' (both attempted): ') + result.error);
   }
 
   sendOpsAlert(
@@ -404,6 +502,13 @@ function attemptLlmCall_(url, headers, model, systemPrompt, userPrompt, maxToken
     if (!hasTextBlock) {
       return {
         ok: false,
+        // ADDED (24 Aug 2026): hand the response body back even though this
+        // counts as a failure. The provider billed this call -- `data.usage`
+        // is the only record of how much -- and callLlmWithFallback() needs
+        // it to log the spend. Returning only an error string here is what
+        // made these calls invisible to the cost log; see logLlmCallCost_.
+        data: data,
+        billed: true,
         error: 'no usable text block in response (stop_reason: ' + data.stop_reason +
           ', content types: ' + JSON.stringify((data.content || []).map(c => c.type)) + ')'
       };

@@ -476,6 +476,12 @@ Set action to "stop" ONLY for a clear hard decline or an explicit request to sto
     action: parsed.action === 'stop' ? 'stop' : 'draft',
     leadState: parsed.lead_state || 'unknown',
     draftBody: (parsed.draft_body || '').trim(),
+    // ADDED (24 Aug 2026, per direct request): carry which provider actually
+    // served this call so the draft can say so (see buildLlmProviderNote in
+    // Code.gs). Same authoritative stamp classifyAndDraft() uses -- set by
+    // callLlmWithFallback(), which knows which branch it called, with the
+    // model-string inference kept only as a fallback.
+    llmProvider: data._servedByProvider || providerFromModel_(data.model),
   };
 }
 
@@ -1617,8 +1623,16 @@ function advanceHubGuestFollowUps() {
       Logger.log('advanceHubGuestFollowUps -- LLM drafted for ' + threadId + ' (' + name + '), lead_state=' + followUp.leadState + ', step ' + nextStep);
 
       const note = buildSchedulingNote(new Date(originalReplyTime));
+      // ADDED (24 Aug 2026, per direct request): these Hub Guest follow-ups
+      // are genuinely LLM-written, so they carry the same model-attribution
+      // note the reply drafter's drafts do. The Podcast Sales cadence above
+      // deliberately does NOT get one -- both of its steps are hardcoded
+      // templates with no LLM call anywhere in the path, and stamping a
+      // model name on a fixed template would put a false data point into the
+      // very quality comparison this note exists to feed.
+      const providerNote = buildLlmProviderNote(followUp.llmProvider);
       const plainBody = followUp.draftBody;
-      const fullDraftText = note + plainBody + buildQuotedHistoryForReply(thread);
+      const fullDraftText = note + providerNote + plainBody + buildQuotedHistoryForReply(thread);
 
       // FIX (17 Aug 2026, real incident -- Joana's top-priority, repeatedly
       // flagged complaint): GmailApp.createDraft() composed a brand-new,

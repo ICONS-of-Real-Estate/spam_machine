@@ -39,7 +39,12 @@ function reconcileMissingDrafts() {
   // manual runs. Every Gmail-touching entry point in this project must have
   // both of these guards -- this one never did, since nobody expected it to
   // run unattended. Now scheduled daily in setupAllTriggers().
-  assertRunningAsJoana();
+  // FIXED (24 Aug 2026, found in review): called with no callerName, so the
+  // wrong-account ops alert this raises would have read "undefined fired
+  // under the wrong account" -- the one piece of information that alert
+  // exists to convey. Also brought into line with the `if (!...) return;`
+  // idiom every other call site uses.
+  if (!assertRunningAsJoana('reconcileMissingDrafts')) return;
   if (isGmailQuotaExhausted()) {
     Logger.log('Skipping reconcileMissingDrafts -- Gmail quota already known exhausted today.');
     return;

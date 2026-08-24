@@ -334,13 +334,13 @@ function ensureLogSheetExists() {
   let draftsTab = ss.getSheetByName('AI Drafts Log');
   if (!draftsTab) {
     draftsTab = ss.insertSheet('AI Drafts Log');
-    draftsTab.appendRow(['Timestamp', 'Thread ID', 'Subject', 'Prospect Email', 'Category', 'Needs Teammate Routing', 'Draft Text', 'Draft Link', 'SOP Mode']);
+    draftsTab.appendRow(['Timestamp', 'Thread ID', 'Subject', 'Prospect Email', 'Category', 'Needs Teammate Routing', 'Draft Text', 'Draft Link', 'SOP Mode', 'LLM Provider', 'Estimated Cost USD']);
   }
 
   let learningTab = ss.getSheetByName('Learning Log');
   if (!learningTab) {
     learningTab = ss.insertSheet('Learning Log');
-    learningTab.appendRow(['Compared At', 'Thread ID', 'Subject', 'Category', 'Original AI Draft', 'Final Sent Text', 'Was Edited', 'Reviewed For SOP', 'SOP Mode']);
+    learningTab.appendRow(['Compared At', 'Thread ID', 'Subject', 'Category', 'Original AI Draft', 'Final Sent Text', 'Was Edited', 'Reviewed For SOP', 'SOP Mode', 'LLM Provider', 'Draft Similarity %']);
   }
 
   let suggestionsTab = ss.getSheetByName('SOP Suggestions');
@@ -374,6 +374,59 @@ function migrateAddSopModeColumn() {
     }
     tab.getRange(1, headers.length + 1).setValue('SOP Mode');
     Logger.log('migrateAddSopModeColumn: added SOP Mode column to "' + name + '" at column ' + (headers.length + 1) + '.');
+  });
+}
+
+// ADDED (24 Aug 2026): closes the "add J1/K1 by hand" open item left over
+// from the cost-logging work, and adds the matching Learning Log columns for
+// the quality half of the split test.
+//
+// Why this is a separate function and not part of ensureLogSheetExists():
+// that one only writes headers when it CREATES a sheet, and both of these
+// tabs have existed for months with hundreds of real rows. Same situation
+// migrateAddSopModeColumn() above was written for.
+//
+// Why it does NOT reuse migrateAddSopModeColumn's "append at
+// headers.length + 1" approach: that helper finds the end of the header row
+// via getLastColumn(), which reports the last column containing ANY data --
+// and logDraftToSheet() has already been writing real values into J and K
+// for rows created since yesterday, with no header above them. So
+// getLastColumn() already returns 11 on that tab, and appending "one past
+// the end" would drop these labels in column L, two columns away from the
+// data they name. These are written to their exact known positions instead,
+// matching logDraftToSheet()'s own append order, and only when the target
+// cell is empty -- so this is safe to run repeatedly and will never
+// overwrite a label a human has customized.
+function migrateAddLlmColumns() {
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+
+  const plan = [
+    { sheet: 'AI Drafts Log', labels: { 10: 'LLM Provider', 11: 'Estimated Cost USD' } },
+    { sheet: 'Learning Log', labels: { 10: 'LLM Provider', 11: 'Draft Similarity %' } },
+  ];
+
+  plan.forEach(spec => {
+    const tab = ss.getSheetByName(spec.sheet);
+    if (!tab) {
+      Logger.log('migrateAddLlmColumns: sheet "' + spec.sheet + '" not found, skipping.');
+      return;
+    }
+    Object.keys(spec.labels).forEach(colStr => {
+      const col = Number(colStr);
+      const label = spec.labels[colStr];
+      const cell = tab.getRange(1, col);
+      const current = String(cell.getValue() || '').trim();
+      if (current === label) {
+        Logger.log('migrateAddLlmColumns: "' + spec.sheet + '" column ' + col + ' already labeled "' + label + '", skipping.');
+        return;
+      }
+      if (current !== '') {
+        Logger.log('migrateAddLlmColumns: "' + spec.sheet + '" column ' + col + ' already holds "' + current + '" -- NOT overwriting. Check this by hand; expected "' + label + '".');
+        return;
+      }
+      cell.setValue(label);
+      Logger.log('migrateAddLlmColumns: labeled "' + spec.sheet + '" column ' + col + ' as "' + label + '".');
+    });
   });
 }
 
@@ -829,13 +882,15 @@ function runReplyDrafterInner() {
     try {
       const priorityNote = buildPriorityCheckNote(result);
       const sopModeNote = buildSopModeNote(sopMode);
-      const aiReplyPlain = priorityNote + sopModeNote + sanitizeEmojiForGmail(markdownLinksToPlain(result.draftBody));
+      const llmProviderNote = buildLlmProviderNote(result.llmProvider);
+      const aiReplyPlain = priorityNote + sopModeNote + llmProviderNote + sanitizeEmojiForGmail(markdownLinksToPlain(result.draftBody));
       const historyPlain = stripForwardHeaderKeepHistory(lastMsg.getPlainBody());
       const fullPlainBody = aiReplyPlain + '\n\n' + historyPlain;
 
       const priorityNoteHtml = escapeHtml(priorityNote).replace(/\n/g, '<br>');
       const sopModeNoteHtml = escapeHtml(sopModeNote).replace(/\n/g, '<br>');
-      const aiReplyHtml = priorityNoteHtml + sopModeNoteHtml + emojiToHtmlEntities(sanitizeEmojiForGmail(markdownLinksToHtml(result.draftBody)));
+      const llmProviderNoteHtml = escapeHtml(llmProviderNote).replace(/\n/g, '<br>');
+      const aiReplyHtml = priorityNoteHtml + sopModeNoteHtml + llmProviderNoteHtml + emojiToHtmlEntities(sanitizeEmojiForGmail(markdownLinksToHtml(result.draftBody)));
       const historyHtml = emojiToHtmlEntities(escapeHtml(historyPlain).replace(/\n/g, '<br>'));
       const fullHtmlBody = aiReplyHtml + '<br><br>' + historyHtml;
 
@@ -968,6 +1023,40 @@ function buildSystemPromptForMode(baseSopText, mode) {
 // Mirrors buildPriorityCheckNote()'s pattern exactly (bracketed, marked
 // DELETE BEFORE SENDING) so Joana and Goodness see mode the same way they
 // already see the priority flag -- no new convention to learn.
+// ADDED (24 Aug 2026, per direct request -- "note if it was kimi or
+// anthropic AI so we can measure the quality of the output too"): the
+// Kimi-vs-Anthropic split test measures price automatically (LLM Cost Log
+// tab, plus the per-draft cost column) but quality has no automatic
+// measure -- the only judge of whether a draft is any good is the human
+// reading it before they send it. That judgement happens in Gmail, where
+// until now nothing said which model wrote the thing being judged. So
+// Joana/Goodness could not have told you "the bad ones are all Kimi" even
+// if it were true.
+//
+// Two things now capture that. This line puts the provider in front of the
+// reviewer at the moment they form an opinion, so a "this one's rough" note
+// is attributable. And the Learning Log records the same provider next to
+// how heavily the draft was edited before sending (see runLearningLoopInner
+// in learning_loop.gs), which turns those individual judgements into a
+// number per provider.
+//
+// Same DELETE-THIS-LINE convention as the two notes above, and it sits in
+// the same block that gets stripped before sending. Note this note is NOT
+// part of what gets logged as the draft text -- logDraftToSheet() stores
+// result.draftBody, the model's raw output, so prepending here cannot skew
+// the draft-vs-sent comparison the quality metric is built on.
+function buildLlmProviderNote(llmProvider) {
+  if (!llmProvider) {
+    return '[AI MODEL: unknown -- provider could not be determined for this draft. DELETE THIS LINE BEFORE SENDING.]\n\n';
+  }
+  const label = llmProvider === 'kimi'
+    ? 'KIMI (Moonshot kimi-k2.6)'
+    : 'ANTHROPIC (Claude Sonnet 5)';
+  return '[AI MODEL: ' + label + ' -- part of an active Kimi-vs-Anthropic quality/cost test. ' +
+    'If this draft is noticeably better or worse than usual, say which model it was when you flag it. ' +
+    'DELETE THIS LINE BEFORE SENDING.]\n\n';
+}
+
 function buildSopModeNote(mode) {
   return '[SOP MODE: ' + (mode === 'hormozi' ? 'HORMOZI' : 'JOANA') +
     ' -- ' + (mode === 'hormozi'
@@ -1496,8 +1585,18 @@ IMPORTANT on no_decline (REAL INCIDENT, 17 Aug 2026): no_decline means a genuine
   // the "LLM Cost Log" tab for this call; carrying it here too means it
   // lands directly on the AI Drafts Log row (via logDraftToSheet below)
   // instead of requiring a join between two tabs to answer "cost per draft."
-  const llmProvider = providerFromModel_(data.model);
-  const llmCostUsd = estimateCallCostUsd_(llmProvider, data.usage);
+  // UPDATED (24 Aug 2026): prefer the provider stamped on the response by
+  // callLlmWithFallback() itself -- it knows which branch it called, so it
+  // cannot be wrong. providerFromModel_ stays as the fallback for any path
+  // that somehow returns an unstamped body, but it is now an inference from
+  // the echoed model string rather than the primary source of truth. Same
+  // for cost: reuse the figure already computed and written to the LLM Cost
+  // Log for this exact call, so the per-draft column and the cost tab can
+  // never disagree about the same call.
+  const llmProvider = data._servedByProvider || providerFromModel_(data.model);
+  const llmCostUsd = (data._estimatedCostUsd != null)
+    ? data._estimatedCostUsd
+    : estimateCallCostUsd_(llmProvider, data.usage);
 
   return {
     category: parsed.category,

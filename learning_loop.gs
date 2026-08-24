@@ -113,6 +113,23 @@ function runLearningLoopInner() {
   const draftTextCol = headers.indexOf('Draft Text');
   const sopModeCol = headers.indexOf('SOP Mode'); // -1 for rows logged before the split test existed
 
+  // ADDED (24 Aug 2026, per direct request -- the Kimi-vs-Anthropic test has
+  // to measure quality, not just price): the provider that wrote each draft
+  // is recorded on the AI Drafts Log row (column J). Carrying it across to
+  // the Learning Log is what makes quality measurable at all -- this tab is
+  // the only place that knows how much a human changed a draft before
+  // sending it, and that edit rate IS the quality signal. Without the
+  // provider alongside it there is no way to slice it by model.
+  //
+  // Prefer the header name; fall back to the known fixed position (column J,
+  // index 9) that logDraftToSheet() appends to, because the header labels for
+  // J/K may not have been typed in yet -- migrateAddLlmColumns() in Code.gs
+  // now does that, but rows written before it ran still have data in J with
+  // no label above it, and those rows are still worth attributing.
+  const LLM_PROVIDER_FIXED_COL = 9;
+  const namedProviderCol = headers.indexOf('LLM Provider');
+  const llmProviderCol = namedProviderCol !== -1 ? namedProviderCol : LLM_PROVIDER_FIXED_COL;
+
   let compared = 0;
 
   // ADDED (22 Aug 2026, per direct request): moved from a daily trigger to a
@@ -189,6 +206,13 @@ function runLearningLoopInner() {
     const sentText = sentReply.getPlainBody();
     const wasEdited = !textsRoughlyMatch(draftText, sentText);
 
+    // Only accept a value that actually looks like one of the two providers.
+    // Rows predating the cost test have nothing here, and a fixed-index read
+    // on an old 9-column row picks up undefined -- both should log blank
+    // rather than inventing an attribution.
+    const rawProvider = String(row[llmProviderCol] || '').toLowerCase().trim();
+    const llmProvider = (rawProvider === 'kimi' || rawProvider === 'anthropic') ? rawProvider : '';
+
     learningTab.appendRow([
       new Date(),
       threadId,
@@ -199,6 +223,13 @@ function runLearningLoopInner() {
       wasEdited,
       false, // Reviewed For SOP — starts false, generateSopSuggestions() flips it to true
       sopModeCol !== -1 ? (row[sopModeCol] || 'joana') : 'joana',
+      llmProvider,
+      // "Was Edited" alone is too blunt to compare two models with: fixing one
+      // typo and rewriting the reply from scratch both score `true`. This
+      // grades it -- 100 means sent exactly as drafted, 0 means nothing of the
+      // draft survived. Across enough rows, the average per provider is a far
+      // better answer to "which one writes better drafts" than a binary rate.
+      draftSimilarityPercent(draftText, sentText),
     ]);
 
     compared++;
@@ -267,6 +298,41 @@ function textsRoughlyMatch(a, b) {
   // false negatives mean a real edit gets missed.
   const lenRatio = Math.min(na.length, nb.length) / Math.max(na.length, nb.length || 1);
   return lenRatio > 0.97 && levenshteinRough(na, nb) < 5;
+}
+
+// ADDED (24 Aug 2026, per direct request -- measure split-test QUALITY):
+// how much of the AI's draft actually survived into what the human sent,
+// as a 0-100 percentage.
+//
+// Deliberately word-overlap (multiset intersection over the larger bag),
+// not edit distance. levenshteinRough() right above is O(m*n) and, more to
+// the point, fast-exits with a sentinel 999 the moment lengths differ by
+// more than 20 chars -- fine for its own "is this basically identical"
+// job, useless as a graded score, since every genuinely-rewritten draft
+// would collapse to the same value. Word overlap is O(n), stays honest
+// across big length differences, and ignores pure reordering/reformatting,
+// which is what we want: moving a paragraph is not the same kind of edit
+// as replacing the argument.
+//
+// Note this compares against the sent message's FULL plain body, which
+// includes the quoted history beneath the reply -- that inflates the score
+// somewhat, but it inflates it equally for both providers, so the
+// comparison between them stays fair. Read these as relative, not absolute.
+function draftSimilarityPercent(draftText, sentText) {
+  const words = s => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 0);
+  const draftWords = words(draftText);
+  const sentWords = words(sentText);
+  if (draftWords.length === 0 || sentWords.length === 0) return 0;
+
+  const sentCounts = {};
+  sentWords.forEach(w => { sentCounts[w] = (sentCounts[w] || 0) + 1; });
+
+  let shared = 0;
+  draftWords.forEach(w => {
+    if (sentCounts[w] > 0) { shared++; sentCounts[w]--; }
+  });
+
+  return Math.round((shared / Math.max(draftWords.length, 1)) * 100);
 }
 
 function levenshteinRough(a, b) {
