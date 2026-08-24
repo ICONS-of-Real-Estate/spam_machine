@@ -223,6 +223,17 @@ function setupAllTriggers() {
   // and shouts if they ever diverge again. Logged + alerted rather than
   // thrown, since the triggers themselves are already correctly created by
   // this point and aborting here would help nobody.
+  // Guarded on typeof: this is a manually-run function, and every trigger
+  // above has already been created by the time we get here. If
+  // heartbeat_and_trigger_healthcheck.gs somehow isn't in the project, a bare
+  // reference would throw a ReferenceError and paint the whole execution red
+  // -- making a successful setup look like a failed one, right at the moment
+  // someone is watching it to confirm the deploy worked.
+  if (typeof EXPECTED_TRIGGER_FUNCTIONS === 'undefined') {
+    Logger.log('NOTE: EXPECTED_TRIGGER_FUNCTIONS not found -- heartbeat_and_trigger_healthcheck.gs is missing from this project. All triggers above were still created fine, but nothing is health-checking them. Add that file.');
+    return;
+  }
+
   const notWatched = functionsToSchedule.filter(fn => EXPECTED_TRIGGER_FUNCTIONS.indexOf(fn) === -1);
   const watchedButNotScheduled = EXPECTED_TRIGGER_FUNCTIONS.filter(fn => functionsToSchedule.indexOf(fn) === -1);
   if (notWatched.length > 0 || watchedButNotScheduled.length > 0) {
