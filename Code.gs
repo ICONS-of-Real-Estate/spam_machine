@@ -430,6 +430,44 @@ function migrateAddLlmColumns() {
   });
 }
 
+// ONE-OFF (24 Aug 2026, per direct request): migrateAddLlmColumns() above
+// correctly refused to touch "Learning Log" column K -- it already held
+// "Estimated Cost USD", left over from an earlier draft of this feature
+// before the columns were split (see logLearningLoop's K1 was never
+// supposed to duplicate the AI Drafts Log's cost column; K is what
+// runLearningLoopInner() writes draftSimilarityPercent() into). That
+// refusal was the right call in general (never silently clobber a label a
+// human might have customized) but wrong in this ONE specific case, where
+// the existing label is a known leftover, not a customization.
+//
+// Narrow on purpose: only fires if K1 still holds exactly the stale label,
+// so running this after it's already fixed (by hand or by running this
+// twice) is a safe no-op, and it will never touch a label that isn't this
+// exact known case. Run once from the editor, then this function has
+// nothing left to do.
+function fixLearningLogK1Label() {
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const tab = ss.getSheetByName('Learning Log');
+  if (!tab) {
+    Logger.log('fixLearningLogK1Label: "Learning Log" sheet not found.');
+    return;
+  }
+  const cell = tab.getRange(1, 11);
+  const current = String(cell.getValue() || '').trim();
+  const stale = 'Estimated Cost USD';
+  const correct = 'Draft Similarity %';
+  if (current === correct) {
+    Logger.log('fixLearningLogK1Label: already "' + correct + '", nothing to do.');
+    return;
+  }
+  if (current !== stale) {
+    Logger.log('fixLearningLogK1Label: K1 holds "' + current + '", not the expected stale label "' + stale + '" -- NOT touching it. Check by hand.');
+    return;
+  }
+  cell.setValue(correct);
+  Logger.log('fixLearningLogK1Label: relabeled "Learning Log" K1 from "' + stale + '" to "' + correct + '".');
+}
+
 // ---------- SKIP CACHE (17 Aug 2026, real incident) ----------
 //
 // PROBLEM THIS SOLVES: LABEL_ALREADY_ANSWERED_BY_TEAM and
