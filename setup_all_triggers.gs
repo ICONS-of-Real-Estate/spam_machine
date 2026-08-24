@@ -210,7 +210,21 @@ function setupAllTriggers() {
     .create();
   Logger.log('Created: runStalledBookingsAudit, weekly Monday around 8 AM ' + TZ + '.');
 
-  Logger.log('All ' + functionsToSchedule.length + ' triggers created, all clock times in ' + TZ + '. Check the Triggers page (clock icon) to confirm.');
+  // ADDED (24 Aug 2026, per direct request): the heartbeat and trigger-health
+  // triggers used to live behind a SEPARATE function nobody remembered to run.
+  // Deleting all triggers and running only this one therefore left the project
+  // with no health check at all -- the single trigger whose entire job is
+  // noticing that the others went missing. Creating them here means "run
+  // setupAllTriggers()" is the complete answer, which is what everyone
+  // reasonably assumed it already was.
+  if (typeof setupHeartbeatTriggers === 'function') {
+    setupHeartbeatTriggers();
+    Logger.log('Created: runHeartbeatCheck + runTriggerHealthCheck (via setupHeartbeatTriggers()).');
+  } else {
+    Logger.log('WARNING: setupHeartbeatTriggers() not found -- heartbeat_and_trigger_healthcheck.gs is missing from this project. The ten triggers above exist but NOTHING is health-checking them.');
+  }
+
+  Logger.log('All ' + functionsToSchedule.length + ' scheduled triggers created (plus the heartbeat pair), all clock times in ' + TZ + '. Check the Triggers page (clock icon) to confirm.');
 
   // ADDED (24 Aug 2026, real gap found in review): runTriggerHealthCheck()
   // in heartbeat_and_trigger_healthcheck.gs compares the LIVE triggers
@@ -234,8 +248,10 @@ function setupAllTriggers() {
     return;
   }
 
-  const notWatched = functionsToSchedule.filter(fn => EXPECTED_TRIGGER_FUNCTIONS.indexOf(fn) === -1);
-  const watchedButNotScheduled = EXPECTED_TRIGGER_FUNCTIONS.filter(fn => functionsToSchedule.indexOf(fn) === -1);
+  const allCreated = functionsToSchedule.concat(
+    typeof HEARTBEAT_TRIGGER_FUNCTIONS !== 'undefined' ? HEARTBEAT_TRIGGER_FUNCTIONS : []);
+  const notWatched = allCreated.filter(fn => EXPECTED_TRIGGER_FUNCTIONS.indexOf(fn) === -1);
+  const watchedButNotScheduled = EXPECTED_TRIGGER_FUNCTIONS.filter(fn => allCreated.indexOf(fn) === -1);
   if (notWatched.length > 0 || watchedButNotScheduled.length > 0) {
     const msg =
       'setupAllTriggers() and EXPECTED_TRIGGER_FUNCTIONS (heartbeat_and_trigger_healthcheck.gs) have drifted apart. ' +
@@ -245,7 +261,7 @@ function setupAllTriggers() {
     Logger.log('TRIGGER LIST DRIFT -- ' + msg);
     sendOpsAlert('Trigger list drift between setupAllTriggers and the health check', msg);
   } else {
-    Logger.log('Trigger list consistency check OK -- setupAllTriggers() and EXPECTED_TRIGGER_FUNCTIONS name the same ' + functionsToSchedule.length + ' functions.');
+    Logger.log('Trigger list consistency check OK -- setupAllTriggers() and EXPECTED_TRIGGER_FUNCTIONS name the same ' + allCreated.length + ' functions.');
   }
 }
 

@@ -48,6 +48,15 @@ const BUSINESS_HOURS_END_ET = 19;    // 7 PM Eastern
 // consistency check at the bottom of setupAllTriggers() that fails loudly if
 // these two lists ever drift apart again, precisely because keeping them in
 // sync by memory is what broke it the first time.
+// ADDED (24 Aug 2026, per direct request -- "setupHeartbeatTriggers should be
+// in install all triggers"): named separately so setupAllTriggers() can both
+// create these and include them in its own drift check without hardcoding the
+// names in two files. This gap was not theoretical -- deleting all triggers
+// and running only setupAllTriggers() left the project with no heartbeat and,
+// worse, no runTriggerHealthCheck, meaning nothing at all was watching the
+// other ten.
+const HEARTBEAT_TRIGGER_FUNCTIONS = ['runHeartbeatCheck', 'runTriggerHealthCheck'];
+
 const EXPECTED_TRIGGER_FUNCTIONS = [
   'runReplyDrafter',
   'runLearningLoop',
@@ -67,7 +76,13 @@ const EXPECTED_TRIGGER_FUNCTIONS = [
   // all (verified -- no createDraft/createThreadedDraft_/LLM call anywhere in
   // that file). It reads the AI Drafts Log, checks thread recency, writes a
   // sheet tab, and emails ONLY when it finds something new.
-  'runStalledBookingsAudit'
+  'runStalledBookingsAudit',
+  // The heartbeat pair watches everything above; runTriggerHealthCheck also
+  // watches itself, which is tautological but harmless -- if it is missing it
+  // cannot run to complain, which is precisely why setupAllTriggers() now
+  // creates it rather than leaving it to a second function someone forgets.
+  'runHeartbeatCheck',
+  'runTriggerHealthCheck'
 ];
 
 function setupHeartbeatTriggers() {

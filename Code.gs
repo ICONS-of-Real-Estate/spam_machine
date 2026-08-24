@@ -848,13 +848,50 @@ function runReplyDrafterInner() {
       continue;
     }
 
+    // ADDED (24 Aug 2026, per direct request -- "you are paying full price to
+    // classify declines and throwing the result away"). REAL WASTE, measured:
+    // 37 LLM calls today produced 2 drafts. Every thread reaching this point
+    // used to go straight into the full classifyAndDraft() call -- ~9k tokens
+    // of SOP plus a fully written reply body -- and THEN, only after paying
+    // for all of it, DRAFT_ONLY_POSITIVE_FOR_NOW would look at the returned
+    // category and bin the whole thing if it was a decline.
+    //
+    // This is a cheap gate in front of that: a short prompt (no SOP at all,
+    // just the reply text) that answers one question -- is this obviously a
+    // decline? On a hit we skip the expensive call entirely, saving the SOP
+    // input AND the drafted body we were never going to use.
+    //
+    // DELIBERATELY CONSERVATIVE, because the failure modes are not symmetric.
+    // Wrongly skipping a real lead is the Montell/Mariann/Mumu incident of
+    // 17 Aug -- a genuinely interested reply written off, which is the worst
+    // outcome this system has. Wrongly continuing just costs one full call,
+    // which is what happened every time before today. So the gate only acts
+    // on an unambiguous decline and is told in the prompt to answer "unsure"
+    // whenever there is any doubt at all; anything but a confident "decline"
+    // falls through to the full path unchanged.
+    //
+    // Only runs while DRAFT_ONLY_POSITIVE_FOR_NOW is on. Flip that back to
+    // false and this gate switches itself off with it -- there is no waste to
+    // prevent once declines are being drafted again.
+    if (CONFIG.DRAFT_ONLY_POSITIVE_FOR_NOW) {
+      const cheapVerdict = looksLikeDeclineCheaply_(replyBody, subject);
+      if (cheapVerdict === 'decline') {
+        skipCache[threadId] = { reason: 'cheap pre-check read it as a clear decline (deprioritized, no full LLM call made)', lastCheckedAt: new Date() };
+        Logger.log('DIAGNOSTIC -- skipped BEFORE the expensive call (cheap pre-check: clear decline, and declines are deprioritized right now), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
+        continue;
+      }
+      Logger.log('DIAGNOSTIC -- cheap pre-check returned "' + cheapVerdict + '" for: ' + subject + ' -- proceeding to the full classify/draft call.');
+    }
+
     const state = extractStateFromSubject(subject);
     const matchedShow = state ? stateDirectory[normalizeState(state)] : null;
 
     const context = buildThreadContext(messages);
     const sopMode = assignSopMode(threadId);
-    const promptForThisThread = buildSystemPromptForMode(systemPrompt, sopMode);
-    const result = classifyAndDraft(promptForThisThread, subject, context, leadEmail, state, matchedShow);
+    // systemPrompt is passed through UNCHANGED (pure SOP text) so it stays
+    // byte-identical across every call and both providers can actually cache
+    // it -- the mode override rides in the user prompt now.
+    const result = classifyAndDraft(systemPrompt, subject, context, leadEmail, state, matchedShow, buildSopModeOverride(sopMode));
 
     if (!result) {
       skipCache[threadId] = { reason: 'classification/draft failed', lastCheckedAt: new Date() };
@@ -976,7 +1013,30 @@ function assignSopMode(threadId) {
 // itself as an LLM instruction (not string-splicing in code) mirrors how
 // "## FOLLOW-UP DRAFTING" is already found by heading rather than parsed
 // apart, and avoids brittle text surgery on live Doc content.
-function buildSystemPromptForMode(baseSopText, mode) {
+// RESTRUCTURED (24 Aug 2026, real incident -- this was the 7x cost bug):
+// this used to return the SOP text with the mode override appended, and that
+// combined result was sent as the `system` field. So the system field was
+// DIFFERENT on every call, alternating between the Hormozi and Joana variants
+// per assignSopMode().
+//
+// Why that was so expensive: prompt caching on both providers is a PREFIX
+// match, and the system field is part of that prefix. Anthropic tolerated it
+// -- it holds multiple concurrent cache entries, so both variants stayed
+// warm, which is why Anthropic's spend stayed low. Moonshot/Kimi does not
+// honour cache_control at all (confirmed 24 Aug 2026 -- its caching is
+// automatic on prefix match, and any change to the system field invalidates
+// it), so an alternating system prompt thrashed Kimi's cache to roughly
+// nothing and re-billed the full ~9k-token SOP at full input price on
+// essentially every call. That is the 7x.
+//
+// Fix: the system field is now the SOP text and NOTHING else -- byte-identical
+// on every call, for every thread, in both modes. The mode override moved
+// into the user prompt, where per-call variation belongs and costs nothing.
+// It is appended at the very END of the user prompt, which preserves the
+// 18 Aug fix's whole point (the override must be "the last thing it reads",
+// since asking the model to look up a heading earlier in the prompt was
+// confirmed not to work) -- if anything it is now more final than before.
+function buildSopModeOverride(mode) {
   if (mode === 'hormozi') {
     // FIX (18 Aug 2026, real incident): the first version of this just told
     // the model to "go apply the HORMOZI MODE OVERRIDES section above" --
@@ -1009,7 +1069,7 @@ function buildSystemPromptForMode(baseSopText, mode) {
     // the standard mode's team-callback line instead of using the CTA below
     // as an outright replacement per the instruction. Added an explicit rule
     // against naming an uncommitted teammate to close that gap.
-    return baseSopText + '\n\n---\n\nMANDATORY OVERRIDE FOR THIS REPLY ONLY -- HORMOZI MODE (active split test, 18 Aug 2026). This is a REQUIREMENT, not a style suggestion: you MUST use the exact text below in place of the standard core pitch paragraph, cost-question close, and CTA close, with no exceptions. Do not blend the two styles, do not fall back to the standard wording above, do not decide the standard version fits better. Do NOT combine the CTA close below with the standard mode\'s "I\'ll have one of our team give you a call" line -- use ONLY the CTA close below.\n\n' +
+    return '\n\n---\n\nMANDATORY OVERRIDE FOR THIS REPLY ONLY -- HORMOZI MODE (active split test, 18 Aug 2026). This is a REQUIREMENT, not a style suggestion: you MUST use the exact text below in place of the standard core pitch paragraph, cost-question close, and CTA close, with no exceptions. Do not blend the two styles, do not fall back to the standard wording above, do not decide the standard version fits better. Do NOT combine the CTA close below with the standard mode\'s "I\'ll have one of our team give you a call" line -- use ONLY the CTA close below.\n\n' +
       'CORE PITCH PARAGRAPH (use this, not the standard one): "Most agents know they should be building a personal brand, but between showings and closings there\'s never time to actually create content consistently. That\'s exactly what this solves: a podcast where you just show up for a relaxed 20-30 minute conversation with a local business owner, lender, or community leader a couple times a month — we handle 100% of the production, editing, publishing, and turning it into social clips, so it adds zero to your workload. We\'ve done this for 100+ agents across 30 states, and for the ones who lean into it, it\'s turned into real referral relationships in their market, not just downloads."\n\n' +
       'BENEFIT LINE (include right after the pitch paragraph): "The real benefit? It grows your sphere of influence, builds your authority as the go-to name in your market, and — most importantly — helps you sell more houses."\n\n' +
       'COST-QUESTION CLOSE (use this if cost comes up, not the standard one): "Great question -- quick context before the number: this isn\'t just a podcast, it\'s a done-for-you authority engine. We handle 100% of the production, editing, publishing, distribution, and turning every episode into social content, so all you do is show up and talk. Packages start around a one-time $497 start-up kit and $600/month for ongoing production -- less than most agents spend on a month of ad spend that disappears the moment they stop paying for it, while this compounds into a library that keeps working for you and building the kind of referral relationships that are worth a lot more than $600 a month. The exact package depends on your goals and how hands-on you\'d like the team to be, so rather than lock in a number over email, let\'s get that dialed in on a quick call. A lot of hosts also bring on a sponsor to offset the cost, which tends to be an easy sell in real estate." Never present these figures as the final or only price -- they are a starting point, and the close should route to a call for the real number, especially for a clearly hot/motivated lead. Do not open with "there is a cost involved" or any other pain-first framing -- value and context come before the number, never after.\n\n' +
@@ -1017,7 +1077,7 @@ function buildSystemPromptForMode(baseSopText, mode) {
       'Do NOT name a specific teammate (e.g. "Sean," "Bens") as the one who will personally call or reach out. Nobody is automatically CC\'d or notified when this reply sends -- naming someone specific here is a promise the system cannot back up unless a human manually loops them in afterward. If a handoff needs mentioning, say "someone from our team" / "I\'ll have one of our team reach out," never a specific name.\n\n' +
       'Everything else in the SOP above (categories, hard rules, tone, emoji, link formatting, no_decline handling, etc.) stays exactly as written -- only these four pieces change for this reply.';
   }
-  return baseSopText + '\n\n---\n\nACTIVE SPLIT TEST -- JOANA MODE (assigned to this specific reply, 18 Aug 2026): ignore the "## HORMOZI MODE OVERRIDES" section entirely if present above -- use only the standard SOP text for this reply.';
+  return '\n\n---\n\nACTIVE SPLIT TEST -- JOANA MODE (assigned to this specific reply, 18 Aug 2026): ignore the "## HORMOZI MODE OVERRIDES" section entirely if present above -- use only the standard SOP text for this reply.';
 }
 
 // Mirrors buildPriorityCheckNote()'s pattern exactly (bracketed, marked
@@ -1507,7 +1567,52 @@ function buildPriorityCheckNote(result) {
     (result.priority ? 'PRIORITY' : 'not priority') + '. AI reasoning: ' + result.reasoning + ']\n\n';
 }
 
-function classifyAndDraft(systemPrompt, subject, threadContext, prospectEmail, state, matchedShow) {
+// ADDED (24 Aug 2026): the cheap half of the two-stage classify. Sends only
+// the prospect's own fresh reply text and the subject -- NO SOP -- so this
+// call is a few hundred tokens against the ~9k the full call costs.
+//
+// Returns 'decline' ONLY on an unambiguous decline; 'unsure' or 'other' for
+// everything else, including any failure. Every non-'decline' answer means
+// "carry on and do the full call", so a broken or unavailable LLM makes this
+// gate a no-op rather than a lead-shredder -- the same fail-safe direction
+// countPendingAiDrafts_() uses. Note the returned category is NEVER used to
+// label or file the thread; the full call remains the only thing that
+// classifies for real. This only ever decides whether to spend money.
+function looksLikeDeclineCheaply_(replyBody, subject) {
+  const text = String(replyBody || '').trim();
+  if (!text) return 'unsure'; // nothing to judge -- let the full call decide
+
+  const system = 'You are a strict classifier. You answer with exactly one word and nothing else.';
+  const userPrompt = 'Below is a real estate agent\'s reply to a cold email that invited them to host a podcast.\n\n' +
+    'Answer with exactly ONE word:\n' +
+    '  decline  -- ONLY if this is an unmistakable, final "no". A flat "not interested", "no thanks", "please remove me", "we already have one and are not adding another".\n' +
+    '  other    -- anything else at all.\n' +
+    '  unsure   -- if you are not certain.\n\n' +
+    'CRITICAL: answering "decline" causes this lead to be dropped with no reply written, so the bar is deliberately high. These are NOT declines -- answer "other" for all of them:\n' +
+    '  - asking any question at all, however skeptical\n' +
+    '  - asking for more information, details, pricing, or examples\n' +
+    '  - a timing objection ("not right now", "swamped this month", "ask me next quarter")\n' +
+    '  - saying they are busy, travelling, or will get back to you\n' +
+    '  - any hint of curiosity or conditional interest\n' +
+    'If you feel any pull toward "decline" but could argue the other side, answer "unsure". A wrong "decline" loses a real customer; a wrong "other" costs a fraction of a cent.\n\n' +
+    'SUBJECT: ' + String(subject || '') + '\n\nTHEIR REPLY:\n' + text.slice(0, 2000);
+
+  try {
+    const data = callLlmWithFallback(system, userPrompt, 16, 'declinePreCheck');
+    const block = (data.content || []).find(c => c.type === 'text');
+    if (!block) return 'unsure';
+    const answer = String(block.text || '').trim().toLowerCase().replace(/[^a-z]/g, '');
+    if (answer === 'decline') return 'decline';
+    return answer === 'other' ? 'other' : 'unsure';
+  } catch (e) {
+    // Never let a pre-check failure drop a lead -- fall through to the full
+    // call, which is exactly what happened before this gate existed.
+    Logger.log('looksLikeDeclineCheaply_ -- pre-check failed (' + e + '), proceeding to the full call as if it had returned "unsure".');
+    return 'unsure';
+  }
+}
+
+function classifyAndDraft(systemPrompt, subject, threadContext, prospectEmail, state, matchedShow, sopModeOverride) {
   const candidateVariation = peekNoDeclineVariation();
 
   const matchedShowBlock = matchedShow
@@ -1553,7 +1658,12 @@ Set "priority" to true ONLY when the prospect shows clear, immediate buying inte
 
 IMPORTANT on no_decline (REAL INCIDENT, 17 Aug 2026): no_decline means a genuine, clear decline -- "not interested," "not right now" with no ask attached, an explicit no. A scheduling constraint ("can we talk next week instead," "I'm swamped this month"), a request for more information ("send me the framework/details first," "what does this involve"), or ANY reply that asks a question or requests something is NOT a decline -- classify those as yes_general instead, per the SOP's own documented distinction. This exact confusion caused real genuinely-interested replies (Montell, Mariann, Mumu) to get drafted as declines earlier today. When genuinely torn between yes_general and no_decline, prefer yes_general: a false yes_general just costs one extra warm follow-up, but a false no_decline risks writing off a real prospect entirely.`;
 
-  const data = callLlmWithFallback(systemPrompt, userPrompt, 2000, 'classifyAndDraft');
+  // The mode override goes LAST in the user prompt, not in the system field --
+  // see buildSopModeOverride() for why that placement is what makes the SOP
+  // prefix cacheable on both providers.
+  const userPromptWithMode = userPrompt + (sopModeOverride || '');
+
+  const data = callLlmWithFallback(systemPrompt, userPromptWithMode, 2000, 'classifyAndDraft');
 
   if (data.usage) {
     Logger.log(

@@ -217,7 +217,15 @@ function nextTestPrimaryProvider_() {
 // provider changes pricing -- these are USD per million tokens.
 const LLM_PRICING_PER_MTOK = {
   kimi: { input: 0.95, output: 4.00, cacheRead: 0.16 },
-  anthropic: { input: 2.00, output: 10.00, cacheRead: 0.20, cacheWrite: 2.50 }, // cacheRead = 0.1x, cacheWrite = 1.25x of the $2.00 intro input rate
+  // CORRECTED (24 Aug 2026): cacheWrite was 2.50, i.e. 1.25x the input rate --
+  // but 1.25x is the FIVE-MINUTE TTL write price. attemptLlmCall_() requests
+  // ttl: "1h", and one-hour writes cost 2x, so this was understating every
+  // Anthropic cache write by 60% -- in a split test whose entire purpose is
+  // deciding which provider is cheaper, biased in Anthropic's favour.
+  // (Verified against the prompt-caching reference, 24 Aug 2026. Reads stay
+  // at 0.1x regardless of TTL. Break-even also shifts with the longer TTL:
+  // a 5-minute cache pays for itself after 2 requests, a 1-hour one needs 3.)
+  anthropic: { input: 2.00, output: 10.00, cacheRead: 0.20, cacheWrite: 4.00 },
 };
 
 // ADDED (24 Aug 2026, per direct request -- "cost per draft"): callers that

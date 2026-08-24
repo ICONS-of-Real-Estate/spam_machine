@@ -206,9 +206,30 @@ function buildSplitTestSection_(ss, draftsData, learningData, rowsSince, sinceDa
       ? Math.round(similarities.reduce((a, b) => a + b, 0) / similarities.length)
       : null;
 
+    // ADDED (24 Aug 2026): token averages, because SPEND ALONE CANNOT TELL
+    // YOU WHY. A provider looking expensive per call has two completely
+    // different possible causes with opposite fixes: it is being billed for
+    // uncached input every time (a caching problem, fixable in our code), or
+    // our hardcoded rate in LLM_PRICING_PER_MTOK is simply wrong for the model
+    // it actually served (an accounting problem -- and then every dollar
+    // figure here is wrong too). Tokens are measured facts reported by the
+    // provider; the dollars are our own arithmetic on top of a rate someone
+    // typed in by hand. When the two disagree, trust the tokens.
+    //
+    // Read it like this: cache-read near zero while input is ~9k means the SOP
+    // is being re-billed in full every call and caching is not working. Large
+    // cache-read with small input means caching IS working, so any remaining
+    // gap is the rate card, not the plumbing.
+    const okCalls = calls.filter(r => outcomeOf(r) === 'ok');
+    const avg = (idx) => okCalls.length > 0
+      ? Math.round(okCalls.reduce((sum, r) => sum + (Number(r[idx]) || 0), 0) / okCalls.length)
+      : 0;
+
     return (
       '  ' + provider.toUpperCase() + ':\n' +
       '    Spend: $' + spend.toFixed(4) + ' across ' + calls.length + ' call(s)\n' +
+      '    Avg tokens/call: ' + avg(4) + ' input, ' + avg(6) + ' cache-read, ' +
+        avg(7) + ' cache-write, ' + avg(5) + ' output\n' +
       '    Wasted (billed but returned nothing usable): $' + wastedSpend.toFixed(4) +
         ' across ' + wasted.length + ' call(s)\n' +
       '    Outright failures (no charge, fell back to the other provider): ' + failed.length + '\n' +
