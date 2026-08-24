@@ -158,6 +158,18 @@ const LLM_PRICING_PER_MTOK = {
   anthropic: { input: 2.00, output: 10.00, cacheRead: 0.20, cacheWrite: 2.50 }, // cacheRead = 0.1x, cacheWrite = 1.25x of the $2.00 intro input rate
 };
 
+// ADDED (24 Aug 2026, per direct request -- "cost per draft"): callers that
+// want per-draft cost attribution (not just the aggregate LLM Cost Log)
+// need to know which provider actually served a given classifyAndDraft()
+// call. callLlmWithFallback()'s return value is unchanged (still the raw
+// API response body, so every existing call site keeps working with no
+// changes) -- but that raw body's own `model` field already says which
+// model responded, so a caller can derive the provider from `data.model`
+// directly instead of needing a new return shape.
+function providerFromModel_(model) {
+  return model === CONFIG.MODEL ? 'kimi' : 'anthropic';
+}
+
 function estimateCallCostUsd_(provider, usage) {
   const p = LLM_PRICING_PER_MTOK[provider];
   if (!p || !usage) return null;
