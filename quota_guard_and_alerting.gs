@@ -157,10 +157,22 @@ function callLlmWithFallback(systemPrompt, userPrompt, maxTokens, callerLabel) {
 
 function attemptLlmCall_(url, headers, model, systemPrompt, userPrompt, maxTokens, extraPayloadFields) {
   try {
+    // FIX (24 Aug 2026, real incident): system was sent as a plain string,
+    // so cache_control was never actually applied despite the SOP comment
+    // above claiming it was -- the Anthropic Console's Caching page showed
+    // zero activity, and daily spend had been climbing ($0.47 -> $43.74
+    // over a week) as the SOP text grew (27k -> 35k chars) and got resent
+    // in full on every single classification call. Wrapping system in the
+    // content-block array form with cache_control lets the provider cache
+    // that large repeated block instead of billing it at full price every
+    // call -- Anthropic's ephemeral cache is ~90% cheaper on a hit than a
+    // fresh read. Not yet confirmed whether Kimi's Anthropic-compatible
+    // endpoint honors this the same way; worth checking its own billing
+    // page after this has been live a day.
     const payload = Object.assign({
       model: model,
       max_tokens: maxTokens,
-      system: systemPrompt,
+      system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: userPrompt }],
     }, extraPayloadFields || {});
 
