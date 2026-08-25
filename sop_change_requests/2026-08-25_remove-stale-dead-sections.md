@@ -129,5 +129,5 @@ every call for text with zero bearing on drafting behavior.
 
 ## Status
 
-- [ ] Applied to live doc (who / when)
-- [ ] Change log updated
+- [x] Applied to live doc (Kris, 25 Aug 2026 — both deletions confirmed done)
+- [ ] Change log updated — not yet confirmed; the line to append is in the "Change log entry to append" section above

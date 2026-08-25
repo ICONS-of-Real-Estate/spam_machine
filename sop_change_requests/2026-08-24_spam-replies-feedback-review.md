@@ -168,5 +168,5 @@ leaving the exact wording to be reinvented per draft.
 
 ## Status
 
-- [ ] Applied to live SOP Doc (who / when)
-- [ ] Change log updated
+- [x] Applied to live SOP Doc (Kris, 25 Aug 2026 — verified word-for-word against a PDF export of the live Doc)
+- [x] Change log updated (all 4 lines confirmed present, verbatim, in the same PDF)
