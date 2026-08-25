@@ -710,3 +710,25 @@ function cleanupLegacyDateSuffixedProperties() {
   });
   Logger.log('cleanupLegacyDateSuffixedProperties -- removed ' + removed + ' stray propert' + (removed === 1 ? 'y' : 'ies') + '.');
 }
+
+// ONE-OFF (25 Aug 2026, per direct request -- "we need to log and save that
+// information"): backfills the one real quota-exhaustion event from last
+// night into the Ops Alert Log tab. It happened before that tab existed
+// (added later the same day), so nothing captured it durably -- only the
+// Apps Script execution log has it, pasted manually into chat, and
+// execution logs don't retain forever. Safe to run once; re-running just
+// appends a duplicate row (delete the extra by hand if that happens).
+function backfillYesterdaysQuotaExhaustionLog() {
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const tab = ensureOpsAlertLogTabExists_(ss);
+  // Exact timestamp from the real execution log (Europe/Paris, this
+  // project's timezone): 25 Aug 2026, 10:25:09 PM.
+  const timestamp = new Date(2026, 7, 25, 22, 25, 9);
+  tab.appendRow([
+    timestamp,
+    '2026-08-25',
+    'Gmail quota exhausted -- runReplyDrafter stopped',
+    'Backfilled 25 Aug 2026 from the real Apps Script execution log -- the Ops Alert Log tab did not exist yet when this actually happened. Real Google error: "Service invoked too many times for one day: premium gmail", first appearing around 10:23 PM after repeated "Skipped a draft while checking for duplicates" failures from draftAlreadyExistsFor() (root cause: it re-fetched the entire Drafts folder per candidate thread instead of once per run -- fixed the same day). markGmailQuotaExhausted() fired at 10:25:09 PM; all Gmail-touching triggers skipped themselves until the flag cleared.'
+  ]);
+  Logger.log('backfillYesterdaysQuotaExhaustionLog -- appended historical row for 2026-08-25 22:25:09.');
+}
