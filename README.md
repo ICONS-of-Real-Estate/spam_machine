@@ -7,9 +7,9 @@ An **Apps Script** automation (V8, Europe/Paris) running inside Joana's Gmail th
 ## Quick facts
 
 - **Platform:** Google Apps Script (no Node/npm/build). All `.gs` files live in one shared project and share a single global `CONFIG` (in `Code.gs`) and global helpers — they must be deployed together.
-- **AI:** Anthropic Messages API via `UrlFetchApp`. Model in `CONFIG.MODEL`. Key is `ANTHROPIC_API_KEY` in Script Properties.
+- **AI:** Kimi/Moonshot (primary, `CONFIG.MODEL`, key `KIMI_API_KEY`) with Anthropic as automatic fallback (`CONFIG.ANTHROPIC_FALLBACK_MODEL`, key `ANTHROPIC_API_KEY`), both via `UrlFetchApp` through `callLlmWithFallback()` in `quota_guard_and_alerting.gs`. Both keys required, in Script Properties.
 - **Behavior is driven by a live SOP Google Doc**, not hardcoded — edit the Doc, not the code, to change drafting behavior.
-- **Entry points:** `runReplyDrafter` (every 5 min), `runLeadFollowUpCycle` (daily), plus learning/report/audit jobs. All Gmail-touching entry points are gated by `assertRunningAsJoana()` and a Gmail-quota circuit breaker.
+- **Entry points:** `runReplyDrafter` (every 15 min weekdays, ~hourly weekends), `runLeadFollowUpCycle` (daily), plus learning/report/audit jobs. All Gmail-touching entry points are gated by `assertRunningAsJoana()` and a Gmail-quota circuit breaker.
 
 ## Repo layout
 

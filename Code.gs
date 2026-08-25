@@ -672,7 +672,7 @@ function runReplyDrafter() {
       markGmailQuotaExhausted();
       sendOpsAlert(
         'Gmail quota exhausted -- runReplyDrafter stopped',
-        'runReplyDrafter hit the Gmail daily quota and will now skip itself on every 5-minute trigger for the rest of today (Pacific time). This should resolve automatically tomorrow. Raw error: ' + e
+        'runReplyDrafter hit the Gmail daily quota and will now skip itself on every trigger firing (every 15 min weekdays, ~hourly weekends) for the rest of today (Pacific time). This should resolve automatically tomorrow. Raw error: ' + e
       );
     } else {
       Logger.log('runReplyDrafter failed with a non-quota error -- this needs a real look: ' + e);
