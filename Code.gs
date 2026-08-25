@@ -229,7 +229,16 @@ const CONFIG = {
   // minutes. Matches FOLLOWUP_DRAFT_CAP in lead_followup_sequences.gs, same
   // reasoning: small steady batches every 5 minutes reach the folder cap
   // gradually instead of in one shot.
-  MAX_DRAFTS_PER_RUN: 5,
+  //
+  // RAISED to 25 (25 Aug 2026, per direct request). The trigger is now on a
+  // 15-minute cadence, not 5 -- a third as many firings per hour as when the
+  // 43-draft incident happened -- and the folder-wide cap this incident was
+  // really about is independently confirmed working today (stopped a run
+  // cleanly at exactly 25, and now exits before the Gmail search entirely
+  // once the folder's already full). MAX_PENDING_DRAFTS_IN_FOLDER (now 50,
+  // see above) remains a hard ceiling regardless of this number -- a single
+  // run cannot exceed it no matter how high this is set.
+  MAX_DRAFTS_PER_RUN: 25,
 
   // ADDED (19 Aug 2026, per direct request): now that runReplyDrafter is
   // going back on a 5-minute auto-trigger (see setup_all_triggers.gs),
