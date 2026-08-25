@@ -749,6 +749,25 @@ function runReplyDrafterInner() {
   const startingDraftCount = countPendingAiDrafts_();
   Logger.log('DIAGNOSTIC -- ' + startingDraftCount + ' draft(s) already in the folder at run start (cap: ' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ').');
 
+  // ADDED (25 Aug 2026, per direct request -- "why isn't the first thing to
+  // check the MAX pending drafts"): a real gap. startingDraftCount was
+  // computed above, but nothing acted on it until deep inside the pagination
+  // loop, AFTER GmailApp.search() had already fetched up to 500 threads --
+  // real Gmail API cost paid even in the one case where it's already certain,
+  // before a single thread is looked at, that zero drafts can be created this
+  // run. Harmless on a run like today's (23/25, room for 2 -- the search was
+  // going to be needed anyway), but on any run where the folder is already
+  // AT or OVER cap -- exactly the situation this limit exists to react to,
+  // and the likely state on a busy day once drafts pile up faster than
+  // review -- the old code paid for that search and page-iteration setup on
+  // every single 15-minute firing for zero possible benefit. Bail before
+  // ever calling GmailApp.search() when there's no room to begin with.
+  if (startingDraftCount >= CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER) {
+    Logger.log('Folder already at/over MAX_PENDING_DRAFTS_IN_FOLDER (' + startingDraftCount + '/' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ') -- skipping this run entirely, no Gmail search performed. Will try again next run once the folder is reviewed down.');
+    saveSkipCache(ss, skipCache);
+    return;
+  }
+
   pagination:
   while (true) {
     const page = GmailApp.search(searchQuery, pageStart, PAGE_SIZE);
