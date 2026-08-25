@@ -464,12 +464,19 @@ Set action to "stop" ONLY for a clear hard decline or an explicit request to sto
   }
 
   let parsed;
+  const cleaned = textBlock.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
   try {
-    const cleaned = textBlock.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     parsed = JSON.parse(cleaned);
   } catch (e) {
-    Logger.log('classifyAndDraftFollowUp -- failed to parse JSON: ' + textBlock.text);
-    return null;
+    // recoverTruncatedDraftJson_() is defined in Code.gs -- shared across
+    // both classify+draft call sites, see its comment there for the real
+    // incident (Erika, Nathaniel) this recovers from.
+    parsed = recoverTruncatedDraftJson_(cleaned);
+    if (!parsed) {
+      Logger.log('classifyAndDraftFollowUp -- failed to parse JSON: ' + textBlock.text);
+      return null;
+    }
+    Logger.log('classifyAndDraftFollowUp -- recovered via fallback parser (likely an unescaped quote in draft_body).');
   }
 
   return {

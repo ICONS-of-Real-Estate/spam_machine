@@ -1734,6 +1734,58 @@ function looksLikeDeclineCheaply_(replyBody, subject) {
   }
 }
 
+// SHARED (25 Aug 2026, real incident, live): both classifyAndDraft() below
+// and classifyAndDraftFollowUp() in lead_followup_sequences.gs ask the model
+// for an object shaped {...short fields..., draft_body: "..."} with
+// draft_body always the LAST field. Confirmed live, 25 Aug 2026 (Erika,
+// Nathaniel -- both genuinely interested yes_general replies, both
+// needs_teammate_routing=true per the model's own reasoning): the model is
+// instructed (Hormozi mode especially) to reproduce SOP close text that is
+// itself full of literal double quotes ("Great question! ...", "A lot of
+// hosts also bring on a sponsor..."). When it doesn't escape those as \"
+// inside the JSON string, strict JSON.parse breaks on the first unescaped
+// quote inside draft_body -- discarding an otherwise-correct classification,
+// and a genuinely interested lead's reply along with it, for a full 6h
+// skip-cache wait before it's even retried.
+//
+// draft_body being reliably the LAST field means it can be delimited
+// structurally -- from its opening quote to the FINAL "} at the end of the
+// object -- without needing a general JSON parser to correctly quote-match a
+// value that may itself contain unescaped quotes or literal newlines. Every
+// other field is swept generically (string or true/false), so this works
+// unchanged across both schemas that use it (category/needs_teammate_routing/
+// priority/reasoning here; lead_state/action/reasoning in the follow-up
+// drafter). Returns null (not a guess) when there's no draft_body match at
+// all -- that means something else broke, not this specific quote problem,
+// and the caller falls through to its existing failure path.
+function unescapeJsonString_(s) {
+  return s
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\');
+}
+
+function recoverTruncatedDraftJson_(cleanedText) {
+  const draftBodyMatch = cleanedText.match(/"draft_body"\s*:\s*"([\s\S]*)"\s*\}\s*$/);
+  if (!draftBodyMatch) return null;
+
+  const beforeDraftBody = cleanedText.slice(0, draftBodyMatch.index);
+  const result = { draft_body: unescapeJsonString_(draftBodyMatch[1]) };
+
+  const fieldPattern = /"([a-z_]+)"\s*:\s*(?:"((?:[^"\\]|\\.)*)"|(true|false))/gi;
+  let m;
+  while ((m = fieldPattern.exec(beforeDraftBody)) !== null) {
+    const key = m[1];
+    if (m[2] !== undefined) {
+      result[key] = unescapeJsonString_(m[2]);
+    } else {
+      result[key] = m[3] === 'true';
+    }
+  }
+  return result;
+}
+
 function classifyAndDraft(systemPrompt, subject, threadContext, prospectEmail, state, matchedShow, sopModeOverride) {
   const candidateVariation = peekNoDeclineVariation();
 
@@ -1802,12 +1854,16 @@ IMPORTANT on no_decline (REAL INCIDENT, 17 Aug 2026): no_decline means a genuine
   }
 
   let parsed;
+  const cleanedText = textBlock.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
   try {
-    const cleanedText = textBlock.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     parsed = JSON.parse(cleanedText);
   } catch (e) {
-    Logger.log('Failed to parse LLM JSON response: ' + textBlock.text);
-    return null;
+    parsed = recoverTruncatedDraftJson_(cleanedText);
+    if (!parsed) {
+      Logger.log('Failed to parse LLM JSON response: ' + textBlock.text);
+      return null;
+    }
+    Logger.log('classifyAndDraft -- recovered via fallback parser (likely an unescaped quote in draft_body): ' + subject);
   }
 
   // ADDED (24 Aug 2026, per direct request): attach real cost-per-draft
