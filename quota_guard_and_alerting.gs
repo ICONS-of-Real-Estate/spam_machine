@@ -60,7 +60,6 @@
 
 const QUOTA_ERROR_SUBSTRING_GLOBAL = 'too many times for one day';
 const QUOTA_EXHAUSTED_PROPERTY_KEY = 'GMAIL_QUOTA_EXHAUSTED_DATE_PACIFIC';
-const ALERT_SENT_PROPERTY_PREFIX = 'ALERT_SENT_';
 
 function isQuotaExceededError(e) {
   return String(e).indexOf(QUOTA_ERROR_SUBSTRING_GLOBAL) !== -1;
@@ -544,17 +543,53 @@ function attemptLlmCall_(url, headers, model, systemPrompt, userPrompt, maxToken
   }
 }
 
+// ADDED (25 Aug 2026, per direct request -- "why is it storing here, just
+// put it in a log"): the alert-dedup flag used to be its own permanent
+// Script Property per (subject, day) -- ALERT_SENT_<subject>_<date> --
+// and Script Properties are never cleaned up automatically, so every
+// distinct alert type left one behind forever, cluttering Project Settings
+// and slowly working toward Apps Script's own property-count/storage
+// ceiling. This tab replaces that: same dedup behavior, but as a real,
+// readable history (WHEN each alert fired and what it said) instead of a
+// bare boolean with no context -- matching every other log in this project.
+function ensureOpsAlertLogTabExists_(ss) {
+  let tab = ss.getSheetByName('Ops Alert Log');
+  if (!tab) {
+    tab = ss.insertSheet('Ops Alert Log');
+    tab.appendRow(['Timestamp', 'Pacific Date', 'Subject', 'Body']);
+    Logger.log('ensureOpsAlertLogTabExists_ -- created tab: Ops Alert Log');
+  }
+  return tab;
+}
+
 /**
  * Sends an alert via MailApp (NOT GmailApp) -- a separate quota, so
  * this keeps working even when Gmail access itself is dead. Rate
  * limited to once per unique subject per Pacific day, so a repeated
  * failure condition doesn't spam your inbox every time it's checked.
+ *
+ * The dedup check and the send are deliberately independent of each other's
+ * failure: if the Sheet can't be read (rare, but this file exists precisely
+ * for "what if something's down"), fail OPEN and send anyway -- a duplicate
+ * alert is a minor annoyance, a missing one is the exact failure mode this
+ * whole file exists to prevent. If the Sheet write after a successful send
+ * fails, that's logged but does not affect the alert that already went out.
  */
 function sendOpsAlert(subject, body) {
-  const props = PropertiesService.getScriptProperties();
-  const key = ALERT_SENT_PROPERTY_PREFIX + subject.replace(/[^a-zA-Z0-9]/g, '_') + '_' + todayPacificDateString();
+  const today = todayPacificDateString();
 
-  if (props.getProperty(key) === 'true') {
+  let alreadySentToday = false;
+  let tab = null;
+  try {
+    const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+    tab = ensureOpsAlertLogTabExists_(ss);
+    const rows = tab.getDataRange().getValues().slice(1);
+    alreadySentToday = rows.some(r => String(r[1]) === today && String(r[2]) === subject);
+  } catch (e) {
+    Logger.log('sendOpsAlert -- could not check the Ops Alert Log tab for dedup (failing open, sending anyway): ' + e);
+  }
+
+  if (alreadySentToday) {
     Logger.log('Alert suppressed (already sent today for this subject): ' + subject);
     return;
   }
@@ -575,9 +610,32 @@ function sendOpsAlert(subject, body) {
       subject: '[Icons Ops Alert] ' + subject,
       body: body + '\n\n(This alert was sent automatically by the Apps Script ops monitoring. Written with Claude\'s help.)'
     });
-    props.setProperty(key, 'true');
     Logger.log('Ops alert sent: ' + subject);
   } catch (e) {
     Logger.log('FAILED TO SEND OPS ALERT (this is bad -- MailApp itself is failing): ' + e);
+    return; // nothing actually sent -- don't record a row claiming it did
   }
+
+  try {
+    (tab || ensureOpsAlertLogTabExists_(SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID)))
+      .appendRow([new Date(), today, subject, body]);
+  } catch (e) {
+    Logger.log('sendOpsAlert -- alert email sent, but failed to record it in the Ops Alert Log tab (dedup may not work next time for this subject): ' + e);
+  }
+}
+
+// ONE-OFF (25 Aug 2026): run this once from the editor to remove the stray
+// ALERT_SENT_* properties that accumulated under the old design, above.
+// Safe to run any time -- it only deletes keys with that exact prefix.
+function cleanupLegacyAlertSentProperties() {
+  const props = PropertiesService.getScriptProperties();
+  const all = props.getProperties();
+  let removed = 0;
+  Object.keys(all).forEach(key => {
+    if (key.indexOf('ALERT_SENT_') === 0) {
+      props.deleteProperty(key);
+      removed++;
+    }
+  });
+  Logger.log('cleanupLegacyAlertSentProperties -- removed ' + removed + ' stray ALERT_SENT_* propert' + (removed === 1 ? 'y' : 'ies') + '.');
 }

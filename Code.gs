@@ -410,6 +410,11 @@ function ensureLogSheetExists() {
     suggestionsTab.appendRow(['Generated At', 'Based On N Edits', 'Suggested Change', 'Status (pending/approved/rejected)']);
   }
 
+  // ADDED (25 Aug 2026): sendOpsAlert() in quota_guard_and_alerting.gs
+  // creates this tab lazily too, but listing it here keeps every standard
+  // tab creatable from one place, same as the others above.
+  ensureOpsAlertLogTabExists_(ss);
+
   ensureSkipCacheTabExists(ss);
 }
 
