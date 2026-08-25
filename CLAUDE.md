@@ -25,3 +25,4 @@ Google Apps Script automation that drafts podcast-outreach replies with Claude i
 - Match the existing style: plain ES6 `.gs`, extensive `Logger.log`, header comments explaining *why* a change was made (with dates), not just *what*.
 - Long-running jobs are **batched + resumable** (Apps Script ~6-min limit) — keep that pattern.
 - Caps/thresholds live as named `const`s at the top of their file, not scattered magic numbers.
+- When naming a function or trigger in chat (e.g. telling the user what to run from the Apps Script editor), always name the `.gs` file it lives in too — this project has 15+ files sharing one global scope, and "run X" alone doesn't say where to find it.
