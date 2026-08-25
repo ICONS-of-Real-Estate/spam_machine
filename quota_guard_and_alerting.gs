@@ -383,7 +383,23 @@ function callLlmWithFallback(systemPrompt, userPrompt, maxTokens, callerLabel) {
         'https://api.anthropic.com/v1/messages',
         { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
         CONFIG.ANTHROPIC_FALLBACK_MODEL,
-        systemPrompt, userPrompt, maxTokens
+        systemPrompt, userPrompt, maxTokens,
+        // ADDED (25 Aug 2026, real incident -- confirmed live via the LLM
+        // Cost Log's Outcome column, which only started existing today):
+        // this call never disabled thinking, unlike Kimi's just above --
+        // and Claude Sonnet 5 runs ADAPTIVE THINKING ON BY DEFAULT when the
+        // thinking param is omitted entirely (unlike Opus 4.8/4.7, where
+        // omitting it means no thinking). That's the exact same failure
+        // class Kimi hit on 17 Aug: the model spends part of the shared
+        // max_tokens budget reasoning before it ever gets to write the JSON
+        // response, and on a harder classification can run out of room
+        // before producing any text block at all -- billed in full, no
+        // usable output. Confirmed today: 4 of 40 Anthropic calls, $0.1667
+        // wasted, exactly this signature. classifyAndDraft() defines no
+        // tools, so the Opus-5-specific "tool call leaks into visible text"
+        // disabled-thinking pitfall doesn't apply here structurally: there's
+        // no tool_use for anything to leak out of.
+        { thinking: { type: 'disabled' } }
       ),
     } : null,
   };
