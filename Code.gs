@@ -1940,11 +1940,44 @@ function buildSystemPrompt() {
 
   try {
     const doc = DocumentApp.openById(CONFIG.SOP_DOC_ID);
-    const text = doc.getBody().getText();
+    const rawText = doc.getBody().getText();
+    // TRIMMED (25 Aug 2026, per direct request): buildSystemPrompt() used to
+    // return the ENTIRE Doc body, including the "## FOLLOW-UP DRAFTING" and
+    // "## Change log" sections -- real, sizeable chunks of the Doc (roughly a
+    // fifth to a quarter of it) with zero bearing on drafting an initial
+    // reply. FOLLOW-UP DRAFTING is only ever consumed by
+    // buildFollowUpSystemPrompt() in lead_followup_sequences.gs, which does
+    // its OWN separate DocumentApp fetch and extracts just that section by
+    // heading -- this trim doesn't touch that path at all. Change log has no
+    // code consumer anywhere; it's pure human documentation of past edits.
+    //
+    // Cutting them here, not from the Doc itself: both stay fully intact and
+    // readable in the live Doc (Change log's whole point is a human audit
+    // trail; deleting it for real, unlike the two genuinely-dead sections
+    // removed earlier today, would destroy real value). This only changes
+    // what gets sent to the LLM as billed input tokens on every single
+    // classifyAndDraft call -- the same section is still there for a human
+    // reading the Doc directly, and still there for the follow-up drafter's
+    // own extraction.
+    //
+    // FOLLOW-UP DRAFTING is confirmed to be followed only by Change log, to
+    // the end of the document (both real, both dead weight for this path) --
+    // truncating everything from that heading onward removes both in one cut.
+    // Same heading-match pattern buildFollowUpSystemPrompt() already uses,
+    // for the same reason: don't rename or delete that heading in the Doc.
+    // If the heading isn't found (Doc restructured unexpectedly), fail open --
+    // return the full text rather than silently guessing where to cut.
+    const followUpHeadingMatch = rawText.match(/^##\s*FOLLOW-UP DRAFTING\b[^\n]*$/im);
+    const text = followUpHeadingMatch
+      ? rawText.slice(0, followUpHeadingMatch.index).trim()
+      : rawText;
+    if (!followUpHeadingMatch) {
+      Logger.log('WARNING: "## FOLLOW-UP DRAFTING" heading not found in SOP Doc -- sending the full text uncut (includes FOLLOW-UP DRAFTING/Change log sections this path doesn\'t need). Check the Doc structure.');
+    }
     if (text && text.trim().length > 200) {
       try {
         cache.put(SOP_CACHE_KEY, text, SOP_CACHE_TTL_SECONDS);
-        Logger.log('SOP fetched from Doc and cached (' + text.length + ' chars).');
+        Logger.log('SOP fetched from Doc and cached (' + text.length + ' chars, trimmed from ' + rawText.length + ').');
       } catch (cacheErr) {
         // Cache put can fail if the value exceeds CacheService's ~100KB/key
         // limit -- not fatal, just skip caching and return the text.
