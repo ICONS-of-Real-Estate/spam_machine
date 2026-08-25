@@ -1923,19 +1923,50 @@ IMPORTANT on no_decline (REAL INCIDENT, 17 Aug 2026): no_decline means a genuine
 // every LLM call. See the comment in attemptLlmCall_() for why 1h TTL and
 // how to verify it's actually hitting.
 const SOP_CACHE_KEY = 'SOP_FULL_TEXT';
+// ADDED (25 Aug 2026, per direct request): the cache TTL alone means a real
+// Doc edit can serve stale (pre-edit) content to real classify/draft calls
+// for up to 6 hours -- confirmed happening today, the Doc was edited twice
+// in one session, and the only thing that would have refreshed the cache
+// promptly was a human remembering to call clearSopCache() by hand. Stores
+// the Doc's own lastUpdated timestamp alongside the cached text, so
+// buildSystemPrompt() can cheaply check "did the Doc actually change" via
+// DriveApp (already a granted, working scope in this project -- see
+// learning_loop.gs) instead of trusting a blind timer. Same TTL as the text
+// itself so both entries expire together and never disagree.
+const SOP_CACHE_LAST_MODIFIED_KEY = 'SOP_FULL_TEXT_LAST_MODIFIED_ISO';
 const SOP_CACHE_TTL_SECONDS = 6 * 60 * 60; // 6 hours (CacheService max)
 
 function clearSopCache() {
   CacheService.getScriptCache().remove(SOP_CACHE_KEY);
+  CacheService.getScriptCache().remove(SOP_CACHE_LAST_MODIFIED_KEY);
   Logger.log('SOP cache cleared -- next buildSystemPrompt() call re-fetches the Doc fresh.');
 }
 
 function buildSystemPrompt() {
   const cache = CacheService.getScriptCache();
   const cached = cache.get(SOP_CACHE_KEY);
-  if (cached && cached.trim().length > 200) {
-    Logger.log('SOP loaded from cache (' + cached.length + ' chars).');
-    return cached;
+  const cachedLastModifiedIso = cache.get(SOP_CACHE_LAST_MODIFIED_KEY);
+
+  // Only trust the cached text once we've confirmed the Doc hasn't changed
+  // since we fetched it -- cachedLastModifiedIso being missing (e.g. right
+  // after this code first deploys, or an old cache entry from before this
+  // fix existed) falls through to a real fetch rather than guessing it's
+  // still fresh.
+  if (cached && cached.trim().length > 200 && cachedLastModifiedIso) {
+    try {
+      const liveLastModifiedIso = DriveApp.getFileById(CONFIG.SOP_DOC_ID).getLastUpdated().toISOString();
+      if (liveLastModifiedIso === cachedLastModifiedIso) {
+        Logger.log('SOP loaded from cache (' + cached.length + ' chars, confirmed unchanged since last fetch).');
+        return cached;
+      }
+      Logger.log('SOP Doc has changed since the cached copy was fetched (was ' + cachedLastModifiedIso + ', now ' + liveLastModifiedIso + ') -- re-fetching instead of serving a stale cache.');
+    } catch (driveErr) {
+      // Can't check freshness -- that's a reason to fall back to what we
+      // have, not a reason to force an unrelated re-fetch. Same
+      // fail-safe-toward-the-cheaper-path shape as the rest of this file.
+      Logger.log('SOP cache freshness check failed (' + driveErr + ') -- using cached text anyway.');
+      return cached;
+    }
   }
 
   try {
@@ -1977,6 +2008,16 @@ function buildSystemPrompt() {
     if (text && text.trim().length > 200) {
       try {
         cache.put(SOP_CACHE_KEY, text, SOP_CACHE_TTL_SECONDS);
+        // Best-effort -- if this specific call fails, the text cache above
+        // still succeeded and still serves real savings; the next call just
+        // won't find a lastModifiedIso, so it re-fetches and tries again
+        // instead of ever trusting an unconfirmed cache entry as fresh.
+        try {
+          const liveLastModifiedIso = DriveApp.getFileById(CONFIG.SOP_DOC_ID).getLastUpdated().toISOString();
+          cache.put(SOP_CACHE_LAST_MODIFIED_KEY, liveLastModifiedIso, SOP_CACHE_TTL_SECONDS);
+        } catch (driveErr) {
+          Logger.log('Could not record SOP Doc lastUpdated for freshness checks (non-fatal): ' + driveErr);
+        }
         Logger.log('SOP fetched from Doc and cached (' + text.length + ' chars, trimmed from ' + rawText.length + ').');
       } catch (cacheErr) {
         // Cache put can fail if the value exceeds CacheService's ~100KB/key
