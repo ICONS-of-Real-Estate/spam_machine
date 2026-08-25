@@ -241,7 +241,15 @@ const CONFIG = {
   // GmailApp.getDraftMessages().length at the start of each run, live count
   // during it), separate from and in addition to MAX_DRAFTS_PER_RUN -- the
   // run stops the moment either limit is hit, whichever comes first.
-  MAX_PENDING_DRAFTS_IN_FOLDER: 25,
+  //
+  // RAISED to 50 (25 Aug 2026, per direct request): 25 was hit today (23
+  // already in the folder, 2 more created, run stopped there per the log).
+  // Per the same incremental-trust pattern this project has used throughout
+  // -- MAX_DRAFTS_PER_RUN went 5->10->20 as each batch reviewed clean -- if
+  // this fills up fast again, the fix is reviewing it down, not necessarily
+  // raising the number again; watch the next few days before doubling it a
+  // second time.
+  MAX_PENDING_DRAFTS_IN_FOLDER: 50,
 
   // FLIPPED BACK (24 Aug 2026, per direct request -- "handle declines
   // too"): was TEMPORARY since 18 Aug so the review cap could be spent
