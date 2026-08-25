@@ -800,6 +800,11 @@ function runReplyDrafterInner() {
     return;
   }
 
+  // ADDED (25 Aug 2026, real incident -- see draftAlreadyExistsFor()'s
+  // comment): fetch the existing Drafts folder ONCE for this whole run,
+  // instead of once per candidate thread inside the loop below.
+  const existingDrafts = GmailApp.getDraftMessages();
+
   pagination:
   while (true) {
     const page = GmailApp.search(searchQuery, pageStart, PAGE_SIZE);
@@ -907,7 +912,7 @@ function runReplyDrafterInner() {
       originalSubjectFromForward = forwardInfo.originalSubject;
     }
 
-    if (draftedThisRun.has(leadEmail.toLowerCase()) || draftAlreadyExistsFor(leadEmail)) {
+    if (draftedThisRun.has(leadEmail.toLowerCase()) || draftAlreadyExistsFor(leadEmail, existingDrafts)) {
       skipCache[threadId] = { reason: 'draft already exists for ' + leadEmail, lastCheckedAt: new Date() };
       Logger.log('DIAGNOSTIC -- skipped (draft already exists for ' + leadEmail + '), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
       continue;
@@ -1621,8 +1626,23 @@ function countPendingAiDrafts_() {
   }
 }
 
-function draftAlreadyExistsFor(leadEmail) {
-  const drafts = GmailApp.getDraftMessages();
+// FIXED (25 Aug 2026, real incident -- Gmail quota exhausted mid-run,
+// "Service invoked too many times for one day: premium gmail"): called once
+// per CANDIDATE THREAD from runReplyDrafterInner()'s main loop, and every
+// call re-fetched GmailApp.getDraftMessages() plus .getTo() on every existing
+// draft from scratch -- O(threads x drafts already in the folder) real
+// Gmail API calls in a single run. With today's higher MAX_PENDING_DRAFTS_IN_FOLDER
+// (50) and MAX_DRAFTS_PER_RUN (25), that blew up badly enough to burn through
+// the real Google daily quota in one run (confirmed live: 11+ straight
+// failures from exactly this function right before the quota error). Added
+// an optional precomputedDrafts param so a hot-loop caller can fetch
+// GmailApp.getDraftMessages() ONCE for the whole run and pass it in here --
+// runReplyDrafterInner() does this now. The other two call sites
+// (reconcile_missing_drafts.gs, lead_followup_sequences.gs) check one lead
+// in isolation, not in a per-thread loop, so they're left calling this with
+// just leadEmail and keep the original always-fresh behavior.
+function draftAlreadyExistsFor(leadEmail, precomputedDrafts) {
+  const drafts = precomputedDrafts || GmailApp.getDraftMessages();
   const target = leadEmail.toLowerCase();
   for (let i = 0; i < drafts.length; i++) {
     try {
