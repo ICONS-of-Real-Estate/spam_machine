@@ -113,6 +113,29 @@ function runDailyReport() {
     );
   }
 
+  // ADDED (25 Aug 2026, per direct request -- "log all the information to
+  // one log file so it's easy to read"): this report already WAS the single
+  // consolidated log (leads/drafts/edits/cost all in one email) -- what was
+  // missing was readability. HTML twin of formatSection(), same numbers,
+  // bold labels + bordered card instead of a plain-text wall, matching the
+  // style already shipped for the stalled-bookings alert.
+  function formatSectionHtml(label, rows, editStatsArg) {
+    const cats = categoryBreakdown(rows);
+    const booked = bookedCount(rows);
+    const catLines = Object.keys(cats).map(c => '<li>' + escapeHtml(String(c)) + ': ' + cats[c] + '</li>').join('');
+    const editPct = editStatsArg.total > 0 ? Math.round((editStatsArg.edited / editStatsArg.total) * 100) : 0;
+    return (
+      '<div style="margin:0 0 14px 0; padding:10px 14px; border:1px solid #e0e0e0; border-radius:6px;">' +
+        '<div style="font-weight:bold; margin-bottom:6px;">' + escapeHtml(label) + '</div>' +
+        '<div style="line-height:1.7;">' +
+          '<b>Drafted by Claude:</b> ' + rows.length + '<br>' +
+          '<b>Booked to a call</b> (penciled time or handed to Sean/Bens): ' + booked + '<br>' +
+          '<b>Edited by Joana before sending:</b> ' + editStatsArg.edited + ' of ' + editStatsArg.total + ' sent (' + editPct + '%)<br>' +
+          '<b>By category:</b><ul style="margin:4px 0 0 0;">' + catLines + '</ul>' +
+        '</div>' +
+      '</div>'
+    );
+  }
 
   const body =
     'This email was written by Claude.\n\n' +
@@ -140,11 +163,40 @@ function runDailyReport() {
     'Full detail is always available in the "AI Drafts Log" and "Learning Log" tabs: ' +
     'https://docs.google.com/spreadsheets/d/' + CONFIG.SPREADSHEET_ID + '/edit';
 
+  const htmlBody =
+    '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' +
+      '<p>This email was written by Claude.</p>' +
+      '<h2 style="margin:0 0 4px 0; font-size:17px;">Daily Report &mdash; ' + escapeHtml(now.toDateString()) + '</h2>' +
+      '<p><b>New leads received today</b> (raw inbound count): ' + leadsReceivedToday + '</p>' +
+      '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
+      formatSectionHtml('TODAY', draftsToday, editToday) +
+      formatSectionHtml('LAST 7 DAYS', drafts7d, edit7d) +
+      formatSectionHtml('LAST 30 DAYS', drafts30d, edit30d) +
+      formatSectionHtml('ALL TIME', draftsAllTime, editAllTime) +
+      '<p><b>Averages:</b><br>' +
+        'Per day (last 7 days): ' + (drafts7d.length / 7).toFixed(1) + ' drafted<br>' +
+        'Per day (last 30 days): ' + (drafts30d.length / 30).toFixed(1) + ' drafted</p>' +
+      '<p><b>Gmail quota usage today</b> (self-tracked, approximate): ' + getGmailQuotaUsageToday_() + ' / ' + GMAIL_CALL_SOFT_CAP + ' soft cap</p>' +
+      '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
+      '<h2 style="margin:0 0 8px 0; font-size:17px;">Kimi vs Anthropic split test</h2>' +
+      '<p style="color:#555;">(price and quality; ' +
+        (LLM_COST_TEST_MODE ? 'test ACTIVE -- providers alternate 50/50 by call' : 'test OFF -- Kimi first always') + ')</p>' +
+      buildSplitTestSectionHtml_(ss, draftsData, learningData, rowsSince, todayStart, 'TODAY') +
+      buildSplitTestSectionHtml_(ss, draftsData, learningData, rowsSince, sevenDaysAgo, 'LAST 7 DAYS') +
+      '<p style="color:#555;">Reading this: cost-per-draft is the price answer. Edit rate and % surviving are ' +
+        'the quality answer &mdash; lower edit rate and higher % surviving is better. A cheap provider that gets ' +
+        'rewritten every time is not actually cheaper.</p>' +
+      '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
+      '<p style="color:#555;">Full detail is always available in the "AI Drafts Log" and "Learning Log" tabs: ' +
+        '<a href="https://docs.google.com/spreadsheets/d/' + CONFIG.SPREADSHEET_ID + '/edit">open the sheet</a></p>' +
+    '</div>';
+
   MailApp.sendEmail({
     to: 'kris@iconsofrealestate.com',
     cc: 'tomas@iconsofrealestate.com,joana@iconsofrealestate.com',
     subject: '[Written by Claude] Daily Podcast Reply Report -- ' + now.toDateString(),
-    body: body
+    body: body,
+    htmlBody: htmlBody
   });
 
   Logger.log('Daily report sent. Today: ' + draftsToday.length + ' drafted, ' + leadsReceivedToday + ' leads received.');
@@ -173,9 +225,17 @@ function runDailyReport() {
 // in learning_loop.gs). Neither number means anything until a provider has
 // a few dozen rows, so sample sizes are printed alongside rather than
 // hidden behind a percentage.
-function buildSplitTestSection_(ss, draftsData, learningData, rowsSince, sinceDate, label) {
+// EXTRACTED (25 Aug 2026, per direct request -- "log all the information to
+// one log file so it's easy to read"): pulled the arithmetic out of
+// buildSplitTestSection_ so the new HTML version (buildSplitTestSectionHtml_,
+// for the daily report email) and the plain-text version (still used by
+// logSplitTestSummary()'s Logger.log output) compute from one shared place --
+// the whole point of the original 24 Aug extraction was to avoid two copies
+// of this arithmetic drifting apart, and a naive HTML copy-paste would have
+// broken that same guarantee again.
+function computeSplitTestStats_(ss, draftsData, learningData, rowsSince, sinceDate) {
   const costTab = ss.getSheetByName('LLM Cost Log');
-  if (!costTab) return label + ':\n  (no "LLM Cost Log" tab yet -- nothing recorded)';
+  if (!costTab) return null;
 
   const costRows = costTab.getDataRange().getValues().slice(1)
     .filter(r => r[0] instanceof Date && r[0] >= sinceDate);
@@ -183,7 +243,7 @@ function buildSplitTestSection_(ss, draftsData, learningData, rowsSince, sinceDa
   const learningRows = learningData.filter(r => r[0] instanceof Date && r[0] >= sinceDate);
   const draftRows = rowsSince(draftsData, sinceDate);
 
-  const lines = ['kimi', 'anthropic'].map(provider => {
+  return ['kimi', 'anthropic'].map(provider => {
     const calls = costRows.filter(r => String(r[2] || '').toLowerCase() === provider);
     const spend = calls.reduce((sum, r) => sum + (Number(r[8]) || 0), 0);
     // Outcome column (J, index 9) is blank on rows written before it
@@ -225,26 +285,74 @@ function buildSplitTestSection_(ss, draftsData, learningData, rowsSince, sinceDa
       ? Math.round(okCalls.reduce((sum, r) => sum + (Number(r[idx]) || 0), 0) / okCalls.length)
       : 0;
 
-    return (
-      '  ' + provider.toUpperCase() + ':\n' +
-      '    Spend: $' + spend.toFixed(4) + ' across ' + calls.length + ' call(s)\n' +
-      '    Avg tokens/call: ' + avg(4) + ' input, ' + avg(6) + ' cache-read, ' +
-        avg(7) + ' cache-write, ' + avg(5) + ' output\n' +
-      '    Wasted (billed but returned nothing usable): $' + wastedSpend.toFixed(4) +
-        ' across ' + wasted.length + ' call(s)\n' +
-      '    Outright failures (no charge, fell back to the other provider): ' + failed.length + '\n' +
-      '    Drafts produced: ' + drafts.length +
-        (costPerDraft !== null ? ' -- $' + costPerDraft.toFixed(4) + ' per draft' : ' -- no cost-per-draft yet') + '\n' +
-      '    Edited before sending: ' + (judged.length > 0
-          ? editedCount + ' of ' + judged.length + ' (' + Math.round((editedCount / judged.length) * 100) + '%)'
-          : 'no reviewed drafts yet') + '\n' +
-      '    Avg of draft surviving into what was sent: ' + (avgSimilarity !== null
-          ? avgSimilarity + '% (n=' + similarities.length + ')'
-          : 'not enough data yet')
-    );
+    return {
+      provider: provider,
+      spend: spend, callCount: calls.length,
+      avgInput: avg(4), avgCacheRead: avg(6), avgCacheWrite: avg(7), avgOutput: avg(5),
+      wastedSpend: wastedSpend, wastedCount: wasted.length,
+      failedCount: failed.length,
+      draftCount: drafts.length, costPerDraft: costPerDraft,
+      editedCount: editedCount, judgedCount: judged.length,
+      avgSimilarity: avgSimilarity, similarityN: similarities.length
+    };
   });
+}
+
+function buildSplitTestSection_(ss, draftsData, learningData, rowsSince, sinceDate, label) {
+  const stats = computeSplitTestStats_(ss, draftsData, learningData, rowsSince, sinceDate);
+  if (!stats) return label + ':\n  (no "LLM Cost Log" tab yet -- nothing recorded)';
+
+  const lines = stats.map(s => (
+    '  ' + s.provider.toUpperCase() + ':\n' +
+    '    Spend: $' + s.spend.toFixed(4) + ' across ' + s.callCount + ' call(s)\n' +
+    '    Avg tokens/call: ' + s.avgInput + ' input, ' + s.avgCacheRead + ' cache-read, ' +
+      s.avgCacheWrite + ' cache-write, ' + s.avgOutput + ' output\n' +
+    '    Wasted (billed but returned nothing usable): $' + s.wastedSpend.toFixed(4) +
+      ' across ' + s.wastedCount + ' call(s)\n' +
+    '    Outright failures (no charge, fell back to the other provider): ' + s.failedCount + '\n' +
+    '    Drafts produced: ' + s.draftCount +
+      (s.costPerDraft !== null ? ' -- $' + s.costPerDraft.toFixed(4) + ' per draft' : ' -- no cost-per-draft yet') + '\n' +
+    '    Edited before sending: ' + (s.judgedCount > 0
+        ? s.editedCount + ' of ' + s.judgedCount + ' (' + Math.round((s.editedCount / s.judgedCount) * 100) + '%)'
+        : 'no reviewed drafts yet') + '\n' +
+    '    Avg of draft surviving into what was sent: ' + (s.avgSimilarity !== null
+        ? s.avgSimilarity + '% (n=' + s.similarityN + ')'
+        : 'not enough data yet')
+  ));
 
   return label + ':\n' + lines.join('\n');
+}
+
+// HTML twin of buildSplitTestSection_ -- same computeSplitTestStats_ data,
+// bold labels + a bordered card per provider instead of an indented text
+// block. Used only by runDailyReport's htmlBody; logSplitTestSummary() still
+// uses the plain-text version above since Logger.log has no HTML rendering.
+function buildSplitTestSectionHtml_(ss, draftsData, learningData, rowsSince, sinceDate, label) {
+  const stats = computeSplitTestStats_(ss, draftsData, learningData, rowsSince, sinceDate);
+  if (!stats) return '<h4 style="margin:18px 0 8px 0; font-size:14px;">' + escapeHtml(label) + '</h4><p>(no "LLM Cost Log" tab yet -- nothing recorded)</p>';
+
+  const cards = stats.map(s => (
+    '<div style="margin:0 0 14px 0; padding:10px 14px; border:1px solid #e0e0e0; border-radius:6px;">' +
+      '<div style="font-weight:bold; margin-bottom:6px;">' + escapeHtml(s.provider.toUpperCase()) + '</div>' +
+      '<div style="line-height:1.7;">' +
+        '<b>Spend:</b> $' + s.spend.toFixed(4) + ' across ' + s.callCount + ' call(s)<br>' +
+        '<b>Avg tokens/call:</b> ' + s.avgInput + ' input, ' + s.avgCacheRead + ' cache-read, ' +
+          s.avgCacheWrite + ' cache-write, ' + s.avgOutput + ' output<br>' +
+        '<b>Wasted</b> (billed, nothing usable): $' + s.wastedSpend.toFixed(4) + ' across ' + s.wastedCount + ' call(s)<br>' +
+        '<b>Outright failures</b> (no charge, fell back): ' + s.failedCount + '<br>' +
+        '<b>Drafts produced:</b> ' + s.draftCount +
+          (s.costPerDraft !== null ? ' &mdash; $' + s.costPerDraft.toFixed(4) + ' per draft' : ' &mdash; no cost-per-draft yet') + '<br>' +
+        '<b>Edited before sending:</b> ' + (s.judgedCount > 0
+            ? s.editedCount + ' of ' + s.judgedCount + ' (' + Math.round((s.editedCount / s.judgedCount) * 100) + '%)'
+            : 'no reviewed drafts yet') + '<br>' +
+        '<b>Draft survival into sent:</b> ' + (s.avgSimilarity !== null
+            ? s.avgSimilarity + '% (n=' + s.similarityN + ')'
+            : 'not enough data yet') +
+      '</div>' +
+    '</div>'
+  )).join('');
+
+  return '<h4 style="margin:18px 0 8px 0; font-size:14px;">' + escapeHtml(label) + '</h4>' + cards;
 }
 
 // ADDED (24 Aug 2026, per direct request -- "we can see if Kimi did good
