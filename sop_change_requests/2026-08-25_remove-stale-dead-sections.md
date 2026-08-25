@@ -66,8 +66,10 @@ CTA CLOSE: "Here's the quick version: [detail]. Want the full picture in under 1
 ```
 
 **Replace with**: nothing — leave the Replace field blank (or just delete
-the manually-selected range). Leave the standalone `---` divider directly
-above "## FOLLOW-UP DRAFTING" in place; only the block above it goes.
+the manually-selected range). CORRECTED (25 Aug 2026): there is no `---`
+divider between the CTA CLOSE paragraph and "## FOLLOW-UP DRAFTING" — that
+heading follows immediately, so there's nothing else to preserve. Delete
+exactly the block above and "## FOLLOW-UP DRAFTING" continues right after.
 
 **Why**: this section is not read by any code path. The Hormozi-mode
 override the model actually receives is a hardcoded string inside
