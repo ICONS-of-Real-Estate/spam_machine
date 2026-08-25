@@ -90,6 +90,21 @@ const CONFIG = {
   LABEL_NO: '2. Spam NO',
   LABEL_STOP: '3. Spam STOP',
 
+  // CHANGED (25 Aug 2026, per direct request -- Joana, Slack): these four
+  // labels were being auto-applied by the AI's own classification the
+  // moment a draft was created -- before any human reviewed or sent
+  // anything. Joana flagged two problems: the AI's classification "has
+  // lots of mistakes," and the reply tracker counts positive/negative off
+  // these labels, so a wrong auto-label directly corrupts that count. She
+  // wants each person to apply the label themselves after actually sending
+  // the reply instead. Set false disables auto-apply at both call sites
+  // (applyBusinessLabel() and the opt-out STOP branch in
+  // runReplyDrafterInner()) without touching anything else -- confirmed
+  // safe: opt-out suppression re-checks OPT_OUT_PATTERNS live every run
+  // regardless of the STOP label, and thread exclusion from future scans
+  // is handled separately by LABEL_AI_DRAFTED, which is unaffected.
+  AUTO_APPLY_BUSINESS_LABELS: false,
+
   LABEL_AI_DRAFTED: 'AI-Drafted-PendingReview',
   LABEL_NEEDS_ROUTING: 'AI-NeedsTeammateRouting',
 
@@ -917,7 +932,7 @@ function runReplyDrafterInner() {
 
     const alreadyLabeledStop = threadHasLabel(thread, CONFIG.LABEL_STOP);
     if (alreadyLabeledStop || OPT_OUT_PATTERNS.test(replyBody)) {
-      if (labelStop && !alreadyLabeledStop) thread.addLabel(labelStop);
+      if (CONFIG.AUTO_APPLY_BUSINESS_LABELS && labelStop && !alreadyLabeledStop) thread.addLabel(labelStop);
       thread.addLabel(labelDrafted);
       delete skipCache[threadId]; // now permanently excluded via label -- any earlier cache entry is moot
       Logger.log('Suppressed (opt-out): ' + subject + ' <' + leadEmail + '>');
@@ -1063,7 +1078,9 @@ function runReplyDrafterInner() {
       continue;
     }
 
-    applyBusinessLabel(thread, result.category, labelYes, labelYesPenciled, labelNo);
+    if (CONFIG.AUTO_APPLY_BUSINESS_LABELS) {
+      applyBusinessLabel(thread, result.category, labelYes, labelYesPenciled, labelNo);
+    }
 
     thread.addLabel(labelDrafted);
     if (result.needsTeammateRouting && labelNeedsRouting) {
