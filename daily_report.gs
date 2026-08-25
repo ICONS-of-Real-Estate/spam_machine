@@ -167,7 +167,7 @@ function runDailyReport() {
     // Gmail quota counter (see quota_guard_and_alerting.gs) so someone
     // actually sees it day to day, instead of it only mattering silently
     // behind the scenes.
-    'Gmail quota usage today (self-tracked, approximate): ' + getGmailQuotaUsageToday_() + ' / ' + GMAIL_CALL_SOFT_CAP + ' soft cap\n\n' +
+    'Gmail quota usage today (self-tracked, approximate): ' + getGmailQuotaUsageToday_() + ' / ' + GMAIL_CALL_REAL_LIMIT_ESTIMATE + ' estimated daily limit\n\n' +
     'KIMI vs ANTHROPIC SPLIT TEST (price and quality; ' +
       (LLM_COST_TEST_MODE ? 'test ACTIVE -- providers alternate 50/50 by call' : 'test OFF -- Kimi first always') + ')\n' +
     buildSplitTestSection_(ss, draftsData, learningData, rowsSince, yesterdayStart, 'YESTERDAY', todayStart) + '\n\n' +
@@ -193,7 +193,7 @@ function runDailyReport() {
       '<p><b>Averages:</b><br>' +
         'Per day (last 7 days): ' + (drafts7d.length / 7).toFixed(1) + ' drafted<br>' +
         'Per day (last 30 days): ' + (drafts30d.length / 30).toFixed(1) + ' drafted</p>' +
-      '<p><b>Gmail quota usage today</b> (self-tracked, approximate): ' + getGmailQuotaUsageToday_() + ' / ' + GMAIL_CALL_SOFT_CAP + ' soft cap</p>' +
+      '<p><b>Gmail quota usage today</b> (self-tracked, approximate): ' + getGmailQuotaUsageToday_() + ' / ' + GMAIL_CALL_REAL_LIMIT_ESTIMATE + ' estimated daily limit</p>' +
       '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
       '<h2 style="margin:0 0 8px 0; font-size:17px;">Kimi vs Anthropic split test</h2>' +
       '<p style="color:#555;">(price and quality; ' +

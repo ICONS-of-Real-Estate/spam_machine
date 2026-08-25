@@ -91,29 +91,85 @@ function todayPacificDateString() {
 // just happened." Treat the soft cap below as a safety margin, not a precise
 // budget -- the reactive circuit breaker above is still the real backstop if
 // this undercounts.
-const GMAIL_CALL_COUNT_PROPERTY_PREFIX = 'GMAIL_CALL_COUNT_';
-const GMAIL_CALL_SOFT_CAP = 40000; // ~80% of the real 50,000/day Workspace ceiling, leaving headroom for jobs/manual use this counter doesn't see
+//
+// FIXED (25 Aug 2026, per direct request -- "why would you store anything in
+// properties, that isn't what it's for"): this used to be a NEW Script
+// Property per Pacific day (GMAIL_CALL_COUNT_<date>), and Script Properties
+// are never cleaned up automatically -- every day left one behind forever
+// (confirmed live: GMAIL_CALL_COUNT_2026-08-22 through -25 already sitting
+// there). Rewritten to the same fixed-key-plus-stored-date pattern
+// lead_followup_sequences.gs's FOLLOWUP_DRAFTS_CREATED_DATE/_COUNT already
+// gets right: exactly 2 keys, ever, the count self-resets when the stored
+// date goes stale. Deliberately NOT moved to a Sheet -- this gets called once
+// per THREAD in the hot loop (unlike the ops-alert log, which is rare), and
+// adding a Sheet read/write there would just trade one quota problem for
+// another. Old per-date property keys are left in place for now; run
+// cleanupLegacyDateSuffixedProperties() manually if you want them gone
+// (they're inert, just clutter).
+const GMAIL_CALL_COUNT_DATE_PROPERTY_KEY = 'GMAIL_CALL_COUNT_DATE_PACIFIC';
+const GMAIL_CALL_COUNT_PROPERTY_KEY = 'GMAIL_CALL_COUNT';
+const GMAIL_CALL_LAST_ALERT_TIER_PROPERTY_KEY = 'GMAIL_CALL_LAST_ALERT_TIER';
+
+// CHANGED (25 Aug 2026, per direct request -- "is the gmail quota 20,000?"):
+// this project's earlier assumption was 50,000/day, the published rate for
+// a paid Google Workspace account's Email Read/Write quota. 20,000 is the
+// figure I recall for the Consumer tier instead -- I have no way to verify
+// which applies to this actual account from this session (no live web
+// access, no Admin Console access). Using the SMALLER number on purpose:
+// alerting too early against a limit that's actually higher costs nothing;
+// alerting too late against one that's actually lower is exactly how
+// yesterday's outage happened. CONFIRM FOR CERTAIN via Google Cloud
+// Console's Quotas page for this script's project, or the Workspace Admin
+// Console, and update this one constant if it's wrong.
+const GMAIL_CALL_REAL_LIMIT_ESTIMATE = 20000;
+
+// ADDED (25 Aug 2026, per direct request -- "send an email every 20% to
+// Kris to alert about the quota"): one ops alert per 20% threshold crossed
+// today, not just a single all-or-nothing cap. Reaching 100% still
+// proactively halts everything via markGmailQuotaExhausted(), same as the
+// old single soft-cap did -- the 20/40/60/80% tiers are early warnings,
+// not stops.
+const GMAIL_CALL_ALERT_THRESHOLDS_PCT = [20, 40, 60, 80, 100];
 
 function recordGmailQuotaUsage_(count) {
   const props = PropertiesService.getScriptProperties();
-  const key = GMAIL_CALL_COUNT_PROPERTY_PREFIX + todayPacificDateString();
-  const current = Number(props.getProperty(key) || 0);
+  const today = todayPacificDateString();
+  const isFreshDay = props.getProperty(GMAIL_CALL_COUNT_DATE_PROPERTY_KEY) !== today;
+  const current = isFreshDay ? 0 : Number(props.getProperty(GMAIL_CALL_COUNT_PROPERTY_KEY) || 0);
   const updated = current + (count || 1);
-  props.setProperty(key, String(updated));
-  if (updated >= GMAIL_CALL_SOFT_CAP && current < GMAIL_CALL_SOFT_CAP) {
-    Logger.log('SELF-IMPOSED GMAIL QUOTA SOFT CAP (' + GMAIL_CALL_SOFT_CAP + ') reached for ' + todayPacificDateString() + ' -- marking exhausted proactively, before Google\'s real limit throws.');
-    markGmailQuotaExhausted();
-    sendOpsAlert(
-      'Gmail quota soft cap reached (self-tracked)',
-      'Today\'s self-tracked Gmail operation count crossed ' + GMAIL_CALL_SOFT_CAP + ' (our own conservative estimate, not an exact Google count). All Gmail-touching triggers will now skip themselves for the rest of today, same as if Google had thrown the real quota error -- this is meant to happen BEFORE that, not after.'
-    );
+  props.setProperty(GMAIL_CALL_COUNT_DATE_PROPERTY_KEY, today);
+  props.setProperty(GMAIL_CALL_COUNT_PROPERTY_KEY, String(updated));
+
+  const lastAlertedTier = isFreshDay ? 0 : Number(props.getProperty(GMAIL_CALL_LAST_ALERT_TIER_PROPERTY_KEY) || 0);
+  const pct = (updated / GMAIL_CALL_REAL_LIMIT_ESTIMATE) * 100;
+  const crossedTiers = GMAIL_CALL_ALERT_THRESHOLDS_PCT.filter(t => t > lastAlertedTier && pct >= t);
+
+  if (crossedTiers.length > 0) {
+    const newTier = crossedTiers[crossedTiers.length - 1];
+    props.setProperty(GMAIL_CALL_LAST_ALERT_TIER_PROPERTY_KEY, String(newTier));
+
+    if (newTier >= 100) {
+      Logger.log('SELF-IMPOSED GMAIL QUOTA LIMIT (100% of ' + GMAIL_CALL_REAL_LIMIT_ESTIMATE + ') reached for ' + today + ' -- marking exhausted proactively, before Google\'s real limit throws.');
+      markGmailQuotaExhausted();
+      sendOpsAlert(
+        'Gmail quota at 100% (self-tracked) -- stopping for today',
+        'Today\'s self-tracked Gmail operation count (' + updated + ') reached the full estimated daily limit (' + GMAIL_CALL_REAL_LIMIT_ESTIMATE + ', our own conservative estimate, not an exact Google count). All Gmail-touching triggers will now skip themselves for the rest of today, same as if Google had thrown the real quota error -- this is meant to happen BEFORE that, not after.'
+      );
+    } else {
+      sendOpsAlert(
+        'Gmail quota at ' + newTier + '% (self-tracked)',
+        'Today\'s self-tracked Gmail operation count is ' + updated + ' of an estimated ' + GMAIL_CALL_REAL_LIMIT_ESTIMATE + '/day (~' + Math.round(pct) + '%). This is our own conservative estimate, not an exact Google count. Nothing has stopped yet -- this is a heads-up so a busy day doesn\'t go from fine to fully exhausted with no warning in between.'
+      );
+    }
   }
+
   return updated;
 }
 
 function getGmailQuotaUsageToday_() {
   const props = PropertiesService.getScriptProperties();
-  return Number(props.getProperty(GMAIL_CALL_COUNT_PROPERTY_PREFIX + todayPacificDateString()) || 0);
+  if (props.getProperty(GMAIL_CALL_COUNT_DATE_PROPERTY_KEY) !== todayPacificDateString()) return 0;
+  return Number(props.getProperty(GMAIL_CALL_COUNT_PROPERTY_KEY) || 0);
 }
 
 function isGmailQuotaExhausted() {
@@ -144,8 +200,10 @@ function clearGmailQuotaExhaustedFlag() {
   // Also reset today's self-tracked counter -- otherwise the very next
   // recordGmailQuotaUsage_() call just re-trips the soft cap immediately and
   // undoes this manual clear.
-  props.deleteProperty(GMAIL_CALL_COUNT_PROPERTY_PREFIX + todayPacificDateString());
-  Logger.log('Quota-exhausted flag cleared manually (and today\'s self-tracked call counter reset).');
+  props.deleteProperty(GMAIL_CALL_COUNT_DATE_PROPERTY_KEY);
+  props.deleteProperty(GMAIL_CALL_COUNT_PROPERTY_KEY);
+  props.deleteProperty(GMAIL_CALL_LAST_ALERT_TIER_PROPERTY_KEY);
+  Logger.log('Quota-exhausted flag cleared manually (and today\'s self-tracked call counter + alert tier reset).');
 }
 
 // ---------- LLM PROVIDER FALLBACK CHAIN (17 Aug 2026) ----------
@@ -625,17 +683,21 @@ function sendOpsAlert(subject, body) {
 }
 
 // ONE-OFF (25 Aug 2026): run this once from the editor to remove the stray
-// ALERT_SENT_* properties that accumulated under the old design, above.
-// Safe to run any time -- it only deletes keys with that exact prefix.
-function cleanupLegacyAlertSentProperties() {
+// per-day properties that accumulated under the old designs above --
+// ALERT_SENT_<subject>_<date> and GMAIL_CALL_COUNT_<date>. Safe to run any
+// time: only deletes keys matching those exact legacy shapes, and is
+// careful not to touch the new fixed keys (GMAIL_CALL_COUNT,
+// GMAIL_CALL_COUNT_DATE_PACIFIC) that replaced the second one.
+function cleanupLegacyDateSuffixedProperties() {
   const props = PropertiesService.getScriptProperties();
   const all = props.getProperties();
+  const legacyGmailCountPattern = /^GMAIL_CALL_COUNT_\d{4}-\d{2}-\d{2}$/;
   let removed = 0;
   Object.keys(all).forEach(key => {
-    if (key.indexOf('ALERT_SENT_') === 0) {
+    if (key.indexOf('ALERT_SENT_') === 0 || legacyGmailCountPattern.test(key)) {
       props.deleteProperty(key);
       removed++;
     }
   });
-  Logger.log('cleanupLegacyAlertSentProperties -- removed ' + removed + ' stray ALERT_SENT_* propert' + (removed === 1 ? 'y' : 'ies') + '.');
+  Logger.log('cleanupLegacyDateSuffixedProperties -- removed ' + removed + ' stray propert' + (removed === 1 ? 'y' : 'ies') + '.');
 }
