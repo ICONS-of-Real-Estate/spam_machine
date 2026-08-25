@@ -997,10 +997,11 @@ function runReplyDrafterInner() {
 
     const context = buildThreadContext(messages);
     const sopMode = assignSopMode(threadId);
+    const likelyBlankOrSignatureOnly = looksLikeBlankOrSignatureOnly_(replyBody);
     // systemPrompt is passed through UNCHANGED (pure SOP text) so it stays
     // byte-identical across every call and both providers can actually cache
     // it -- the mode override rides in the user prompt now.
-    const result = classifyAndDraft(systemPrompt, subject, context, leadEmail, state, matchedShow, buildSopModeOverride(sopMode));
+    const result = classifyAndDraft(systemPrompt, subject, context, leadEmail, state, matchedShow, buildSopModeOverride(sopMode), likelyBlankOrSignatureOnly);
 
     if (!result) {
       skipCache[threadId] = { reason: 'classification/draft failed', lastCheckedAt: new Date() };
@@ -1734,6 +1735,50 @@ function looksLikeDeclineCheaply_(replyBody, subject) {
   }
 }
 
+// ADDED (25 Aug 2026, per direct request): a pure heuristic, no LLM call --
+// unlike looksLikeDeclineCheaply_ above, this can never save a call
+// (blank_or_signature_only always gets a real drafted reply per the SOP,
+// same as no_decline does now), so there's nothing to gate. What this
+// targets instead is a real, documented correctness bug: the SOP's own
+// change log (20 Aug 2026) records the model drafting a genuinely blank
+// reply (Katie -- a signature block with no actual message) as if it
+// expressed interest, fabricating enthusiasm the prospect never showed.
+// Detection was left entirely to the model's own read of the thread; this
+// hands it an explicit, deterministic signal instead, folded into the user
+// prompt as a hint the model can still disagree with -- never a skip,
+// never a decision on its own, just a second opinion from a cheaper, more
+// literal check than "did the model correctly read a wall of signature
+// text as nothing."
+//
+// DELIBERATELY NARROW: only fires on text that's empty, or short AND has
+// none of a sentence's normal markers (no question mark, no ! or ., no
+// common reply words). A real terse reply ("Yes!", "No thanks.", "Sounds
+// good") reliably has at least one of those; a name/title/phone-number
+// signature block reliably has none. Erring toward under-firing here is
+// the safe direction -- a missed hint just means the model judges it
+// alone, same as it always has; a wrong hint on a genuine reply risks
+// steering the model toward Katie's exact mistake, just aimed the other
+// way (treating a real reply as if it were nothing).
+function looksLikeBlankOrSignatureOnly_(replyBody) {
+  const text = String(replyBody || '').trim();
+  if (!text) return true; // nothing at all -- unambiguous
+
+  if (text.length > 60) return false; // long enough that it's not a bare signature line
+  if (/[?!.]/.test(text)) return false; // has real sentence-ending punctuation
+
+  const commonReplyWords = /\b(yes|yeah|yep|sure|no|nope|not|thanks|thank|sounds|interested|maybe|busy|sorry|ok|okay|please|remove|stop|call|text|works|later|soon|available|schedule)\b/i;
+  if (commonReplyWords.test(text)) return false; // reads like an actual response, not just a signature
+
+  // Caught in testing: a real question missing its "?" ("What is this
+  // about", "Is this a scam") has none of the signals above but is
+  // obviously not a signature block. A leading question word is a real
+  // sentence even without terminal punctuation -- casual replies routinely
+  // drop it.
+  if (/^(who|what|when|where|why|how|is|are|do|does|did|can|could|would|will)\b/i.test(text)) return false;
+
+  return true;
+}
+
 // SHARED (25 Aug 2026, real incident, live): both classifyAndDraft() below
 // and classifyAndDraftFollowUp() in lead_followup_sequences.gs ask the model
 // for an object shaped {...short fields..., draft_body: "..."} with
@@ -1786,12 +1831,24 @@ function recoverTruncatedDraftJson_(cleanedText) {
   return result;
 }
 
-function classifyAndDraft(systemPrompt, subject, threadContext, prospectEmail, state, matchedShow, sopModeOverride) {
+function classifyAndDraft(systemPrompt, subject, threadContext, prospectEmail, state, matchedShow, sopModeOverride, likelyBlankOrSignatureOnly) {
   const candidateVariation = peekNoDeclineVariation();
 
   const matchedShowBlock = matchedShow
     ? `MATCHED SHOW FOR THIS PROSPECT'S STATE (${state}): "${matchedShow.showName}" hosted by ${matchedShow.host} -- ${matchedShow.link}\nIf this reply is a no_decline, close with EXACTLY this text (verbatim, only substituting {{name}}, {{show}}, {{state}} with the real values -- do not rephrase, shorten, or improvise a different version): "${candidateVariation.text}" -- then add the link on its own, formatted per the SOP's link rules.`
     : `MATCHED SHOW FOR THIS PROSPECT'S STATE: none available${state ? ' (state detected as ' + state + ' but no confirmed show yet in the Directory)' : ' (could not determine state from subject line)'}.\nIf this reply is a no_decline, fall back to the generic guest-network invite per the SOP (the rotation above only applies when a real show match exists).`;
+
+  // ADDED (25 Aug 2026, per direct request): a deterministic second opinion
+  // on blank_or_signature_only, folded in as a hint the model can disagree
+  // with -- never a skip, never a determination on its own. Real, documented
+  // failure this targets (SOP change log, 20 Aug 2026): the model drafted a
+  // genuinely blank reply (Katie -- a signature block, no actual message) as
+  // if it expressed interest, fabricating enthusiasm the prospect never
+  // showed. See looksLikeBlankOrSignatureOnly_() for the (deliberately
+  // narrow) heuristic and why a wrong hint here is safe either direction.
+  const blankHintBlock = likelyBlankOrSignatureOnly
+    ? '\nAUTOMATED HINT (not a determination -- verify against the actual thread content above and use your own judgment): the prospect\'s fresh reply text looks like it may be empty or just a signature block, with no real message. If that\'s accurate, this is blank_or_signature_only per the SOP -- do not treat it as interest.\n'
+    : '';
 
   // FIX (18 Aug 2026, real incident): the prompt gave the model the thread's
   // own quoted dates but never today's actual date, so it had no way to know
@@ -1811,7 +1868,7 @@ EMAIL SUBJECT: ${subject}
 PROSPECT EMAIL: ${prospectEmail}
 
 ${matchedShowBlock}
-
+${blankHintBlock}
 THREAD (oldest to newest):
 ${threadContext}
 
