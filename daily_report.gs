@@ -50,6 +50,12 @@ function runDailyReport() {
 
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  // ADDED (25 Aug 2026, per direct request): TODAY only covers midnight to
+  // whenever this runs (~7 AM), which is barely any of the day -- the
+  // question "how many emails yesterday, what did it cost" needs an actual
+  // bounded [yesterdayStart, todayStart) range, not another "since X, still
+  // counting" bucket like TODAY/7d/30d/all-time below.
+  const yesterdayStart = new Date(todayStart.getTime() - 24 * 60 * 60 * 1000);
   const sevenDaysAgo = new Date(todayStart.getTime() - 7 * 24 * 60 * 60 * 1000);
   const thirtyDaysAgo = new Date(todayStart.getTime() - 30 * 24 * 60 * 60 * 1000);
 
@@ -68,6 +74,10 @@ function runDailyReport() {
     return rows.filter(r => r[0] instanceof Date && r[0] >= sinceDate);
   }
 
+  function rowsInRange(rows, startDate, untilDate) {
+    return rows.filter(r => r[0] instanceof Date && r[0] >= startDate && r[0] < untilDate);
+  }
+
   function categoryBreakdown(rows) {
     const counts = {};
     rows.forEach(r => {
@@ -81,6 +91,7 @@ function runDailyReport() {
     return rows.filter(r => r[4] === 'yes_penciled' || r[5] === true).length;
   }
 
+  const draftsYesterday = rowsInRange(draftsData, yesterdayStart, todayStart);
   const draftsToday = rowsSince(draftsData, todayStart);
   const drafts7d = rowsSince(draftsData, sevenDaysAgo);
   const drafts30d = rowsSince(draftsData, thirtyDaysAgo);
@@ -88,12 +99,15 @@ function runDailyReport() {
 
   const learningData = learningTab.getDataRange().getValues().slice(1);
 
-  function editStats(rows, sinceDate) {
-    const inRange = rows.filter(r => r[0] instanceof Date && r[0] >= sinceDate);
+  function editStats(rows, sinceDate, untilDate) {
+    const inRange = untilDate
+      ? rows.filter(r => r[0] instanceof Date && r[0] >= sinceDate && r[0] < untilDate)
+      : rows.filter(r => r[0] instanceof Date && r[0] >= sinceDate);
     const edited = inRange.filter(r => r[6] === true).length;
     return { total: inRange.length, edited: edited, sentAsIs: inRange.length - edited };
   }
 
+  const editYesterday = editStats(learningData, yesterdayStart, todayStart);
   const editToday = editStats(learningData, todayStart);
   const edit7d = editStats(learningData, sevenDaysAgo);
   const edit30d = editStats(learningData, thirtyDaysAgo);
@@ -141,6 +155,7 @@ function runDailyReport() {
     'This email was written by Claude.\n\n' +
     'DAILY REPORT -- ' + now.toDateString() + '\n\n' +
     'New leads received today (raw inbound count): ' + leadsReceivedToday + '\n\n' +
+    formatSection('YESTERDAY', draftsYesterday, editYesterday) + '\n\n' +
     formatSection('TODAY', draftsToday, editToday) + '\n\n' +
     formatSection('LAST 7 DAYS', drafts7d, edit7d) + '\n\n' +
     formatSection('LAST 30 DAYS', drafts30d, edit30d) + '\n\n' +
@@ -155,6 +170,7 @@ function runDailyReport() {
     'Gmail quota usage today (self-tracked, approximate): ' + getGmailQuotaUsageToday_() + ' / ' + GMAIL_CALL_SOFT_CAP + ' soft cap\n\n' +
     'KIMI vs ANTHROPIC SPLIT TEST (price and quality; ' +
       (LLM_COST_TEST_MODE ? 'test ACTIVE -- providers alternate 50/50 by call' : 'test OFF -- Kimi first always') + ')\n' +
+    buildSplitTestSection_(ss, draftsData, learningData, rowsSince, yesterdayStart, 'YESTERDAY', todayStart) + '\n\n' +
     buildSplitTestSection_(ss, draftsData, learningData, rowsSince, todayStart, 'TODAY') + '\n\n' +
     buildSplitTestSection_(ss, draftsData, learningData, rowsSince, sevenDaysAgo, 'LAST 7 DAYS') + '\n\n' +
     'Reading this: cost-per-draft is the price answer. Edit rate and % surviving\n' +
@@ -169,6 +185,7 @@ function runDailyReport() {
       '<h2 style="margin:0 0 4px 0; font-size:17px;">Daily Report &mdash; ' + escapeHtml(now.toDateString()) + '</h2>' +
       '<p><b>New leads received today</b> (raw inbound count): ' + leadsReceivedToday + '</p>' +
       '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
+      formatSectionHtml('YESTERDAY', draftsYesterday, editYesterday) +
       formatSectionHtml('TODAY', draftsToday, editToday) +
       formatSectionHtml('LAST 7 DAYS', drafts7d, edit7d) +
       formatSectionHtml('LAST 30 DAYS', drafts30d, edit30d) +
@@ -181,6 +198,7 @@ function runDailyReport() {
       '<h2 style="margin:0 0 8px 0; font-size:17px;">Kimi vs Anthropic split test</h2>' +
       '<p style="color:#555;">(price and quality; ' +
         (LLM_COST_TEST_MODE ? 'test ACTIVE -- providers alternate 50/50 by call' : 'test OFF -- Kimi first always') + ')</p>' +
+      buildSplitTestSectionHtml_(ss, draftsData, learningData, rowsSince, yesterdayStart, 'YESTERDAY', todayStart) +
       buildSplitTestSectionHtml_(ss, draftsData, learningData, rowsSince, todayStart, 'TODAY') +
       buildSplitTestSectionHtml_(ss, draftsData, learningData, rowsSince, sevenDaysAgo, 'LAST 7 DAYS') +
       '<p style="color:#555;">Reading this: cost-per-draft is the price answer. Edit rate and % surviving are ' +
@@ -233,15 +251,22 @@ function runDailyReport() {
 // the whole point of the original 24 Aug extraction was to avoid two copies
 // of this arithmetic drifting apart, and a naive HTML copy-paste would have
 // broken that same guarantee again.
-function computeSplitTestStats_(ss, draftsData, learningData, rowsSince, sinceDate) {
+// untilDate is optional -- omit it for the existing "since X, still
+// counting" buckets (TODAY/7d/30d/all-time); pass it for a bounded
+// [sinceDate, untilDate) range like YESTERDAY.
+function computeSplitTestStats_(ss, draftsData, learningData, rowsSince, sinceDate, untilDate) {
   const costTab = ss.getSheetByName('LLM Cost Log');
   if (!costTab) return null;
 
-  const costRows = costTab.getDataRange().getValues().slice(1)
-    .filter(r => r[0] instanceof Date && r[0] >= sinceDate);
+  const inRange = untilDate
+    ? (r => r[0] instanceof Date && r[0] >= sinceDate && r[0] < untilDate)
+    : (r => r[0] instanceof Date && r[0] >= sinceDate);
 
-  const learningRows = learningData.filter(r => r[0] instanceof Date && r[0] >= sinceDate);
-  const draftRows = rowsSince(draftsData, sinceDate);
+  const costRows = costTab.getDataRange().getValues().slice(1).filter(inRange);
+  const learningRows = learningData.filter(inRange);
+  const draftRows = untilDate
+    ? draftsData.filter(inRange)
+    : rowsSince(draftsData, sinceDate);
 
   return ['kimi', 'anthropic'].map(provider => {
     const calls = costRows.filter(r => String(r[2] || '').toLowerCase() === provider);
@@ -298,8 +323,8 @@ function computeSplitTestStats_(ss, draftsData, learningData, rowsSince, sinceDa
   });
 }
 
-function buildSplitTestSection_(ss, draftsData, learningData, rowsSince, sinceDate, label) {
-  const stats = computeSplitTestStats_(ss, draftsData, learningData, rowsSince, sinceDate);
+function buildSplitTestSection_(ss, draftsData, learningData, rowsSince, sinceDate, label, untilDate) {
+  const stats = computeSplitTestStats_(ss, draftsData, learningData, rowsSince, sinceDate, untilDate);
   if (!stats) return label + ':\n  (no "LLM Cost Log" tab yet -- nothing recorded)';
 
   const lines = stats.map(s => (
@@ -327,8 +352,8 @@ function buildSplitTestSection_(ss, draftsData, learningData, rowsSince, sinceDa
 // bold labels + a bordered card per provider instead of an indented text
 // block. Used only by runDailyReport's htmlBody; logSplitTestSummary() still
 // uses the plain-text version above since Logger.log has no HTML rendering.
-function buildSplitTestSectionHtml_(ss, draftsData, learningData, rowsSince, sinceDate, label) {
-  const stats = computeSplitTestStats_(ss, draftsData, learningData, rowsSince, sinceDate);
+function buildSplitTestSectionHtml_(ss, draftsData, learningData, rowsSince, sinceDate, label, untilDate) {
+  const stats = computeSplitTestStats_(ss, draftsData, learningData, rowsSince, sinceDate, untilDate);
   if (!stats) return '<h4 style="margin:18px 0 8px 0; font-size:14px;">' + escapeHtml(label) + '</h4><p>(no "LLM Cost Log" tab yet -- nothing recorded)</p>';
 
   const cards = stats.map(s => (
@@ -390,6 +415,10 @@ function logSplitTestSummary() {
 
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  // ADDED (25 Aug 2026, per direct request): a real, exact YESTERDAY number
+  // for "how many emails sent, how much did it cost" on demand, instead of
+  // only getting that from the 7 AM email or an imprecise manual estimate.
+  const yesterdayStart = new Date(todayStart.getTime() - 24 * 60 * 60 * 1000);
   const lastHour = new Date(now.getTime() - 60 * 60 * 1000);
 
   Logger.log('=== KIMI vs ANTHROPIC -- ' + (LLM_COST_TEST_MODE
@@ -397,5 +426,6 @@ function logSplitTestSummary() {
     : 'test OFF (Kimi first always)') + ' ===');
   Logger.log(buildSplitTestSection_(ss, draftsData, learningData, rowsSince, lastHour, 'LAST HOUR'));
   Logger.log(buildSplitTestSection_(ss, draftsData, learningData, rowsSince, todayStart, 'TODAY'));
+  Logger.log(buildSplitTestSection_(ss, draftsData, learningData, rowsSince, yesterdayStart, 'YESTERDAY', todayStart));
   Logger.log('Quality figures stay empty until runLearningLoop() has compared drafts against what was actually sent. That trigger is WEEKLY (Saturday) -- run runLearningLoop() by hand once Joana has sent a few of these drafts if you want the quality numbers before then.');
 }
