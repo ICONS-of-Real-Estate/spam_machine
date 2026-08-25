@@ -110,18 +110,27 @@ const GMAIL_CALL_COUNT_DATE_PROPERTY_KEY = 'GMAIL_CALL_COUNT_DATE_PACIFIC';
 const GMAIL_CALL_COUNT_PROPERTY_KEY = 'GMAIL_CALL_COUNT';
 const GMAIL_CALL_LAST_ALERT_TIER_PROPERTY_KEY = 'GMAIL_CALL_LAST_ALERT_TIER';
 
-// CHANGED (25 Aug 2026, per direct request -- "is the gmail quota 20,000?"):
-// this project's earlier assumption was 50,000/day, the published rate for
-// a paid Google Workspace account's Email Read/Write quota. 20,000 is the
-// figure I recall for the Consumer tier instead -- I have no way to verify
-// which applies to this actual account from this session (no live web
-// access, no Admin Console access). Using the SMALLER number on purpose:
-// alerting too early against a limit that's actually higher costs nothing;
-// alerting too late against one that's actually lower is exactly how
-// yesterday's outage happened. CONFIRM FOR CERTAIN via Google Cloud
-// Console's Quotas page for this script's project, or the Workspace Admin
-// Console, and update this one constant if it's wrong.
-const GMAIL_CALL_REAL_LIMIT_ESTIMATE = 20000;
+// CONFIRMED (25 Aug 2026, Kris found the real published figure): a paid
+// Google Workspace account's "Email Read/Write Operations" quota (GmailApp
+// search/fetch/label/draft calls -- exactly what this project does) is
+// 50,000/day. Briefly dropped to 20,000 pending confirmation; restored now
+// that it's actually verified, not guessed.
+//
+// ONE REAL NUANCE from what Kris found, worth knowing even though it
+// doesn't change this code: Apps Script's own services (this one included)
+// run on a ROLLING 24-hour window -- the limit starts restoring 24 hours
+// after the FIRST request of the high-volume cycle that exhausted it, NOT
+// a fixed midnight-Pacific reset. Separate Google Cloud Workspace API
+// counters (different services) DO hard-reset at midnight Pacific. This
+// project's OWN circuit breaker (isGmailQuotaExhausted/
+// markGmailQuotaExhausted, above) is unaffected either way -- it's a
+// self-imposed flag on OUR side that always clears at Pacific midnight by
+// design, regardless of Google's actual mechanics. Worst case if Google's
+// real quota hasn't actually recovered yet when our flag clears: the next
+// attempt just throws the same quota error again and re-marks exhausted
+// for another day -- self-correcting, not a bug, just means recovery could
+// occasionally take a bit longer in wall-clock time than our flag implies.
+const GMAIL_CALL_REAL_LIMIT_ESTIMATE = 50000;
 
 // ADDED (25 Aug 2026, per direct request -- "send an email every 20% to
 // Kris to alert about the quota"): one ops alert per 20% threshold crossed
