@@ -141,6 +141,28 @@ const CONFIG = {
   // Marsha, Vernon, and more -- same substitution, every single time).
   BOOKING_LINK_URL: 'https://link.iconsofrealestate.com/widget/bookings/joana-podcast-production',
 
+  // ADDED (25 Aug 2026, per direct request -- Sean's own links given by Kris):
+  // real incident flagged in the 24 Aug "Spam Replies Feedback" doc review --
+  // Joana's real replies pick the booking link for whoever is actually taking
+  // the call (usually Sean Church, Network Manager) when a lead gets handed
+  // off, but the AI-drafted version always defaulted to Joana's own link
+  // regardless. Substituted in place of BOOKING_LINK_URL specifically when
+  // result.needsTeammateRouting is true -- see the draft-assembly block in
+  // runReplyDrafterInner(). needsTeammateRouting's own definition (see
+  // classifyAndDraft()'s prompt, below) is consistently described everywhere
+  // in this codebase (Code.gs, daily_report.gs, stalled_bookings_audit.gs) as
+  // "a qualification call" -- never as a sales call -- so this is the
+  // Qualification Call link specifically, not the Sales Call one.
+  //
+  // Sean's SALES Call link (https://link.iconsofrealestate.com/widget/bookings/sean-icons-podcast-production)
+  // is deliberately NOT wired in anywhere: nothing this project drafts is
+  // positioned after a qualification call has already happened (that
+  // conversation is Sean's own, off-script, off-Gmail), so there is no point
+  // in the current flow where inserting it would be correct. If that
+  // changes -- e.g. a future cadence follows up AFTER a qualification call --
+  // revisit this rather than guessing it into a live draft now.
+  SEAN_QUALIFICATION_CALL_URL: 'https://link.iconsofrealestate.com/widget/bookings/sean-podcast-production',
+
   // Paste the ID from the Sheet's URL: https://docs.google.com/spreadsheets/d/THIS_PART/edit
   SPREADSHEET_ID: '1uDrt3WAPZR90iaPgM6wZcfN9rOXzkkuFHJ6tg_XMHHs',
 
@@ -971,14 +993,21 @@ function runReplyDrafterInner() {
       const priorityNote = buildPriorityCheckNote(result);
       const sopModeNote = buildSopModeNote(sopMode);
       const llmProviderNote = buildLlmProviderNote(result.llmProvider);
-      const aiReplyPlain = priorityNote + sopModeNote + llmProviderNote + sanitizeEmojiForGmail(markdownLinksToPlain(result.draftBody));
+      // ADDED (25 Aug 2026, per direct request): a needsTeammateRouting draft
+      // is, by definition, handing this lead to a real qualification call --
+      // point the (BOOKING_LINK) token at Sean's Qualification Call link
+      // instead of Joana's own. Still just a default: nothing here is ever
+      // auto-sent, so if it should really be Bens, Joana swaps it before
+      // sending, same correction she was already making by hand.
+      const bookingLinkForThisDraft = result.needsTeammateRouting ? CONFIG.SEAN_QUALIFICATION_CALL_URL : null;
+      const aiReplyPlain = priorityNote + sopModeNote + llmProviderNote + sanitizeEmojiForGmail(markdownLinksToPlain(result.draftBody, bookingLinkForThisDraft));
       const historyPlain = stripForwardHeaderKeepHistory(lastMsg.getPlainBody());
       const fullPlainBody = aiReplyPlain + '\n\n' + historyPlain;
 
       const priorityNoteHtml = escapeHtml(priorityNote).replace(/\n/g, '<br>');
       const sopModeNoteHtml = escapeHtml(sopModeNote).replace(/\n/g, '<br>');
       const llmProviderNoteHtml = escapeHtml(llmProviderNote).replace(/\n/g, '<br>');
-      const aiReplyHtml = priorityNoteHtml + sopModeNoteHtml + llmProviderNoteHtml + emojiToHtmlEntities(sanitizeEmojiForGmail(markdownLinksToHtml(result.draftBody)));
+      const aiReplyHtml = priorityNoteHtml + sopModeNoteHtml + llmProviderNoteHtml + emojiToHtmlEntities(sanitizeEmojiForGmail(markdownLinksToHtml(result.draftBody, bookingLinkForThisDraft)));
       const historyHtml = emojiToHtmlEntities(escapeHtml(historyPlain).replace(/\n/g, '<br>'));
       const fullHtmlBody = aiReplyHtml + '<br><br>' + historyHtml;
 
@@ -1460,21 +1489,27 @@ function isCcdToNetworkGroup(message) {
   });
 }
 
-function substituteLinkTokens(text) {
+// UPDATED (25 Aug 2026): bookingLinkOverrideUrl is optional and defaults to
+// CONFIG.BOOKING_LINK_URL (Joana's) exactly as before -- every existing
+// caller (both follow-up cadences in lead_followup_sequences.gs, neither of
+// which has a teammate-handoff concept) keeps working unchanged. Only the
+// main reply drafter passes an override, and only for needsTeammateRouting
+// drafts -- see runReplyDrafterInner().
+function substituteLinkTokens(text, bookingLinkOverrideUrl) {
   return text
     .replace(/\(HUB_LINK\)/g, '(' + CONFIG.HUB_LINK_URL + ')')
-    .replace(/\(BOOKING_LINK\)/g, '(' + CONFIG.BOOKING_LINK_URL + ')');
+    .replace(/\(BOOKING_LINK\)/g, '(' + (bookingLinkOverrideUrl || CONFIG.BOOKING_LINK_URL) + ')');
 }
 
-function markdownLinksToHtml(text) {
-  const withTokensResolved = substituteLinkTokens(text);
+function markdownLinksToHtml(text, bookingLinkOverrideUrl) {
+  const withTokensResolved = substituteLinkTokens(text, bookingLinkOverrideUrl);
   const withBold = withTokensResolved.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   const withLinks = withBold.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
   return withLinks.replace(/\n/g, '<br>');
 }
 
-function markdownLinksToPlain(text) {
-  const withTokensResolved = substituteLinkTokens(text);
+function markdownLinksToPlain(text, bookingLinkOverrideUrl) {
+  const withTokensResolved = substituteLinkTokens(text, bookingLinkOverrideUrl);
   const withLinks = withTokensResolved.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)');
   return withLinks.replace(/\*\*([^*]+)\*\*/g, '$1');
 }
