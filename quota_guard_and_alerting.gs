@@ -560,15 +560,18 @@ function sendOpsAlert(subject, body) {
   }
 
   try {
-    // CHANGED (23 Aug 2026, per direct request -- "all emails need to be
-    // CC kris & Tomas"): this reverses an earlier same-day change that had
-    // dropped Tomas from cc on the reasoning that ops alerts are
-    // infra/code issues only Kris can act on. That reasoning still holds,
-    // but the later, more explicit instruction was a blanket "all emails"
-    // rule, so Tomas is back on cc here too.
+    // CHANGED (25 Aug 2026, per direct request after the "Gmail Advanced
+    // Service missing" alert -- "This only needs to get sent to Kris,
+    // others don't know how to fix"): reverses the 23 Aug change that had
+    // added Tomas to cc here under a blanket "all emails CC Kris & Tomas"
+    // instruction. sendOpsAlert() specifically carries infra/code failures
+    // (wrong-account triggers, missing Advanced Services, quota exhaustion)
+    // that only Kris can act on -- CCing Tomas just adds noise he can't do
+    // anything with. This does NOT change cc on the other outbound emails
+    // (daily_report.gs, missed_leads_audit.gs, stalled_bookings_audit.gs,
+    // learning_loop.gs) -- those stay CC'd to both per the 23 Aug policy.
     MailApp.sendEmail({
       to: 'kris@iconsofrealestate.com',
-      cc: 'tomas@iconsofrealestate.com',
       subject: '[Icons Ops Alert] ' + subject,
       body: body + '\n\n(This alert was sent automatically by the Apps Script ops monitoring. Written with Claude\'s help.)'
     });

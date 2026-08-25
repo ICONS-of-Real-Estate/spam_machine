@@ -602,21 +602,31 @@ function assertRunningAsJoana(callerName) {
 // ---------- GMAIL ADVANCED SERVICE GUARD (18 Aug 2026, real incident) ----------
 // createThreadedDraft_() in Code.gs requires the Gmail Advanced Service
 // (Services > + > Gmail API in the editor -- a manual, per-project setting
-// that a Git Pull silently undoes since appsscript.json in the repo doesn't
+// that a `clasp push` silently undoes if the manifest being pushed doesn't
 // declare it). Without this guard, a run with the service missing would
 // spend its whole runtime budget calling the LLM for every candidate thread
 // and only fail at the final draft-creation step each time -- 0 drafts
 // created, full API cost paid anyway, and no clear signal why. Checking
 // `typeof Gmail` once up front catches this before any of that spend.
+//
+// UPDATED (25 Aug 2026, recurrence): this repo's appsscript.json has
+// declared enabledAdvancedServices for Gmail since the 23 Aug fix -- a
+// `clasp push` from a checkout of current `main` will NOT wipe this. It
+// recurred today anyway because a `clasp push` was run from a local clone
+// on a stale branch that still had the pre-fix, empty-dependencies
+// appsscript.json. So the fix here is NOT "check the repo's manifest" --
+// it's already correct -- it's "make sure whatever gets clasp-pushed is an
+// up-to-date checkout of main."
 function assertGmailAdvancedServiceEnabled(callerName) {
   if (typeof Gmail !== 'undefined') return true;
 
   const message = callerName + ' aborted: the Gmail Advanced Service is not enabled on this project ' +
-    '("Gmail is not defined"). This gets silently wiped by Git Pull (appsscript.json in the repo has ' +
-    'an empty dependencies block, and pulling overwrites the live manifest) -- re-enable it manually: ' +
-    'Services (+ icon in the editor sidebar) > Gmail API > Add, then click into it and hit Save even if ' +
-    'it already shows as added, to force it to actually persist. No threads were scanned and no LLM ' +
-    'calls were made this run.';
+    '("Gmail is not defined"). This is usually caused by a `clasp push` from a stale/out-of-date local ' +
+    'checkout whose appsscript.json doesn\'t declare the Gmail Advanced Service -- pushing from a ' +
+    'checkout of current main (which does declare it) should fix it; if it doesn\'t take immediately, ' +
+    're-enable it manually: Services (+ icon in the editor sidebar) > Gmail API > Add, then click into ' +
+    'it and hit Save even if it already shows as added, to force it to actually persist. No threads ' +
+    'were scanned and no LLM calls were made this run.';
   Logger.log('ABORT (' + callerName + '): ' + message);
   sendOpsAlert('Gmail Advanced Service missing -- run aborted: ' + callerName, message);
   throw new Error(message);
