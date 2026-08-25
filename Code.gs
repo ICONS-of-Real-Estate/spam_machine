@@ -804,6 +804,16 @@ function runReplyDrafterInner() {
   // comment): fetch the existing Drafts folder ONCE for this whole run,
   // instead of once per candidate thread inside the loop below.
   const existingDrafts = GmailApp.getDraftMessages();
+  // ADDED (25 Aug 2026, per direct request -- "should we log each call so we
+  // keep track"): the flat "+1 per thread" self-tracked counter (below, in
+  // the main loop) badly undercounted real Gmail API cost for exactly the
+  // bug just fixed above -- getDraftMessages() plus one .getTo() call per
+  // existing draft, which used to happen per THREAD, now happens once here.
+  // Recording its real weight (1 for the list fetch + 1 per draft it
+  // contains) keeps the self-tracked total closer to what Google actually
+  // sees, so the proactive 40,000 soft cap in quota_guard_and_alerting.gs
+  // has a real chance of tripping before Google's own wall does next time.
+  recordGmailQuotaUsage_(1 + existingDrafts.length);
 
   pagination:
   while (true) {
@@ -1074,6 +1084,12 @@ function runReplyDrafterInner() {
       // unthreaded message every time. See createThreadedDraft_() above for
       // the full history and why the base service can't do this correctly.
       createThreadedDraft_(thread, lastMsg, leadEmail, CONFIG.NETWORK_CC_ON_REPLY, cleanSubject, fullPlainBody, fullHtmlBody);
+      // ADDED (25 Aug 2026, per direct request -- weighted quota tracking):
+      // actual draft creation is several real Gmail Advanced Service calls
+      // (not the flat "1" already recorded per thread above) -- creating the
+      // draft itself, plus the label operations right after this block.
+      // Weighted at 5 as a conservative estimate, not an exact count.
+      recordGmailQuotaUsage_(5);
       var draftLink = 'https://mail.google.com/mail/u/0/#all/' + thread.getId();
       draftedThisRun.add(leadEmail.toLowerCase());
       draftsCreated++;
