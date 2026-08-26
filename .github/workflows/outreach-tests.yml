@@ -1,0 +1,34 @@
+name: outreach tests
+
+# Scoped to outreach/ only -- same reasoning as dashboard-tests.yml: the
+# rest of this repo is Apps Script with no test infra, and dashboard/ is
+# a separate app with its own workflow.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "outreach/**"
+      - ".github/workflows/outreach-tests.yml"
+  pull_request:
+    paths:
+      - "outreach/**"
+      - ".github/workflows/outreach-tests.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: outreach
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest tests/ -v

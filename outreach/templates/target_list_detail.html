@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}{{ target_list.client_name }} — {{ target_list.kind }} list{% endblock %}
+{% block content %}
+<p><a class="link" href="/clients/{{ target_list.client_id }}">&larr; {{ target_list.client_name }}</a></p>
+<h1>{{ target_list.kind|capitalize }} list: {{ target_list.category_or_avatar }}</h1>
+<p>{{ targets|length }} of {{ target_list.requested_size }} requested
+{% if target_list.source_mode == 'mock' %}<span class="badge mock">mock</span>{% endif %}</p>
+
+<div class="card">
+  <h2>Campaigns</h2>
+  {% if campaigns %}
+  <table>
+    <tr><th>Name</th><th>Status</th><th></th></tr>
+    {% for c in campaigns %}
+    <tr><td>{{ c.name }}</td><td>{{ c.status }}</td><td><a class="link" href="/campaigns/{{ c.id }}">View</a></td></tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p>No campaign yet for this list.</p>
+  {% endif %}
+  <form method="post" action="/target-lists/{{ target_list.id }}/campaigns">
+    <input type="text" name="name" placeholder="Campaign name" required>
+    <button type="submit">Create campaign</button>
+  </form>
+</div>
+
+<h2>Targets</h2>
+<table>
+  <tr><th>Name</th><th>Company</th><th>Email</th><th>Source</th><th>Notes</th></tr>
+  {% for t in targets %}
+  <tr>
+    <td>{{ t.name }}</td>
+    <td>{{ t.company }}</td>
+    <td>{{ t.email }}</td>
+    <td>{{ t.source }}</td>
+    <td style="max-width:300px;">{{ t.research_notes }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

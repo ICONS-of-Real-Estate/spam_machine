@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Clients — outreach engine{% endblock %}
+{% block content %}
+<h1>Clients</h1>
+<p>Each client is a podcast with a service area. From a client's page you
+can generate a sponsor or guest target list for that town.</p>
+
+<div class="card">
+  <form class="stacked" method="post" action="/clients">
+    <label>Client name
+      <input type="text" name="name" required>
+    </label>
+    <label>Service area (town or city)
+      <input type="text" name="service_area_town" required placeholder="e.g. Austin, TX">
+    </label>
+    <button type="submit">Add client</button>
+  </form>
+</div>
+
+<table>
+  <tr><th>Client</th><th>Service Area</th><th></th></tr>
+  {% for c in clients %}
+  <tr>
+    <td>{{ c.name }}</td>
+    <td>{{ c.service_area_town }}</td>
+    <td><a class="link" href="/clients/{{ c.id }}">View</a></td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

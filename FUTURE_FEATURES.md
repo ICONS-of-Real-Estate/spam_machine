@@ -1,11 +1,13 @@
-# Future features (parked — not being built yet)
+# Future features
 
-Ideas from Kris (26 Aug 2026) to develop down the track. Recorded here so
-they aren't lost, not as a spec to start building from — needs a fresh
-go-ahead and answers to the open questions below before any code gets
-written.
+Ideas from Kris (26 Aug 2026). #1 and #3 are now being built together as
+one app — see `outreach/` (its own `CLAUDE.md`/`README.md` there). #2 is
+still parked pending the open question below (Maildoso's API can't yet
+be confirmed to expose analytics at all). This file stays as the
+original record of the ask and its open questions, most of which are
+now answered/addressed in `outreach/` rather than here.
 
-## 1. Client → sponsor prospecting + outreach campaign
+## 1. Client → sponsor prospecting + outreach campaign — build started, see `outreach/`
 
 - Maintain a list of clients (real estate podcasts), each with a service
   area — a town or city.
@@ -47,7 +49,7 @@ Open questions before building:
 - **Definition of "winning."** Reply rate, meeting-booked rate, something
   else — needs a definition before any optimization loop can be built.
 
-## 3. Podcast guest booking for clients
+## 3. Podcast guest booking for clients — build started, see `outreach/`
 
 - Set a "guest avatar" per client (the kind of person who'd make a good
   guest — role, industry, market, etc.).

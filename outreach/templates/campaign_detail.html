@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}{{ campaign.name }} — outreach engine{% endblock %}
+{% block content %}
+<p><a class="link" href="/target-lists/{{ campaign.target_list_id }}">&larr; {{ campaign.client_name }} / {{ campaign.category_or_avatar }}</a></p>
+<h1>{{ campaign.name }}</h1>
+<p>Status: {{ campaign.status }} &middot; targeting: {{ campaign.kind }} list "{{ campaign.category_or_avatar }}"</p>
+<p style="color:#6a7385; font-size:0.85rem;">This app never sends email -- it only defines the follow-up sequence. Use <code>{{ '{{unsubscribe_link}}' }}</code> and <code>{{ '{{mailing_address}}' }}</code> as merge-field placeholders in every step's body; a real send path will resolve them later.</p>
+
+<h2>Steps</h2>
+{% if not steps %}
+<p>No steps yet -- add the first one below.</p>
+{% endif %}
+{% for s in steps %}
+<div class="card">
+  <p><strong>Step {{ s.step_number }}</strong> &middot; {% if s.step_number == 1 %}sent immediately{% else %}{{ s.delay_days }} day(s) after step {{ s.step_number - 1 }}{% endif %}
+  {% set check = compliance_checks[loop.index0] %}
+  {% if check.ok %}<span class="badge ok">compliant</span>{% else %}<span class="badge warn">missing required fields</span>{% endif %}
+  </p>
+  <p><strong>Subject:</strong> {{ s.subject_template }}</p>
+  <p style="white-space:pre-wrap;">{{ s.body_template }}</p>
+  {% if not check.ok %}
+  <ul>
+    {% for w in check.warnings %}<li style="color:#e8c86a;">{{ w }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+</div>
+{% endfor %}
+
+<div class="card">
+  <h2>Add step {{ next_step_number }}</h2>
+  <form class="stacked" method="post" action="/campaigns/{{ campaign.id }}/steps">
+    <label>Delay in days after the previous step (0 if this is the first step)
+      <input type="number" name="delay_days" value="{{ 0 if next_step_number == 1 else 3 }}" min="0" required>
+    </label>
+    <label>Subject
+      <input type="text" name="subject_template" required>
+    </label>
+    <label>Body (include {{ '{{unsubscribe_link}}' }} and {{ '{{mailing_address}}' }})
+      <textarea name="body_template" rows="8" required></textarea>
+    </label>
+    <button type="submit">Add step</button>
+  </form>
+</div>
+{% endblock %}

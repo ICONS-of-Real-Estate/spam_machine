@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}{{ client.name }} — outreach engine{% endblock %}
+{% block content %}
+<p><a class="link" href="/">&larr; all clients</a></p>
+<h1>{{ client.name }}</h1>
+<p>Service area: {{ client.service_area_town }}</p>
+
+<div class="card">
+  <h2>Generate a target list</h2>
+  <form class="stacked" method="post" action="/clients/{{ client.id }}/target-lists" id="target-list-form">
+    <label>Kind
+      <select name="kind" id="kind-select" onchange="toggleKindFields()">
+        <option value="sponsor">Sponsor</option>
+        <option value="guest">Podcast guest</option>
+      </select>
+    </label>
+    <label id="category-field">Sponsor category
+      <select name="category_or_avatar" id="category-select">
+        {% for cat in sponsor_categories %}<option value="{{ cat }}">{{ cat }}</option>{% endfor %}
+      </select>
+    </label>
+    <label id="avatar-field" style="display:none">Guest avatar description
+      <textarea name="category_or_avatar" id="avatar-textarea" rows="3" placeholder="e.g. real estate broker-owner, 5+ years, mid-size market" disabled></textarea>
+    </label>
+    <label>Size
+      <select name="requested_size">
+        <option value="100">100</option>
+        <option value="1000">1,000</option>
+        <option value="10000">10,000</option>
+      </select>
+    </label>
+    <button type="submit">Generate</button>
+  </form>
+  <script>
+    // Both fields share the name "category_or_avatar" -- only one may ever
+    // be enabled at a time, so the browser only submits that one (a
+    // disabled form field is never included in a form submission). Fixing
+    // this at the DOM level avoids depending on which of two same-named
+    // values a form-parsing library picks when both are present.
+    function toggleKindFields() {
+      var isSponsor = document.getElementById('kind-select').value === 'sponsor';
+      document.getElementById('category-field').style.display = isSponsor ? 'block' : 'none';
+      document.getElementById('avatar-field').style.display = isSponsor ? 'none' : 'block';
+      document.getElementById('category-select').disabled = !isSponsor;
+      document.getElementById('avatar-textarea').disabled = isSponsor;
+    }
+  </script>
+</div>
+
+<h2>Target lists</h2>
+<table>
+  <tr><th>Created</th><th>Kind</th><th>Category / Avatar</th><th>Size</th><th>Status</th><th></th></tr>
+  {% for tl in target_lists %}
+  <tr>
+    <td>{{ tl.created_at }}</td>
+    <td>{{ tl.kind }}</td>
+    <td>{{ tl.category_or_avatar }}</td>
+    <td>{{ tl.n_targets }}/{{ tl.requested_size }}</td>
+    <td>{{ tl.status }} {% if tl.source_mode == 'mock' %}<span class="badge mock">mock</span>{% endif %}</td>
+    <td><a class="link" href="/target-lists/{{ tl.id }}">View</a></td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}
