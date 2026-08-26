@@ -5,11 +5,40 @@ app.py is imported). Covers the same ground the manual curl smoke tests
 covered during development, so it doesn't have to be redone by hand
 every time something in app.py changes.
 """
+import sqlite3
+
 from fastapi.testclient import TestClient
 
 import app as app_module
 
 client = TestClient(app_module.app)
+
+
+def test_freshly_synced_data_shows_no_stale_banner():
+    resp = client.get("/")
+    assert resp.status_code == 200
+    # 'stale-banner' as a bare substring also matches the CSS class rule in
+    # <style>, which is always present -- check for the actual rendered
+    # div (only present when sync_freshness.is_stale is true) instead.
+    assert '<div class="stale-banner">' not in resp.text
+
+
+def test_stale_sync_timestamp_shows_banner():
+    conn = sqlite3.connect(app_module.DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE sync_meta SET value = '2020-01-01T00:00:00+00:00' WHERE key = 'last_synced_at'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    try:
+        resp = client.get("/")
+        assert '<div class="stale-banner">' in resp.text
+        assert "may be stale" in resp.text
+    finally:
+        # Restore a fresh timestamp so later tests in this module aren't affected.
+        app_module.sync.sync_all()
 
 
 def test_healthz_is_public_no_login_needed():

@@ -22,6 +22,8 @@
   .badge.approved { background:#123a1f; color:#6ae88a; }
   .badge.rejected { background:#3a1515; color:#e86a6a; }
   .freshness { color:#6a7385; font-size:0.8rem; }
+  .freshness.stale { color:#e8c86a; }
+  .stale-banner { background:#3a3115; color:#e8c86a; padding:0.6rem 1rem; border-radius:6px; margin-bottom:1rem; font-size:0.9rem; }
   a.link { color:#7dc4ff; }
   form.inline { display:inline; }
   textarea, button { font-family:inherit; font-size:0.9rem; }
@@ -39,8 +41,10 @@
     <a href="/alerts">Ops Alerts</a>
   </nav>
   <div>
-    <span class="freshness">
-      {% if last_synced_at %}Synced {{ last_synced_at }}{% else %}Never synced{% endif %}
+    <span class="freshness{% if sync_freshness.is_stale %} stale{% endif %}">
+      {% if sync_freshness.never_synced %}Never synced
+      {% elif sync_freshness.age_minutes is none %}Synced (age unknown)
+      {% else %}Synced {{ sync_freshness.age_minutes|round|int }}m ago{% endif %}
     </span>
     &nbsp;·&nbsp;
     <span>{{ user_email }}</span>
@@ -48,6 +52,15 @@
   </div>
 </header>
 <main>
+{% if sync_freshness.is_stale %}
+<div class="stale-banner">
+  {% if sync_freshness.never_synced %}
+  The dashboard has never synced -- run <code>python sync.py</code> (or check the sync timer on the VPS). Everything below is empty or stale.
+  {% else %}
+  Data may be stale -- last synced {{ sync_freshness.age_minutes|round|int }} minutes ago (expected every ~10 min). Check <code>journalctl -u spam-machine-dashboard-sync.service</code> if this doesn't clear up.
+  {% endif %}
+</div>
+{% endif %}
 {% block content %}{% endblock %}
 </main>
 </body>

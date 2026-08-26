@@ -28,16 +28,27 @@ clicked through today. What's real right now:
   spam_machine's real Sheet (`DASHBOARD_SYNC_MODE=live`) or from
   realistic fixture data (`fixtures.py`, the default) into a local
   SQLite mirror.
-- Reads (`app.py` + `templates/`) — drafts list, SOP suggestions list,
-  cost-by-day table, ops alerts list, all served from the mirror.
+- Reads (`app.py` + `templates/`) — drafts list (with a per-thread detail
+  page), SOP suggestions list, cost table (daily/weekly/monthly, toggle
+  in the UI), ops alerts list, all served from the mirror.
 - SOP suggestion writes (`sheets_write.py`) — approve/reject/comment
   writes straight to the live Sheet, then triggers an immediate re-sync
   of that one tab. Needs `DASHBOARD_SYNC_MODE=live` and a real write
   credential — mock mode doesn't cover this path.
-- Tests (`tests/`, run with `pytest`) — cover the sheet-parsing logic in
-  `sync.py`, the cost aggregation in `cost_stats.py`, and the A1-notation
-  column math in `sheets_write.py`. All run against fixtures, no
-  credentials needed.
+- Draft read/edit/approve (`gmail_write.py`, via `/drafts/{thread_id}`) —
+  wired into real routes, but the underlying data is fixture text until
+  the Gmail-write credential exists (see "What's stubbed" below). The UI
+  shows a visible banner while that's true.
+- A staleness banner (`freshness.py`) — warns if the mirror hasn't
+  synced in the last 20 minutes (2 missed timer cycles) instead of
+  silently showing old data as if it were current.
+- Tests (`tests/`, run with `pytest`) — 36 cases covering the
+  sheet-parsing logic in `sync.py`, cost aggregation in `cost_stats.py`,
+  A1-notation column math in `sheets_write.py`, the staleness check in
+  `freshness.py`, and full route-level integration tests
+  (`test_app_routes.py`) via `DASHBOARD_DEV_BYPASS_AUTH`. All run against
+  fixtures, no credentials needed. CI (`.github/workflows/dashboard-tests.yml`)
+  runs this suite automatically on any push/PR touching `dashboard/`.
 
 What's stubbed:
 

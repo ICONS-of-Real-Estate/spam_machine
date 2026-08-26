@@ -14,6 +14,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 import auth
 import cost_stats
+import freshness
 import gmail_write
 import sheets_write
 import sync
@@ -89,10 +90,12 @@ def last_synced_at():
 def base_context(request: Request):
     # Starlette's TemplateResponse(request, name, context) auto-injects
     # "request" into the template context -- no need to add it here too.
+    synced_at = last_synced_at()
     return {
         "user_email": request.session.get("user_email"),
         "user_name": request.session.get("user_name"),
-        "last_synced_at": last_synced_at(),
+        "last_synced_at": synced_at,
+        "sync_freshness": freshness.check_freshness(synced_at),
     }
 
 
