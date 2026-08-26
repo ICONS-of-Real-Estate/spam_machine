@@ -642,6 +642,31 @@ function saveSkipCache(ss, cacheMap) {
   if (rows.length > 0) tab.getRange(2, 1, rows.length, 4).setValues(rows);
 }
 
+/**
+ * ONE-OFF (26 Aug 2026, real incident) -- run this manually once, right
+ * after deploying the isSkipCacheFresh_ fix above, to force every
+ * candidate thread to get a fresh look on the very next runReplyDrafter
+ * firing. Pre-fix cache entries don't have the new message-count field,
+ * so isSkipCacheFresh_ falls back to pure TTL for them and they'd
+ * otherwise keep returning their stale verdict until each entry's own
+ * SKIP_CACHE_TTL_HOURS naturally expires. Safe to run any time -- this
+ * tab is pure cache with no human-readable history value; clearing it
+ * just means the next run re-derives everything from scratch instead of
+ * trusting anything cached.
+ */
+function clearSkipCache() {
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const tab = ensureSkipCacheTabExists(ss);
+  const lastRow = tab.getLastRow();
+  if (lastRow <= 1) {
+    Logger.log('clearSkipCache -- already empty, nothing to clear.');
+    return;
+  }
+  const lastCol = Math.max(tab.getLastColumn(), 4);
+  tab.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+  Logger.log('clearSkipCache -- cleared ' + (lastRow - 1) + ' cached row(s). Every candidate thread will get a fresh look on the next runReplyDrafter run.');
+}
+
 // ---------- MAIN ENTRY POINT ----------
 
 function runReplyDrafter() {
