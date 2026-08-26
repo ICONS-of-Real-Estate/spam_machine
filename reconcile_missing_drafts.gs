@@ -94,6 +94,17 @@ function reconcileMissingDrafts() {
 
   const threads = labelDrafted.getThreads(0, 500);
 
+  // FIX (27 Aug 2026, real risk found in review): draftAlreadyExistsFor's own
+  // header comment claimed this call site checks "one lead in isolation, not
+  // in a per-thread loop" -- that was false. Called with no precomputedDrafts
+  // below, each iteration did its own fresh GmailApp.getDraftMessages() (plus
+  // a .getTo() per draft in that folder) -- up to 500 threads times a folder
+  // that can hold dozens of drafts is roughly 25,000 Gmail read operations in
+  // one 5 AM run, against a 50,000/day self-tracked ceiling. Fetched once
+  // here instead, exactly like Code.gs's runReplyDrafterInner does.
+  const existingDrafts = GmailApp.getDraftMessages();
+  recordGmailQuotaUsage_(1 + existingDrafts.length);
+
   let reconciled = 0;
   let leftAlone = 0;
   let couldNotParse = 0;
@@ -118,7 +129,7 @@ function reconcileMissingDrafts() {
       return;
     }
 
-    const hasLiveDraft = draftAlreadyExistsFor(forwardInfo.email);
+    const hasLiveDraft = draftAlreadyExistsFor(forwardInfo.email, existingDrafts);
 
     if (hasLiveDraft) {
       leftAlone++;

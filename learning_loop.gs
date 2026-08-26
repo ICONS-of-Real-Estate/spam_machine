@@ -264,6 +264,25 @@ function runLearningLoopInner() {
 }
 
 function findSentReplyAfterDraft(thread, draftCreatedAt, leadEmail) {
+  // FIX (27 Aug 2026, real risk found in review): `draftCreatedAt && ... <=
+  // new Date(draftCreatedAt).getTime()` had two ways to silently disable the
+  // guard just below. A blank cell is falsy, so the `&&` short-circuited the
+  // whole check away. A text-formatted or otherwise unparseable cell makes
+  // `new Date(draftCreatedAt)` Invalid, `.getTime()` is NaN, and `x <= NaN`
+  // is always false -- so the guard passed every message, including one
+  // that predates the draft. That reopens exactly the 18 Aug incident this
+  // guard was written to close: an unsent draft logged as "what Joana
+  // actually sent," corrupting wasEdited/draftSimilarityPercent and the
+  // Kimi-vs-Anthropic quality verdict they feed. Parsed once, up front,
+  // with an explicit validity check -- an unreadable timestamp now means
+  // "we can't safely apply this guard for this row," not "skip the check
+  // silently and trust isDraft() alone."
+  const draftCreatedMs = (draftCreatedAt instanceof Date) ? draftCreatedAt.getTime() : new Date(draftCreatedAt).getTime();
+  if (draftCreatedAt && isNaN(draftCreatedMs)) {
+    Logger.log('findSentReplyAfterDraft -- unreadable draftCreatedAt (' + draftCreatedAt + ') for thread ' + thread.getId() + ' -- cannot safely tell whether a candidate message predates the draft, treating as no sent reply found rather than risk logging an unsent draft as sent.');
+    return null;
+  }
+
   const messages = thread.getMessages();
   // Look from the end for a message sent by our own account (i.e. Joana actually replied)
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -275,7 +294,7 @@ function findSentReplyAfterDraft(thread, draftCreatedAt, leadEmail) {
     // sent. A message that predates the draft it's supposedly replying to
     // cannot possibly be the real sent reply, so this check catches that
     // case even when isDraft() is wrong.
-    if (draftCreatedAt && messages[i].getDate().getTime() <= new Date(draftCreatedAt).getTime()) continue;
+    if (draftCreatedAt && messages[i].getDate().getTime() <= draftCreatedMs) continue;
     const from = messages[i].getFrom().toLowerCase();
     // FIX (18 Aug 2026, real incident): this used to accept ANY
     // CONFIG.INTERNAL_DOMAINS address as "Joana's genuine reply" -- but

@@ -1527,7 +1527,21 @@ function logDraftToSheet(threadId, subject, prospectEmail, category, needsRoutin
   try {
     const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
     const tab = ss.getSheetByName('AI Drafts Log');
-    if (!tab) return;
+    if (!tab) {
+      // FIX (27 Aug 2026, real risk found in review): this used to return
+      // silently. The Gmail draft still gets created and labeled -- only the
+      // sheet record is lost -- but that record is the input to
+      // registerNewPodcastSalesLeads (follow-up enrollment), runLearningLoop
+      // (the SOP-improvement and Kimi-vs-Anthropic quality loop),
+      // runDailyReport, runStalledBookingsAudit, and the heartbeat's
+      // staleness check. A renamed tab or a fresh sheet nobody ran setup() on
+      // would silently take all of those dark together, with the actual
+      // cause -- this one missing tab -- never logged anywhere a human would see.
+      Logger.log('WARNING -- "AI Drafts Log" tab not found. A draft was just created in Gmail but NOT recorded here.');
+      sendOpsAlert('logDraftToSheet -- "AI Drafts Log" tab missing',
+        'A reply draft for "' + subject + '" was created in Gmail and labeled, but could not be logged to the "AI Drafts Log" tab because that tab does not exist in the spreadsheet. Every downstream system that reads that tab (follow-up enrollment, the learning loop, the daily report, the stalled-bookings audit, the heartbeat) will not see this draft. Run setup() in Code.gs to recreate the expected tabs.');
+      return;
+    }
     // ADDED (24 Aug 2026, per direct request -- "cost per draft"): these two
     // columns land AFTER the existing ones on purpose -- the tab already has
     // 275+ historical rows and a fixed header row; appending past the
@@ -1700,18 +1714,35 @@ function loadStateDirectory() {
     const hostCol = header.indexOf('host');
     const linkCol = header.indexOf('show link');
 
+    // FIX (27 Aug 2026, real risk found in review): if any of these headers
+    // is renamed, reordered out, or gains a stray character, indexOf returns
+    // -1, row[-1] is undefined, state/link/showName all become '', and
+    // EVERY row hits the unlogged `continue` below -- no exception is
+    // thrown, so the catch never fires either. The function used to return
+    // an empty map completely silently. Two real consequences: every reply
+    // drafted falls back to the generic hub invite instead of a
+    // state-specific show, and registerNewHubGuestInvites' `if
+    // (!matchedShow) return;` means the entire Hub Guest cadence enrolls
+    // nobody, with no log line anywhere pointing at this as the cause.
+    if (stateCol === -1 || nameCol === -1 || hostCol === -1 || linkCol === -1) {
+      Logger.log('WARNING -- State Podcast Show Directory is missing an expected header. Found headers: ' + JSON.stringify(header) + ' (need: state, show name, host, show link). Returning an EMPTY directory -- every state falls back to the generic invite, and Hub Guest enrollment will match nothing, until the header is fixed.');
+      return map;
+    }
+
+    let skippedIncomplete = 0;
     for (let r = 1; r < values.length; r++) {
       const row = values[r];
       const state = String(row[stateCol] || '').trim();
       const link = String(row[linkCol] || '').trim();
       const showName = String(row[nameCol] || '').trim();
-      if (!state || !link || !showName) continue;
+      if (!state || !link || !showName) { skippedIncomplete++; continue; }
       map[normalizeState(state)] = {
         showName: showName,
         host: String(row[hostCol] || '').trim(),
         link: link
       };
     }
+    Logger.log('State Podcast Show Directory loaded: ' + Object.keys(map).length + ' state(s), ' + skippedIncomplete + ' row(s) skipped (missing state/show name/link).');
   } catch (e) {
     Logger.log('Could not load State Podcast Show Directory: ' + e + ' -- falling back to generic invite for all states this run.');
   }
@@ -2234,13 +2265,31 @@ function threadHasLabel(thread, labelName) {
  * make this run too cautious, never silently permissive -- the exact
  * failure mode behind every prior incident on this check.
  */
+// FIX (27 Aug 2026, real risk found in review): fails closed correctly (the
+// deliberate, documented direction -- see the incident note below), but used
+// to do so with no alert at all. A PERSISTENT failure (a revoked scope, a
+// changed API, an expired token edge case) makes every run for the rest of
+// time look identical to a legitimately full folder -- "Folder already
+// at/over MAX_PENDING_DRAFTS_IN_FOLDER" -- with nothing to distinguish a
+// broken API from a folder a human just hasn't reviewed down yet. sendOpsAlert
+// already dedupes by subject+day, so this fires at most once per day even
+// though countPendingAiDrafts_ is called every 15 minutes. Also capped the
+// pagination loop -- a server returning a non-advancing nextPageToken would
+// otherwise spin until Apps Script's own execution limit killed it.
 function countPendingAiDrafts_() {
   const query = 'label:"' + CONFIG.LABEL_AI_DRAFTED + '"';
   let total = 0;
   let pageToken = null;
+  let pages = 0;
+  const MAX_PAGES = 50; // 50 x 100 = 5,000 drafts -- far past any real folder size
 
   try {
     do {
+      if (++pages > MAX_PAGES) {
+        Logger.log('countPendingAiDrafts_ -- exceeded ' + MAX_PAGES + ' pages without exhausting nextPageToken -- stopping rather than looping to the execution time limit.');
+        break;
+      }
+
       let url = 'https://gmail.googleapis.com/gmail/v1/users/me/drafts?q=' + encodeURIComponent(query) + '&maxResults=100';
       if (pageToken) url += '&pageToken=' + encodeURIComponent(pageToken);
 
@@ -2251,6 +2300,8 @@ function countPendingAiDrafts_() {
 
       if (response.getResponseCode() !== 200) {
         Logger.log('countPendingAiDrafts_ -- Gmail API call failed (HTTP ' + response.getResponseCode() + '): ' + response.getContentText() + ' -- failing closed (treating folder as full).');
+        sendOpsAlert('countPendingAiDrafts_ -- cannot count pending drafts, drafter is blocked',
+          'countPendingAiDrafts_ got HTTP ' + response.getResponseCode() + ' from the Gmail drafts.list API. Failing closed, so runReplyDrafter will create ZERO drafts until this is fixed -- and its own log will read exactly like a full folder, not a broken API. Response body: ' + response.getContentText().slice(0, 500));
         return CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER;
       }
 
@@ -2262,6 +2313,8 @@ function countPendingAiDrafts_() {
     return total;
   } catch (e) {
     Logger.log('countPendingAiDrafts_ -- exception: ' + e + ' -- failing closed (treating folder as full).');
+    sendOpsAlert('countPendingAiDrafts_ -- cannot count pending drafts, drafter is blocked',
+      'countPendingAiDrafts_ threw an exception. Failing closed, so runReplyDrafter will create ZERO drafts until this is fixed. Raw error: ' + e);
     return CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER;
   }
 }
@@ -2277,10 +2330,17 @@ function countPendingAiDrafts_() {
 // failures from exactly this function right before the quota error). Added
 // an optional precomputedDrafts param so a hot-loop caller can fetch
 // GmailApp.getDraftMessages() ONCE for the whole run and pass it in here --
-// runReplyDrafterInner() does this now. The other two call sites
-// (reconcile_missing_drafts.gs, lead_followup_sequences.gs) check one lead
-// in isolation, not in a per-thread loop, so they're left calling this with
-// just leadEmail and keep the original always-fresh behavior.
+// runReplyDrafterInner() does this now.
+//
+// CORRECTED (27 Aug 2026, real risk found in review): the claim that used to
+// be here -- that the other two call sites "check one lead in isolation, not
+// in a per-thread loop" -- was false. Both reconcile_missing_drafts.gs and
+// lead_followup_sequences.gs call this from INSIDE a per-thread/per-row loop
+// (up to 500 threads and ~215 queue rows respectively), each with no
+// precomputedDrafts -- the exact O(threads x drafts) pattern this fix was
+// written to eliminate, just in two other files. Both now hoist their own
+// GmailApp.getDraftMessages() once per run and pass it in, the same way
+// runReplyDrafterInner() does.
 // FIX (27 Aug 2026, real risk found in review): the same substring-match bug
 // draftAlreadyExistsFor was fixed for on 27 Aug -- `recipients.indexOf(target)
 // !== -1`, where a lead like ann@x.com matched a header actually addressed to
@@ -2842,6 +2902,16 @@ function buildSystemPrompt() {
   } catch (e) {
     Logger.log('WARNING: could not read SOP_DOC_ID, using fallback prompt: ' + e);
   }
+
+  // FIX (27 Aug 2026, real risk found in review): both failure paths above
+  // used to fall through to this stub with only a Logger.log line. Real
+  // Gmail drafts get created for real leads from this ~60-word fallback
+  // instead of the actual SOP -- they look completely normal to a reviewer
+  // and are one click from being sent, off-SOP. sendOpsAlert dedupes by
+  // subject+day, so this fires at most once per day even though
+  // buildSystemPrompt runs on every classifyAndDraft call.
+  sendOpsAlert('SOP Doc unreadable -- drafts are using the fallback prompt',
+    'buildSystemPrompt() could not get a usable SOP from CONFIG.SOP_DOC_ID this run (see the execution log for the specific reason -- unreadable Doc, or suspiciously short body). Every draft created until this is fixed is written from a ~60-word stub, not the real SOP, and will look normal in the Drafts folder. Check that the Doc is still shared with this script and has real content.');
 
   return `You are drafting email replies for Joana Peixe, Podcast Network Manager at Icons of Real Estate, replying to real estate agents who received a cold outreach inviting them to host a regional podcast. The full SOP could not be loaded from its Doc this run, so: keep replies warm, first-name, brief, never mention you are an AI, never state a dollar figure, and for a clear decline just thank them for their time and wish them continued success without pitching further.`;
 }

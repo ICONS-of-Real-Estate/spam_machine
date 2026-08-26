@@ -728,7 +728,22 @@ function sendOpsAlert(subject, body) {
     const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
     tab = ensureOpsAlertLogTabExists_(ss);
     const rows = tab.getDataRange().getValues().slice(1);
-    alreadySentToday = rows.some(r => String(r[1]) === today && String(r[2]) === subject);
+    // FIX (27 Aug 2026, real risk found in review): `today` is a bare
+    // 'yyyy-MM-dd' string. appendRow() below writes it into a General-
+    // formatted cell, and Sheets can auto-recognize a string shaped like a
+    // date and store it as an actual date value on write -- in which case
+    // it reads back here as a Date object, and String(dateObj) (e.g. "Wed
+    // Aug 26 2026 00:00:00 GMT+0200") never equals the plain 'today'
+    // string. If that's happening on this sheet, this dedup silently never
+    // matches, and the "once per subject per Pacific day" rate limit never
+    // engages -- worth checking directly (open the Ops Alert Log tab and
+    // see whether column B renders as a date or as plain text), but
+    // normalizing on read costs nothing either way and is correct for both
+    // cases.
+    const asPacificDay_ = v => (v instanceof Date)
+      ? Utilities.formatDate(v, 'America/Los_Angeles', 'yyyy-MM-dd')
+      : String(v).trim();
+    alreadySentToday = rows.some(r => asPacificDay_(r[1]) === today && String(r[2]) === subject);
   } catch (e) {
     Logger.log('sendOpsAlert -- could not check the Ops Alert Log tab for dedup (failing open, sending anyway): ' + e);
   }

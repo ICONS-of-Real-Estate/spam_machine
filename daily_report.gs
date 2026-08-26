@@ -56,9 +56,20 @@ function runDailyReport() {
   // question "how many emails yesterday, what did it cost" needs an actual
   // bounded [yesterdayStart, todayStart) range, not another "since X, still
   // counting" bucket like TODAY/7d/30d/all-time below.
-  const yesterdayStart = new Date(todayStart.getTime() - 24 * 60 * 60 * 1000);
-  const sevenDaysAgo = new Date(todayStart.getTime() - 7 * 24 * 60 * 60 * 1000);
-  const thirtyDaysAgo = new Date(todayStart.getTime() - 30 * 24 * 60 * 60 * 1000);
+  // FIX (27 Aug 2026, real risk found in review): todayStart is LOCAL
+  // midnight, but these offsets were fixed UTC milliseconds -- stepping
+  // back 24h from local midnight is not the same as stepping back one
+  // CALENDAR day whenever a DST transition falls in between. Verified: on
+  // the spring-forward date, yesterdayStart lands an hour before local
+  // midnight of the day before (a 25-hour "yesterday" window); on the
+  // fall-back date it lands an hour AFTER local midnight (a 23-hour window
+  // that drops drafts logged in that missing hour from every bucket).
+  // Stepping calendar days via the Date constructor's own month/day
+  // rollover instead of raw millisecond math sidesteps this entirely.
+  const dayBefore_ = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - n);
+  const yesterdayStart = dayBefore_(todayStart, 1);
+  const sevenDaysAgo = dayBefore_(todayStart, 7);
+  const thirtyDaysAgo = dayBefore_(todayStart, 30);
 
   const addressClauses = CONFIG.REQUIRED_CC_ADDRESSES
     .map(addr => 'to:"' + addr + '" OR cc:"' + addr + '"')
@@ -292,7 +303,12 @@ function computeSplitTestStats_(ss, draftsData, learningData, rowsSince, sinceDa
     // K = similarity index 10).
     const judged = learningRows.filter(r => String(r[9] || '').toLowerCase() === provider);
     const editedCount = judged.filter(r => r[6] === true).length;
-    const similarities = judged.map(r => Number(r[10])).filter(n => !isNaN(n));
+    // FIX (27 Aug 2026, real risk found in review): Number('') is 0, not
+    // NaN, so a blank similarity cell used to survive the isNaN filter as a
+    // real 0% and drag the reported average down -- indistinguishable from
+    // a row that genuinely scored 0. Excluded before the Number() coercion
+    // instead of after.
+    const similarities = judged.filter(r => r[10] !== '' && r[10] !== null && r[10] !== undefined).map(r => Number(r[10])).filter(n => !isNaN(n));
     const avgSimilarity = similarities.length > 0
       ? Math.round(similarities.reduce((a, b) => a + b, 0) / similarities.length)
       : null;
@@ -424,7 +440,9 @@ function logSplitTestSummary() {
   // ADDED (25 Aug 2026, per direct request): a real, exact YESTERDAY number
   // for "how many emails sent, how much did it cost" on demand, instead of
   // only getting that from the 7 AM email or an imprecise manual estimate.
-  const yesterdayStart = new Date(todayStart.getTime() - 24 * 60 * 60 * 1000);
+  // FIX (27 Aug 2026, real risk found in review): same DST bug as
+  // runDailyReport's identical windows above -- see that fix's comment.
+  const yesterdayStart = new Date(todayStart.getFullYear(), todayStart.getMonth(), todayStart.getDate() - 1);
   const lastHour = new Date(now.getTime() - 60 * 60 * 1000);
 
   Logger.log('=== KIMI vs ANTHROPIC -- ' + (LLM_COST_TEST_MODE

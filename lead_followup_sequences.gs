@@ -269,6 +269,16 @@ function reconcileFollowUpDrafts() {
   let reconciled = 0;
   let leftAlone = 0;
 
+  // FIX (27 Aug 2026, real risk found in review): draftAlreadyExistsFor was
+  // being called once per "_APPROVAL" row (up to ~215 rows across both
+  // queues per Follow-Up Learning Log's own volume notes) with no
+  // precomputedDrafts, so each call re-fetched GmailApp.getDraftMessages()
+  // from scratch -- the same O(rows x drafts) pattern fixed in
+  // reconcile_missing_drafts.gs on the same day. Fetched once for this
+  // whole function instead.
+  const existingDrafts = GmailApp.getDraftMessages();
+  recordGmailQuotaUsage_(1 + existingDrafts.length);
+
   [
     { tabName: PODCAST_SALES_QUEUE_TAB, statusCol: 7, emailCol: 3 },
     { tabName: HUB_GUEST_QUEUE_TAB, statusCol: 10, emailCol: 3 }
@@ -282,7 +292,7 @@ function reconcileFollowUpDrafts() {
       if (!status || String(status).indexOf('_APPROVAL') === -1) continue;
 
       const email = data[r][cfg.emailCol - 1];
-      const hasLiveDraft = draftAlreadyExistsFor(email);
+      const hasLiveDraft = draftAlreadyExistsFor(email, existingDrafts);
 
       if (hasLiveDraft) {
         Logger.log('reconcileFollowUpDrafts -- left alone (live draft confirmed): row ' + (r + 1) + ' in ' + cfg.tabName + ', ' + email);
@@ -293,10 +303,23 @@ function reconcileFollowUpDrafts() {
       // No live draft for this lead's current step -- the draft was
       // deleted. Reset to _SCHEDULE with today's date so it redrafts on
       // the next cycle instead of sitting stuck forever.
+      //
+      // FIX (27 Aug 2026, real risk found in review): Current Step was left
+      // UNCHANGED at its current value (the step whose draft just got
+      // deleted). advancePodcastSalesFollowUps/advanceHubGuestFollowUps
+      // compute nextStep = currentStep + 1 on their next pass -- so a
+      // deleted step-1 draft came back as a step-2 "just floating this back
+      // to the top of your inbox" bump, referring to a message the lead
+      // never actually received. Roll Current Step back by one so the
+      // SAME step gets redrafted instead of skipped. Status keeps saying
+      // Step currentStep (the step that's about to be redone), which
+      // matches what the redraft will actually send.
       const currentStep = data[r][cfg.statusCol - 3]; // Current Step column, 2 before status
+      const redraftStep = Math.max(0, Number(currentStep) - 1);
+      tab.getRange(r + 1, cfg.statusCol - 2).setValue(redraftStep);
       tab.getRange(r + 1, cfg.statusCol).setValue('AWAITING_STEP_' + currentStep + '_SCHEDULE');
       tab.getRange(r + 1, cfg.statusCol + 1).setValue(new Date()); // Next Action Due = now, so it redrafts on the next run
-      Logger.log('reconcileFollowUpDrafts -- RESET (no live draft found): row ' + (r + 1) + ' in ' + cfg.tabName + ', ' + email + ', Step ' + currentStep + ' -> AWAITING_STEP_' + currentStep + '_SCHEDULE');
+      Logger.log('reconcileFollowUpDrafts -- RESET (no live draft found): row ' + (r + 1) + ' in ' + cfg.tabName + ', ' + email + ', Step ' + currentStep + ' will be REDRAFTED (Current Step rolled back to ' + redraftStep + ') -> AWAITING_STEP_' + currentStep + '_SCHEDULE');
       reconciled++;
     }
   });
@@ -346,6 +369,14 @@ function addWorkingDays(date, numDays) {
 // ---------- SCHEDULING NOTE ----------
 
 function buildSchedulingNote(originalMessageDate) {
+  // FIX (27 Aug 2026, real risk found in review): if the "Original Reply
+  // Time" cell this is built from is blank or unparseable, getHours()/
+  // getMinutes() on an Invalid Date return NaN, and the note would render
+  // as "replied around 12:NaN AM" -- garbage inside a real Gmail draft. It
+  // does carry the DELETE-THIS-LINE marker so a reviewer should catch it,
+  // but there's no reason to hand them garbage when omitting the note
+  // entirely is a fine fallback.
+  if (isNaN(originalMessageDate.getTime())) return '';
   const hours = originalMessageDate.getHours();
   const minutes = originalMessageDate.getMinutes();
   const ampm = hours >= 12 ? 'PM' : 'AM';
@@ -866,6 +897,7 @@ function registerNewHubGuestInvites(lookbackDaysOverride) {
   const draftsData = draftsLogTab.getDataRange().getValues().slice(1);
   const stateDirectory = loadStateDirectory();
   let enrolled = 0;
+  let skippedNoMatchedShow = 0;
   const ambiguousFlags = []; // accumulated for ONE batched alert at the end, not one email per lead
 
   draftsData.forEach(row => {
@@ -877,7 +909,13 @@ function registerNewHubGuestInvites(lookbackDaysOverride) {
 
     const state = extractStateFromSubject(subject);
     const matchedShow = state ? stateDirectory[normalizeState(state)] : null;
-    if (!matchedShow) return;
+    // FIX (27 Aug 2026, real risk found in review): this was a silent
+    // return with no counter. If loadStateDirectory() ever comes back
+    // empty (a renamed header in the Directory sheet -- see its own fix),
+    // EVERY row in this loop hits this exact line, and the whole Hub Guest
+    // cadence enrolls nobody with nothing in the log pointing at why.
+    // Tallied and surfaced in the closing summary instead.
+    if (!matchedShow) { skippedNoMatchedShow++; return; }
 
     let thread;
     try {
@@ -940,7 +978,7 @@ function registerNewHubGuestInvites(lookbackDaysOverride) {
     enrolled++;
   });
 
-  Logger.log('registerNewHubGuestInvites complete. Enrolled ' + enrolled + ' new lead(s), flagged ' + ambiguousFlags.length + ' ambiguous no_decline(s) for review.');
+  Logger.log('registerNewHubGuestInvites complete. Enrolled ' + enrolled + ' new lead(s), flagged ' + ambiguousFlags.length + ' ambiguous no_decline(s) for review, ' + skippedNoMatchedShow + ' skipped (no matching show for the extracted state -- check the State Podcast Show Directory if this is unexpectedly high).');
 
   if (ambiguousFlags.length > 0) {
     const lines = ambiguousFlags
@@ -1535,7 +1573,20 @@ function advancePodcastSalesFollowUps() {
     }
 
     if (String(status).indexOf('_SCHEDULE') > -1) {
-      if (new Date() < new Date(nextDue)) continue;
+      // FIX (27 Aug 2026, real risk found in review): if nextDue is blank
+      // or an unparseable text-formatted cell, `new Date(nextDue)` is
+      // Invalid Date, `getTime()` is NaN, and `new Date() < NaN` is FALSE --
+      // so the continue above never fired and this row's follow-up got
+      // drafted the SAME DAY the lead replied, skipping the whole
+      // two-working-day gap. Every other guard in this project fails
+      // closed; this one was failing open. Parse once and require validity
+      // before treating the row as due.
+      const nextDueDate = nextDue instanceof Date ? nextDue : new Date(nextDue);
+      if (isNaN(nextDueDate.getTime())) {
+        Logger.log('advancePodcastSalesFollowUps/advanceHubGuestFollowUps -- row ' + (r + 1) + ' (' + threadId + ') has an unreadable Next Action Due (' + nextDue + ') -- skipping rather than drafting early. Fix the cell by hand.');
+        continue;
+      }
+      if (new Date() < nextDueDate) continue;
 
       if (currentDraftCount >= FOLLOWUP_DRAFT_CAP) {
         Logger.log('advancePodcastSalesFollowUps -- CAP REACHED (' + FOLLOWUP_DRAFT_CAP + ' active drafts) -- skipping draft for ' + threadId + ' (' + name + '), left at _SCHEDULE, will draft on a future run once room opens.');
@@ -1549,7 +1600,19 @@ function advancePodcastSalesFollowUps() {
         continue;
       }
 
-      const nextStep = currentStep + 1;
+      // FIX (27 Aug 2026, real risk found in review): if the Current Step
+      // cell is ever text-formatted or hand-edited, currentStep arrives as
+      // a STRING and '1' + 1 concatenates to '11' (not the number 12) --
+      // and worse, '' + 1 is '1', a string, so the strict `nextStep === 1`
+      // check used below to pick the step-1 body never matches, silently
+      // sending the step-2 "just floating this back up" bump instead.
+      // Coerced with Number() so this stays numeric regardless of how the
+      // cell got its value.
+      const nextStep = Number(currentStep) + 1;
+      if (isNaN(nextStep)) {
+        Logger.log('advancePodcastSalesFollowUps/advanceHubGuestFollowUps -- row has an unreadable Current Step (' + currentStep + ') for thread ' + threadId + ' -- skipping rather than guessing which follow-up step this is.');
+        continue;
+      }
       if (nextStep > 2) continue;
 
       const note = buildSchedulingNote(new Date(originalReplyTime));
@@ -1657,7 +1720,20 @@ function advanceHubGuestFollowUps() {
     }
 
     if (String(status).indexOf('_SCHEDULE') > -1) {
-      if (new Date() < new Date(nextDue)) continue;
+      // FIX (27 Aug 2026, real risk found in review): if nextDue is blank
+      // or an unparseable text-formatted cell, `new Date(nextDue)` is
+      // Invalid Date, `getTime()` is NaN, and `new Date() < NaN` is FALSE --
+      // so the continue above never fired and this row's follow-up got
+      // drafted the SAME DAY the lead replied, skipping the whole
+      // two-working-day gap. Every other guard in this project fails
+      // closed; this one was failing open. Parse once and require validity
+      // before treating the row as due.
+      const nextDueDate = nextDue instanceof Date ? nextDue : new Date(nextDue);
+      if (isNaN(nextDueDate.getTime())) {
+        Logger.log('advancePodcastSalesFollowUps/advanceHubGuestFollowUps -- row ' + (r + 1) + ' (' + threadId + ') has an unreadable Next Action Due (' + nextDue + ') -- skipping rather than drafting early. Fix the cell by hand.');
+        continue;
+      }
+      if (new Date() < nextDueDate) continue;
 
       if (currentDraftCount >= FOLLOWUP_DRAFT_CAP) {
         Logger.log('advanceHubGuestFollowUps -- CAP REACHED (' + FOLLOWUP_DRAFT_CAP + ' active drafts) -- skipping draft for ' + threadId + ' (' + name + '), left at _SCHEDULE, will draft on a future run once room opens.');
@@ -1671,7 +1747,19 @@ function advanceHubGuestFollowUps() {
         continue;
       }
 
-      const nextStep = currentStep + 1;
+      // FIX (27 Aug 2026, real risk found in review): if the Current Step
+      // cell is ever text-formatted or hand-edited, currentStep arrives as
+      // a STRING and '1' + 1 concatenates to '11' (not the number 12) --
+      // and worse, '' + 1 is '1', a string, so the strict `nextStep === 1`
+      // check used below to pick the step-1 body never matches, silently
+      // sending the step-2 "just floating this back up" bump instead.
+      // Coerced with Number() so this stays numeric regardless of how the
+      // cell got its value.
+      const nextStep = Number(currentStep) + 1;
+      if (isNaN(nextStep)) {
+        Logger.log('advancePodcastSalesFollowUps/advanceHubGuestFollowUps -- row has an unreadable Current Step (' + currentStep + ') for thread ' + threadId + ' -- skipping rather than guessing which follow-up step this is.');
+        continue;
+      }
       if (nextStep > 2) continue;
 
       const followUp = classifyAndDraftFollowUp(followUpSystemPrompt, {
