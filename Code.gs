@@ -946,9 +946,9 @@ function runReplyDrafterInner() {
     recordGmailQuotaUsage_(1);
     const lastMsg = lastNonDraftMessage_(messages) || messages[messages.length - 1];
 
-    if (!isCcdToNetworkGroup(lastMsg)) {
-      skipCache[threadId] = { reason: 'not CC-d to network on last message', lastCheckedAt: new Date(), messageCount: messages.length };
-      Logger.log('DIAGNOSTIC -- skipped (not CC-d to network on last message), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
+    if (!isCcdToNetworkGroupAnywhereInThread(messages)) {
+      skipCache[threadId] = { reason: 'network never CC-d anywhere in this thread', lastCheckedAt: new Date(), messageCount: messages.length };
+      Logger.log('DIAGNOSTIC -- skipped (network never CC-d anywhere in this thread), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
       continue;
     }
 
@@ -1625,6 +1625,25 @@ function isCcdToNetworkGroup(message) {
     const a = addr.toLowerCase();
     return cc.indexOf(a) !== -1 || to.indexOf(a) !== -1;
   });
+}
+
+// FIX (26 Aug 2026, real incident -- confirmed via a real header screenshot,
+// Kris): the previous "not CC-d to network on last message" check
+// (isCcdToNetworkGroup applied to ONLY the last message) was blocking
+// essentially every real lead thread. These threads route through
+// network@ardorseo.com / network@iconsofrealestate.com as a mailing-list
+// address (Gmail shows "mailing list: network@ardorseo.com" on the
+// message), not a manual CC a person can drop on Reply -- but a lead's
+// own direct reply, or a later message from Joana replying without going
+// back through that list address, still won't individually carry it, and
+// checking only the LAST message meant one such message permanently
+// broke an otherwise-legitimate thread. The original per-message check
+// existed to exclude threads that "went private" (team no longer in the
+// loop) -- checking the whole thread instead still excludes anything
+// network@ never touched at all, it just stops requiring it on literally
+// the final message.
+function isCcdToNetworkGroupAnywhereInThread(messages) {
+  return messages.some(isCcdToNetworkGroup);
 }
 
 // UPDATED (25 Aug 2026): bookingLinkOverrideUrl is optional and defaults to

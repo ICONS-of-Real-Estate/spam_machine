@@ -132,7 +132,13 @@ function runMissedLeadsAudit(daysBack) {
     const messages = thread.getMessages();
     const last = messages[messages.length - 1];
 
-    if (!isCcdToNetworkGroup(last)) return;
+    // FIX (26 Aug 2026, same real incident as Code.gs's runReplyDrafterInner):
+    // checking only the LAST message for the network CC missed most real
+    // threads, since a lead's own reply (or a later message from Joana not
+    // routed back through the network@ mailing-list address) won't
+    // individually carry it. Checking the whole thread still excludes
+    // anything network@ never touched at all.
+    if (!isCcdToNetworkGroupAnywhereInThread(messages)) return;
 
     const lastSender = extractEmail(last.getFrom());
     if (isInternal(lastSender)) return;
