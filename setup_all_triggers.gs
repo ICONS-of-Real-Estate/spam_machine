@@ -52,7 +52,12 @@ function setupAllTriggers() {
     // file). It reads the AI Drafts Log, checks each thread's real last
     // message age, writes the "Stalled Bookings Audit" tab, and emails only
     // when it finds something NEW. There was no draft quality to prove.
-    'runStalledBookingsAudit'
+    'runStalledBookingsAudit',
+    // ADDED (27 Aug 2026, per direct request): see bounce_audit.gs. Creates
+    // no drafts and sends no mail to leads -- it reads delivery failures and
+    // emails the internal team only when one was addressed to one of our own
+    // addresses instead of the lead's.
+    'runBounceAudit'
   ];
 
   // Delete any existing triggers for these functions first, so re-running
@@ -209,6 +214,21 @@ function setupAllTriggers() {
     .atHour(8)
     .create();
   Logger.log('Created: runStalledBookingsAudit, weekly Monday around 8 AM ' + TZ + '.');
+
+  // ADDED (27 Aug 2026, per direct request -- "anytime we get one, check back
+  // that it was sent to correct email of the lead"). 10 AM deliberately: it
+  // sits clear of the 5-7 AM cluster (reconcile / follow-ups / daily report)
+  // and of the 8 AM audit slot used Mon/Sat/Sun, so the day's heaviest Gmail
+  // consumers aren't competing for the same account-wide budget. Daily rather
+  // than hourly because a misdirected reply is fixed by a human replying, and
+  // nobody is doing that inside an hour anyway -- the 3-day lookback in
+  // bounce_audit.gs means a skipped run loses nothing.
+  ScriptApp.newTrigger('runBounceAudit')
+    .timeBased()
+    .everyDays(1)
+    .atHour(10)
+    .create();
+  Logger.log('Created: runBounceAudit, daily around 10 AM ' + TZ + '.');
 
   // ADDED (24 Aug 2026, per direct request): the heartbeat and trigger-health
   // triggers used to live behind a SEPARATE function nobody remembered to run.

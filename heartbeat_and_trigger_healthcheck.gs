@@ -77,6 +77,12 @@ const EXPECTED_TRIGGER_FUNCTIONS = [
   // that file). It reads the AI Drafts Log, checks thread recency, writes a
   // sheet tab, and emails ONLY when it finds something new.
   'runStalledBookingsAudit',
+  // ADDED (27 Aug 2026, per direct request): bounce_audit.gs. Added here in
+  // the same change that schedules it -- the drift check at the end of
+  // setupAllTriggers() compares these two lists and emails an ops alert when
+  // they disagree, so scheduling a function without listing it here is an
+  // immediate false alarm.
+  'runBounceAudit',
   // The heartbeat pair watches everything above; runTriggerHealthCheck also
   // watches itself, which is tautological but harmless -- if it is missing it
   // cannot run to complain, which is precisely why setupAllTriggers() now
