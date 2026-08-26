@@ -50,6 +50,34 @@ function reconcileMissingDrafts() {
     return;
   }
 
+  // ADDED (27 Aug 2026, real incident): this function strips
+  // AI-Drafted-PendingReview (and the business label) off threads it judges
+  // to be phantoms, but took NO script lock -- while runReplyDrafter, which
+  // holds one for up to its full 5-minute budget, fires four times inside
+  // this job's 5 AM hour. Apps Script's own draft-propagation lag (documented
+  // at Code.gs's existingDrafts fetch, confirmed there by a real duplicate 21
+  // seconds apart) means the getDraftMessages() call below can miss a draft
+  // the drafter created seconds earlier. It then declares a perfectly good
+  // draft a phantom and strips its labels -- which drops it out of
+  // countPendingAiDrafts_, makes runMissedLeadsAudit report the lead as
+  // unanswered, and loses the human's triage label.
+  //
+  // 2 minutes rather than the 10 seconds the other callers use: this job runs
+  // once a day, so waiting out a drafter run is far cheaper than skipping a
+  // day. If it still cannot get in, that is now said out loud -- the old
+  // silent `return` on a lock miss is exactly the pattern that made this
+  // class of problem invisible for weeks.
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(120000)) {
+    Logger.log('reconcileMissingDrafts could not acquire the script lock within 2 minutes -- another job in this project (most likely runReplyDrafter, which holds it for up to 5 minutes) is still running. Skipping this run; the next daily firing will pick it up.');
+    sendOpsAlert(
+      'reconcileMissingDrafts skipped -- could not get the script lock',
+      'reconcileMissingDrafts waited 2 minutes for the project-wide script lock and did not get it, so today\'s reconcile did not run. The lock is held by whichever job was running at the time -- runReplyDrafter fires every 15 minutes and holds it for up to 5, so it is the usual holder. Harmless once; if this repeats daily, the 5 AM schedule is colliding with the drafter and one of them should move.'
+    );
+    return;
+  }
+
+  try {
   const labelDrafted = GmailApp.getUserLabelByName(CONFIG.LABEL_AI_DRAFTED);
   if (!labelDrafted) {
     Logger.log('AI-Drafted-PendingReview label not found -- nothing to reconcile.');
@@ -130,6 +158,9 @@ function reconcileMissingDrafts() {
     alreadyAnswered + ' threads left alone (already genuinely answered, not phantom). ' +
     couldNotParse + ' threads skipped (could not parse lead email, left untouched).'
   );
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 /**

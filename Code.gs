@@ -190,6 +190,31 @@ const CONFIG = {
   // second reply doesn't reliably land back in the same Gmail thread that
   // carries LABEL_AI_DRAFTED, so a thread-level check alone would miss it.
   LABEL_ALREADY_REPLIED_ONCE: 'AI-Skipped-AlreadyRepliedOnce',
+
+  // ADDED (27 Aug 2026, real incident -- a nightly ping-pong burning Gmail
+  // quota). The opt-out and auto-reply/OOO suppression paths applied
+  // LABEL_AI_DRAFTED to permanently exclude a thread, WITHOUT ever creating a
+  // draft. That label means exactly one thing everywhere else in this project:
+  // "a draft for this thread is sitting in the folder awaiting review."
+  // reconcile_missing_drafts.gs exists to find threads carrying it with no
+  // draft behind them and strip it -- so every night it correctly undid these,
+  // the threads re-entered the search, the drafter re-applied the label, and
+  // round it went. Each lap costs a full getMessages() plus a real Sent-folder
+  // search per thread.
+  //
+  // The opt-out half used to be shielded by reconcile's "leave it alone if it
+  // carries 3. Spam STOP" guard. That guard went dead on 25 Aug when
+  // AUTO_APPLY_BUSINESS_LABELS was set false -- the comment justifying that
+  // flip reasoned that exclusion "is handled separately by LABEL_AI_DRAFTED,
+  // which is unaffected", which did not account for reconcileMissingDrafts,
+  // whose entire job is removing LABEL_AI_DRAFTED. The auto-reply half was
+  // never covered by that guard at all and has ping-ponged since reconcile
+  // went daily on 22 Aug.
+  //
+  // Fixed by saying what is actually true instead: this thread is suppressed
+  // and NO draft was made. reconcileMissingDrafts only ever inspects threads
+  // carrying LABEL_AI_DRAFTED, so it leaves these alone permanently.
+  LABEL_SUPPRESSED_NO_DRAFT: 'AI-Skipped-Suppressed',
   LABEL_PRIORITY: '0. PRIORITY - Reply First', // ADDED 13 Aug 2026 -- label already exists in Gmail
 
   // Only ever act on threads CC'd to the network group -- this is the
@@ -411,7 +436,7 @@ function setup() {
     }
   });
 
-  [CONFIG.LABEL_AI_DRAFTED, CONFIG.LABEL_NEEDS_ROUTING, CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM, CONFIG.LABEL_SUBJECT_MISMATCH, CONFIG.LABEL_ALREADY_REPLIED_ONCE].forEach(name => {
+  [CONFIG.LABEL_AI_DRAFTED, CONFIG.LABEL_NEEDS_ROUTING, CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM, CONFIG.LABEL_SUBJECT_MISMATCH, CONFIG.LABEL_ALREADY_REPLIED_ONCE, CONFIG.LABEL_SUPPRESSED_NO_DRAFT].forEach(name => {
     if (!GmailApp.getUserLabelByName(name)) {
       GmailApp.createLabel(name);
       Logger.log('Created internal tracking label: ' + name);
@@ -772,8 +797,17 @@ function runReplyDrafter() {
   // three quietly no-op right here, before ANY Gmail API call, which is the
   // whole point: this check is pure Date math, essentially free either way.
   const nowInTz = new Date();
-  const dayName = Utilities.formatDate(nowInTz, 'Europe/Paris', 'EEE');
-  if (dayName === 'Sat' || dayName === 'Sun') {
+  // FIX (27 Aug 2026): this compared Utilities.formatDate(..., 'EEE') against
+  // the English literals 'Sat' and 'Sun'. 'EEE' renders through the SCRIPT
+  // PROJECT'S LOCALE, not a fixed one -- under a French locale, entirely
+  // plausible for a Europe/Paris project, it yields 'sam.' and 'dim.', the
+  // comparison never matches, and the weekend throttle silently never engages.
+  // No error, no log line, just four runs an hour all weekend forever.
+  // getDay() is locale-proof and returns in the script timezone (Europe/Paris,
+  // per appsscript.json), which is what this wants. Matches the day check
+  // already proven in lead_followup_sequences.gs.
+  const dayOfWeek = nowInTz.getDay(); // 0 = Sunday, 6 = Saturday
+  if (dayOfWeek === 0 || dayOfWeek === 6) {
     const minuteOfHour = Number(Utilities.formatDate(nowInTz, 'Europe/Paris', 'mm'));
     if (minuteOfHour >= 15) {
       Logger.log('Skipping runReplyDrafter -- weekend throttle (effectively hourly): not this run\'s turn (minute ' + minuteOfHour + ').');
@@ -848,480 +882,507 @@ function runReplyDrafterInner() {
   const labelAlreadyAnsweredByTeam = getOrCreateTrackingLabel_(CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM);
   const labelSubjectMismatch = getOrCreateTrackingLabel_(CONFIG.LABEL_SUBJECT_MISMATCH);
   const labelAlreadyRepliedOnce = getOrCreateTrackingLabel_(CONFIG.LABEL_ALREADY_REPLIED_ONCE);
+  const labelSuppressedNoDraft = getOrCreateTrackingLabel_(CONFIG.LABEL_SUPPRESSED_NO_DRAFT);
 
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const skipCache = loadSkipCache(ss);
 
-  const systemPrompt = buildSystemPrompt();
-  const stateDirectory = loadStateDirectory();
-
-  const addressClauses = CONFIG.REQUIRED_CC_ADDRESSES
-    .map(addr => 'to:"' + addr + '" OR cc:"' + addr + '"')
-    .join(' OR ');
-  // WIDENED (17 Aug 2026, real incident): was newer_than:3d, which silently
-  // ignored an entire real backlog (~200 threads, confirmed by dropping the
-  // date filter and checking directly) older than 3 days -- those leads were
-  // never invisible on purpose, missed_leads_audit.gs exists for exactly this
-  // gap but only EMAILS an alert, it never drafts. 180d matches the
-  // furthest missed-leads lookback (runWeekendDeepMissedLeadsAudit), so
-  // nothing genuinely reachable by either system falls in a gap between them.
-  const searchQuery = '(' + addressClauses + ') newer_than:180d -label:"' + CONFIG.LABEL_AI_DRAFTED + '" -label:"' + CONFIG.LABEL_STOP + '" -label:"' + CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM + '" -label:"' + CONFIG.LABEL_SUBJECT_MISMATCH + '" -label:"' + CONFIG.LABEL_ALREADY_REPLIED_ONCE + '"';
-
-  Logger.log('DIAGNOSTIC -- search query: ' + searchQuery);
-
-  let processed = 0;
-  let draftsCreated = 0;
-
-  // FIX (17 Aug 2026, real incident): widening the date window to 180d
-  // surfaced a real backlog, but GmailApp.search's third argument has a HARD
-  // ceiling of 500 -- one call can never return more than that, no matter
-  // how many threads actually match. With the backlog mostly consisting of
-  // "already answered by team" noise sorted newest-first, the entire first
-  // (and only) page of 500 got consumed without ever reaching
-  // MAX_THREADS_PER_RUN or MAX_DRAFTS_PER_RUN -- a run that was SUPPOSED to
-  // produce up to the draft cap instead produced only 3, because there was
-  // nothing left to look at, not because either cap was hit. Paginate with
-  // GmailApp.search's start offset so a single run can keep pulling pages
-  // until it actually reaches one of the two real caps -- bounded by a
-  // wall-clock budget below, since Apps Script hard-kills executions at 6
-  // minutes and iterating enough pages to reach a real cap could otherwise
-  // run past that and get killed mid-run instead of stopping cleanly.
-  const RUNTIME_BUDGET_MS = 5 * 60 * 1000; // 5 min, leaving a 1-min buffer before the 6-min hard limit
-  const runStartTime = Date.now();
-  const PAGE_SIZE = 500; // GmailApp.search's own hard per-call max
-
-  // FIX (13 Aug 2026): GmailApp.getDraftMessages() can lag behind drafts
-  // created earlier in this SAME execution (a propagation gap in Apps
-  // Script's Gmail service), so draftAlreadyExistsFor() alone isn't
-  // reliable within one run. Confirmed via a real duplicate: two separate
-  // Gmail threads for the same lead (gaderealty007@gmail.com, identical
-  // "I'm not interested" reply) both got drafted 21 seconds apart in the
-  // same run. This in-memory set catches that immediately; the Gmail scan
-  // stays in place as the cross-run backup.
-  const draftedThisRun = new Set();
-  let pageStart = 0;
-
-  // ADDED (19 Aug 2026): folder-wide pending-drafts cap, separate from
-  // MAX_DRAFTS_PER_RUN -- see CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER above for
-  // why this is needed now that the drafter runs on an unattended timer.
+  // FIX (27 Aug 2026, real incident): saveSkipCache was reached only on the
+  // normal fall-through and the folder-full early return. An uncaught throw
+  // escaped past both, out of this function, and into runReplyDrafter's
+  // catch -- which never saves. callLlmWithFallback throws whenever BOTH
+  // Kimi and Anthropic fail (quota_guard_and_alerting.gs), and it is called
+  // from classifyAndDraft outside any try, so this is a live path, not a
+  // hypothetical one. Both providers failing on thread 150 discarded all 149
+  // skip determinations already computed that run -- including the expensive
+  // getMessages()-derived ones -- and the next firing 15 minutes later redid
+  // every one of them. That feeds straight into the Gmail quota exhaustion
+  // this cache exists to prevent.
   //
-  // REAL INCIDENT, 20 Aug 2026 -- four different ways of asking GmailApp
-  // for this count were each wrong, in different ways, live:
-  //   1. GmailApp.getDraftMessages().length -- counts Joana's ~50+ permanent
-  //      reusable template drafts too ("Let's roll!", "Sales Briefing -
-  //      LEAD NAME - DATE", etc., some from Oct 2025) -- cap was dead on
-  //      arrival regardless of real backlog.
-  //   2. labelDrafted.getThreads().length -- the label alone is stale (443
-  //      -- a thread keeps it even after its draft is long gone, per
-  //      reconcile_missing_drafts.gs, which exists for exactly that gap).
-  //   3. GmailApp.getDraftMessages().filter(d => thread has label) -- let 70
-  //      real drafts through before a cap of 25 ever tripped.
-  //   4. GmailApp.search('in:draft label:"..."') combined in one query
-  //      returned 0 despite dozens of real matches; splitting into two
-  //      separate GmailApp.search() calls (no message-object access at all)
-  //      still reported 11-12 against a real 44+.
-  // Every one of those goes through GmailApp's wrapper. The one method
-  // verified correct against this exact account during the incident (via a
-  // live Gmail API call, independent of GmailApp) was the Gmail REST API's
-  // own drafts.list with a `q` filter. See countPendingAiDrafts_() below --
-  // calls that same endpoint directly via UrlFetchApp, bypassing GmailApp's
-  // wrapper for this one check. No manifest/advanced-service changes needed
-  // (a past attempt at that broke Git Pull -- see git history) since this
-  // uses the OAuth token Apps Script already grants GmailApp.
-  //
-  // FAILS CLOSED: if the API call itself fails for any reason, treat the
-  // folder as full (block new drafts) rather than defaulting to 0 (which is
-  // exactly the failure mode behind incidents #1-4 above -- an undercount
-  // silently allowing unlimited creation). Getting this wrong in the
-  // "blocks too eagerly" direction is a minor annoyance Joana can notice
-  // and rerun; getting it wrong the other way is the incident we just had.
-  const startingDraftCount = countPendingAiDrafts_();
-  Logger.log('DIAGNOSTIC -- ' + startingDraftCount + ' draft(s) already in the folder at run start (cap: ' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ').');
+  // A finally covers every exit: normal completion, all five `break
+  // pagination` sites, the folder-full return, and any throw. The separate
+  // save that used to sit on the folder-full path is gone, since a return
+  // inside try runs the finally on its way out.
+  try {
 
-  // ADDED (25 Aug 2026, per direct request -- "why isn't the first thing to
-  // check the MAX pending drafts"): a real gap. startingDraftCount was
-  // computed above, but nothing acted on it until deep inside the pagination
-  // loop, AFTER GmailApp.search() had already fetched up to 500 threads --
-  // real Gmail API cost paid even in the one case where it's already certain,
-  // before a single thread is looked at, that zero drafts can be created this
-  // run. Harmless on a run like today's (23/25, room for 2 -- the search was
-  // going to be needed anyway), but on any run where the folder is already
-  // AT or OVER cap -- exactly the situation this limit exists to react to,
-  // and the likely state on a busy day once drafts pile up faster than
-  // review -- the old code paid for that search and page-iteration setup on
-  // every single 15-minute firing for zero possible benefit. Bail before
-  // ever calling GmailApp.search() when there's no room to begin with.
-  if (startingDraftCount >= CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER) {
-    Logger.log('Folder already at/over MAX_PENDING_DRAFTS_IN_FOLDER (' + startingDraftCount + '/' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ') -- skipping this run entirely, no Gmail search performed. Will try again next run once the folder is reviewed down.');
-    saveSkipCache(ss, skipCache);
-    return;
-  }
+    const systemPrompt = buildSystemPrompt();
+    const stateDirectory = loadStateDirectory();
 
-  // ADDED (25 Aug 2026, real incident -- see draftAlreadyExistsFor()'s
-  // comment): fetch the existing Drafts folder ONCE for this whole run,
-  // instead of once per candidate thread inside the loop below.
-  const existingDrafts = GmailApp.getDraftMessages();
-  // ADDED (25 Aug 2026, per direct request -- "should we log each call so we
-  // keep track"): the flat "+1 per thread" self-tracked counter (below, in
-  // the main loop) badly undercounted real Gmail API cost for exactly the
-  // bug just fixed above -- getDraftMessages() plus one .getTo() call per
-  // existing draft, which used to happen per THREAD, now happens once here.
-  // Recording its real weight (1 for the list fetch + 1 per draft it
-  // contains) keeps the self-tracked total closer to what Google actually
-  // sees, so the proactive 40,000 soft cap in quota_guard_and_alerting.gs
-  // has a real chance of tripping before Google's own wall does next time.
-  recordGmailQuotaUsage_(1 + existingDrafts.length);
+    const addressClauses = CONFIG.REQUIRED_CC_ADDRESSES
+      .map(addr => 'to:"' + addr + '" OR cc:"' + addr + '"')
+      .join(' OR ');
+    // WIDENED (17 Aug 2026, real incident): was newer_than:3d, which silently
+    // ignored an entire real backlog (~200 threads, confirmed by dropping the
+    // date filter and checking directly) older than 3 days -- those leads were
+    // never invisible on purpose, missed_leads_audit.gs exists for exactly this
+    // gap but only EMAILS an alert, it never drafts. 180d matches the
+    // furthest missed-leads lookback (runWeekendDeepMissedLeadsAudit), so
+    // nothing genuinely reachable by either system falls in a gap between them.
+    const searchQuery = '(' + addressClauses + ') newer_than:180d -label:"' + CONFIG.LABEL_AI_DRAFTED + '" -label:"' + CONFIG.LABEL_STOP + '" -label:"' + CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM + '" -label:"' + CONFIG.LABEL_SUBJECT_MISMATCH + '" -label:"' + CONFIG.LABEL_ALREADY_REPLIED_ONCE + '" -label:"' + CONFIG.LABEL_SUPPRESSED_NO_DRAFT + '"';
 
-  pagination:
-  while (true) {
-    const page = GmailApp.search(searchQuery, pageStart, PAGE_SIZE);
-    Logger.log('DIAGNOSTIC -- fetched page starting at ' + pageStart + ': ' + page.length + ' threads');
-    if (page.length === 0) break;
+    Logger.log('DIAGNOSTIC -- search query: ' + searchQuery);
 
-    for (const thread of page) {
-      if (processed >= CONFIG.MAX_THREADS_PER_RUN) break pagination;
-      if (draftsCreated >= CONFIG.MAX_DRAFTS_PER_RUN) {
-        Logger.log('Reached MAX_DRAFTS_PER_RUN (' + CONFIG.MAX_DRAFTS_PER_RUN + ') -- stopping this run so the batch can be reviewed. Remaining threads will be picked up on the next run.');
-        break pagination;
-      }
-      if (startingDraftCount + draftsCreated >= CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER) {
-        Logger.log('Reached MAX_PENDING_DRAFTS_IN_FOLDER (' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ') -- the Drafts folder is full enough for now, stopping this run so it can be reviewed down before more get created. Remaining threads will be picked up on a future run.');
-        break pagination;
-      }
-      if (Date.now() - runStartTime > RUNTIME_BUDGET_MS) {
-        Logger.log('Approaching Apps Script\'s execution time limit -- stopping this run early so it completes cleanly instead of getting killed mid-run. Remaining threads will be picked up next run.');
-        break pagination;
-      }
-      // ADDED (22 Aug 2026, per direct request): recordGmailQuotaUsage_()
-      // below can flip isGmailQuotaExhausted() to true mid-run (self-imposed
-      // soft cap) -- check it here too, not just once at the top of
-      // runReplyDrafter(), so a long-running page loop actually stops the
-      // moment that happens instead of grinding through the rest of the page.
-      if (isGmailQuotaExhausted()) {
-        Logger.log('Gmail quota marked exhausted mid-run -- stopping cleanly. Remaining threads will be picked up next run.');
-        break pagination;
-      }
+    let processed = 0;
+    let draftsCreated = 0;
 
-    // PERMANENT (17 Aug 2026, real incident): checked BEFORE
-    // thread.getMessages() specifically. getFirstMessageSubject() is cheap
-    // thread-level metadata; getMessages() is the expensive full-body fetch
-    // that caused the original Gmail quota exhaustion incident. Most of the
-    // 180-day-widened backlog is unrelated newsletters/spam/Zoom-scheduling
-    // threads that happen to hit the CC criteria -- there's no reason to pay
-    // that cost for them at all, this run or any future one. A thread's
-    // first-message subject can never change, so a mismatch here is a
-    // permanent fact (unlike "already answered" or "not CC'd", which
-    // describe the thread's CURRENT state and could flip with new
-    // activity) -- safe to label and exclude from the search permanently.
-    const subject = thread.getFirstMessageSubject();
-    if (!CONFIG.SUBJECT_PATTERN.test(subject)) {
-      if (labelSubjectMismatch) thread.addLabel(labelSubjectMismatch);
-      Logger.log('DIAGNOSTIC -- skipped (subject pattern), labeled so it stops reappearing: ' + subject);
-      continue;
+    // FIX (17 Aug 2026, real incident): widening the date window to 180d
+    // surfaced a real backlog, but GmailApp.search's third argument has a HARD
+    // ceiling of 500 -- one call can never return more than that, no matter
+    // how many threads actually match. With the backlog mostly consisting of
+    // "already answered by team" noise sorted newest-first, the entire first
+    // (and only) page of 500 got consumed without ever reaching
+    // MAX_THREADS_PER_RUN or MAX_DRAFTS_PER_RUN -- a run that was SUPPOSED to
+    // produce up to the draft cap instead produced only 3, because there was
+    // nothing left to look at, not because either cap was hit. Paginate with
+    // GmailApp.search's start offset so a single run can keep pulling pages
+    // until it actually reaches one of the two real caps -- bounded by a
+    // wall-clock budget below, since Apps Script hard-kills executions at 6
+    // minutes and iterating enough pages to reach a real cap could otherwise
+    // run past that and get killed mid-run instead of stopping cleanly.
+    const RUNTIME_BUDGET_MS = 5 * 60 * 1000; // 5 min, leaving a 1-min buffer before the 6-min hard limit
+    const runStartTime = Date.now();
+    const PAGE_SIZE = 500; // GmailApp.search's own hard per-call max
+
+    // FIX (13 Aug 2026): GmailApp.getDraftMessages() can lag behind drafts
+    // created earlier in this SAME execution (a propagation gap in Apps
+    // Script's Gmail service), so draftAlreadyExistsFor() alone isn't
+    // reliable within one run. Confirmed via a real duplicate: two separate
+    // Gmail threads for the same lead (gaderealty007@gmail.com, identical
+    // "I'm not interested" reply) both got drafted 21 seconds apart in the
+    // same run. This in-memory set catches that immediately; the Gmail scan
+    // stays in place as the cross-run backup.
+    const draftedThisRun = new Set();
+    let pageStart = 0;
+
+    // ADDED (19 Aug 2026): folder-wide pending-drafts cap, separate from
+    // MAX_DRAFTS_PER_RUN -- see CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER above for
+    // why this is needed now that the drafter runs on an unattended timer.
+    //
+    // REAL INCIDENT, 20 Aug 2026 -- four different ways of asking GmailApp
+    // for this count were each wrong, in different ways, live:
+    //   1. GmailApp.getDraftMessages().length -- counts Joana's ~50+ permanent
+    //      reusable template drafts too ("Let's roll!", "Sales Briefing -
+    //      LEAD NAME - DATE", etc., some from Oct 2025) -- cap was dead on
+    //      arrival regardless of real backlog.
+    //   2. labelDrafted.getThreads().length -- the label alone is stale (443
+    //      -- a thread keeps it even after its draft is long gone, per
+    //      reconcile_missing_drafts.gs, which exists for exactly that gap).
+    //   3. GmailApp.getDraftMessages().filter(d => thread has label) -- let 70
+    //      real drafts through before a cap of 25 ever tripped.
+    //   4. GmailApp.search('in:draft label:"..."') combined in one query
+    //      returned 0 despite dozens of real matches; splitting into two
+    //      separate GmailApp.search() calls (no message-object access at all)
+    //      still reported 11-12 against a real 44+.
+    // Every one of those goes through GmailApp's wrapper. The one method
+    // verified correct against this exact account during the incident (via a
+    // live Gmail API call, independent of GmailApp) was the Gmail REST API's
+    // own drafts.list with a `q` filter. See countPendingAiDrafts_() below --
+    // calls that same endpoint directly via UrlFetchApp, bypassing GmailApp's
+    // wrapper for this one check. No manifest/advanced-service changes needed
+    // (a past attempt at that broke Git Pull -- see git history) since this
+    // uses the OAuth token Apps Script already grants GmailApp.
+    //
+    // FAILS CLOSED: if the API call itself fails for any reason, treat the
+    // folder as full (block new drafts) rather than defaulting to 0 (which is
+    // exactly the failure mode behind incidents #1-4 above -- an undercount
+    // silently allowing unlimited creation). Getting this wrong in the
+    // "blocks too eagerly" direction is a minor annoyance Joana can notice
+    // and rerun; getting it wrong the other way is the incident we just had.
+    const startingDraftCount = countPendingAiDrafts_();
+    Logger.log('DIAGNOSTIC -- ' + startingDraftCount + ' draft(s) already in the folder at run start (cap: ' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ').');
+
+    // ADDED (25 Aug 2026, per direct request -- "why isn't the first thing to
+    // check the MAX pending drafts"): a real gap. startingDraftCount was
+    // computed above, but nothing acted on it until deep inside the pagination
+    // loop, AFTER GmailApp.search() had already fetched up to 500 threads --
+    // real Gmail API cost paid even in the one case where it's already certain,
+    // before a single thread is looked at, that zero drafts can be created this
+    // run. Harmless on a run like today's (23/25, room for 2 -- the search was
+    // going to be needed anyway), but on any run where the folder is already
+    // AT or OVER cap -- exactly the situation this limit exists to react to,
+    // and the likely state on a busy day once drafts pile up faster than
+    // review -- the old code paid for that search and page-iteration setup on
+    // every single 15-minute firing for zero possible benefit. Bail before
+    // ever calling GmailApp.search() when there's no room to begin with.
+    if (startingDraftCount >= CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER) {
+      Logger.log('Folder already at/over MAX_PENDING_DRAFTS_IN_FOLDER (' + startingDraftCount + '/' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ') -- skipping this run entirely, no Gmail search performed. Will try again next run once the folder is reviewed down.');
+      return; // the finally below saves the cache on the way out
+
     }
 
-    // CACHE CHECK (17 Aug 2026, real incident): also before the expensive
-    // getMessages() fetch. If this thread hit a state-dependent skip
-    // reason recently (see the "SKIP CACHE" block above), don't redo the
-    // expensive check yet -- but unlike the subject-mismatch label above,
-    // this expires, so the thread gets a fresh look once the TTL passes.
-    const threadId = thread.getId();
-    const cacheEntry = skipCache[threadId];
-    const currentMessageCount = thread.getMessageCount(); // cheap thread-level metadata, not getMessages()
-    if (isSkipCacheFresh_(cacheEntry, currentMessageCount)) {
-      Logger.log('DIAGNOSTIC -- skipped (cached ' + Math.round((Date.now() - cacheEntry.lastCheckedAt.getTime()) / 60000) + 'm ago: ' + cacheEntry.reason + '): ' + subject);
-      continue;
-    }
+    // ADDED (25 Aug 2026, real incident -- see draftAlreadyExistsFor()'s
+    // comment): fetch the existing Drafts folder ONCE for this whole run,
+    // instead of once per candidate thread inside the loop below.
+    const existingDrafts = GmailApp.getDraftMessages();
+    // ADDED (25 Aug 2026, per direct request -- "should we log each call so we
+    // keep track"): the flat "+1 per thread" self-tracked counter (below, in
+    // the main loop) badly undercounted real Gmail API cost for exactly the
+    // bug just fixed above -- getDraftMessages() plus one .getTo() call per
+    // existing draft, which used to happen per THREAD, now happens once here.
+    // Recording its real weight (1 for the list fetch + 1 per draft it
+    // contains) keeps the self-tracked total closer to what Google actually
+    // sees, so the proactive 40,000 soft cap in quota_guard_and_alerting.gs
+    // has a real chance of tripping before Google's own wall does next time.
+    recordGmailQuotaUsage_(1 + existingDrafts.length);
 
-    const messages = thread.getMessages();
-    // SELF-TRACKED QUOTA COUNTER (22 Aug 2026, per direct request): see the
-    // fuller comment in quota_guard_and_alerting.gs -- this is a per-thread
-    // proxy, not an exact Gmail API call count, meant to self-stop BEFORE
-    // Google's real daily limit throws instead of only reacting after.
-    recordGmailQuotaUsage_(1);
-    const lastMsg = lastNonDraftMessage_(messages) || messages[messages.length - 1];
+    pagination:
+    while (true) {
+      const page = GmailApp.search(searchQuery, pageStart, PAGE_SIZE);
+      Logger.log('DIAGNOSTIC -- fetched page starting at ' + pageStart + ': ' + page.length + ' threads');
+      if (page.length === 0) break;
 
-    if (!isCcdToNetworkGroupAnywhereInThread(messages)) {
-      skipCache[threadId] = { reason: 'network never CC-d anywhere in this thread', lastCheckedAt: new Date(), messageCount: messages.length };
-      Logger.log('DIAGNOSTIC -- skipped (network never CC-d anywhere in this thread), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
-      continue;
-    }
+      for (const thread of page) {
+        if (processed >= CONFIG.MAX_THREADS_PER_RUN) break pagination;
+        if (draftsCreated >= CONFIG.MAX_DRAFTS_PER_RUN) {
+          Logger.log('Reached MAX_DRAFTS_PER_RUN (' + CONFIG.MAX_DRAFTS_PER_RUN + ') -- stopping this run so the batch can be reviewed. Remaining threads will be picked up on the next run.');
+          break pagination;
+        }
+        if (startingDraftCount + draftsCreated >= CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER) {
+          Logger.log('Reached MAX_PENDING_DRAFTS_IN_FOLDER (' + CONFIG.MAX_PENDING_DRAFTS_IN_FOLDER + ') -- the Drafts folder is full enough for now, stopping this run so it can be reviewed down before more get created. Remaining threads will be picked up on a future run.');
+          break pagination;
+        }
+        if (Date.now() - runStartTime > RUNTIME_BUDGET_MS) {
+          Logger.log('Approaching Apps Script\'s execution time limit -- stopping this run early so it completes cleanly instead of getting killed mid-run. Remaining threads will be picked up next run.');
+          break pagination;
+        }
+        // ADDED (22 Aug 2026, per direct request): recordGmailQuotaUsage_()
+        // below can flip isGmailQuotaExhausted() to true mid-run (self-imposed
+        // soft cap) -- check it here too, not just once at the top of
+        // runReplyDrafter(), so a long-running page loop actually stops the
+        // moment that happens instead of grinding through the rest of the page.
+        if (isGmailQuotaExhausted()) {
+          Logger.log('Gmail quota marked exhausted mid-run -- stopping cleanly. Remaining threads will be picked up next run.');
+          break pagination;
+        }
 
-    const lastSenderEmail = extractEmail(lastMsg.getFrom());
-    if (isRealTeamReply(lastSenderEmail)) {
-      recordPermanentSkip_(thread, labelAlreadyAnsweredByTeam, CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM, skipCache, threadId, messages.length,
-        'already answered by ' + lastSenderEmail,
-        'already answered by ' + lastSenderEmail,
-        subject);
-      continue;
-    }
-
-    // FIX (13 Aug 2026): if the last message's actual sender is neither an
-    // internal team address nor the network alias itself, it IS the real
-    // lead replying directly (network just CC'd) -- no need to parse the
-    // body for a forward header or quote line at all. Found via Karlie's
-    // thread: her direct reply has deeply nested ">>"-prefixed quote lines
-    // that never match the forward-parser's "On ... wrote:" check, causing
-    // a false "could not parse" even though the real email was sitting
-    // right there in the From header the whole time.
-    // FIX (27 Aug 2026, real incident): the 13 Aug shortcut below assumes a
-    // last sender who is neither internal nor the network address must BE the
-    // lead. Maildoso's sending aliases break that assumption -- they are
-    // neither, yet they are us. Treat an alias exactly like the network
-    // address: a signal to parse the forwarded body for the real lead, never
-    // a lead in its own right. See CONFIG.FORWARDING_ALIAS_DOMAINS.
-    const isAliasItself = CONFIG.REQUIRED_CC_ADDRESSES.some(addr => addr.toLowerCase() === lastSenderEmail.toLowerCase())
-      || isForwardedFromSendingAlias_(lastMsg, lastSenderEmail);
-    let leadEmail, originalSubjectFromForward;
-
-    if (!isAliasItself) {
-      leadEmail = lastSenderEmail;
-      originalSubjectFromForward = null;
-    } else {
-      const forwardInfo = extractForwardedLeadInfo(lastMsg);
-      if (!forwardInfo) {
-        skipCache[threadId] = { reason: 'could not parse forwarded lead info', lastCheckedAt: new Date(), messageCount: messages.length };
-        Logger.log('Could not parse forwarded lead info for: ' + subject + ' -- skipping rather than guessing, cached for ' + SKIP_CACHE_TTL_HOURS + 'h.');
+      // PERMANENT (17 Aug 2026, real incident): checked BEFORE
+      // thread.getMessages() specifically. getFirstMessageSubject() is cheap
+      // thread-level metadata; getMessages() is the expensive full-body fetch
+      // that caused the original Gmail quota exhaustion incident. Most of the
+      // 180-day-widened backlog is unrelated newsletters/spam/Zoom-scheduling
+      // threads that happen to hit the CC criteria -- there's no reason to pay
+      // that cost for them at all, this run or any future one. A thread's
+      // first-message subject can never change, so a mismatch here is a
+      // permanent fact (unlike "already answered" or "not CC'd", which
+      // describe the thread's CURRENT state and could flip with new
+      // activity) -- safe to label and exclude from the search permanently.
+      const subject = thread.getFirstMessageSubject();
+      if (!CONFIG.SUBJECT_PATTERN.test(subject)) {
+        if (labelSubjectMismatch) thread.addLabel(labelSubjectMismatch);
+        Logger.log('DIAGNOSTIC -- skipped (subject pattern), labeled so it stops reappearing: ' + subject);
         continue;
       }
-      leadEmail = forwardInfo.email;
-      originalSubjectFromForward = forwardInfo.originalSubject;
-    }
 
-    // FIX (26 Aug 2026, real incident): a bounce/mail-delivery-failure
-    // message landing as the thread's last message (e.g. an earlier draft
-    // got sent to a dead address and Gmail threaded the bounce back in)
-    // was being treated as if the bounce SENDER were the real lead --
-    // isNonHumanSender() already existed (missed_leads_audit.gs, shared
-    // global scope) but was never called here. AUTOREPLY_PATTERNS below
-    // catches some of this too, but only after leadEmail has already been
-    // used for the draft-exists check and everything past it -- this
-    // catches it immediately, before leadEmail is used for anything.
-    if (isNonHumanSender(leadEmail)) {
-      skipCache[threadId] = { reason: 'lead email looks like a bounce/system address (' + leadEmail + '), not a real lead', lastCheckedAt: new Date(), messageCount: messages.length };
-      Logger.log('DIAGNOSTIC -- skipped (lead email looks like a bounce/system address: ' + leadEmail + '), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
-      continue;
-    }
-
-    // BACKSTOP (27 Aug 2026, real incident): whatever path produced leadEmail
-    // above, it must be an outside human before it is used as a draft
-    // recipient. A draft addressed to one of our own addresses is never
-    // useful and, when a reviewer sends it, either bounces (the confirmed
-    // a.palmer@topaustinseo.site case) or mails the team itself. Cheap check,
-    // and it fails safe: a genuine lead can never match one of our own
-    // domains. Cached rather than labeled, since a later message on the same
-    // thread may well carry a parseable real lead.
-    if (isUnmailableAsLead_(leadEmail)) {
-      skipCache[threadId] = { reason: 'resolved lead email (' + leadEmail + ') is one of our own addresses, not a real lead', lastCheckedAt: new Date(), messageCount: messages.length };
-      Logger.log('DIAGNOSTIC -- skipped (resolved lead email ' + leadEmail + ' is one of our own addresses -- team, sending alias, or the network list -- not a real lead), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
-      continue;
-    }
-
-    if (draftedThisRun.has(leadEmail.toLowerCase()) || draftAlreadyExistsFor(leadEmail, existingDrafts)) {
-      skipCache[threadId] = { reason: 'draft already exists for ' + leadEmail, lastCheckedAt: new Date(), messageCount: messages.length };
-      Logger.log('DIAGNOSTIC -- skipped (draft already exists for ' + leadEmail + '), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
-      continue;
-    }
-
-    // ADDED (24 Aug 2026, per direct request -- Joana): only ever draft a
-    // lead's FIRST reply to the cold-outreach sequence. If we've ever sent
-    // this lead anything before -- an earlier AI-drafted reply, or a fully
-    // manual one -- this is now an ongoing conversation and goes to a human,
-    // not back through the AI. Checked against the real Sent folder by lead
-    // email address (not thread/label state) specifically because a second
-    // reply doesn't reliably land back in the same Gmail thread that carries
-    // LABEL_AI_DRAFTED -- see CONFIG.LABEL_ALREADY_REPLIED_ONCE's comment.
-    if (hasAlreadySentReplyTo_(leadEmail)) {
-      recordPermanentSkip_(thread, labelAlreadyRepliedOnce, CONFIG.LABEL_ALREADY_REPLIED_ONCE, skipCache, threadId, messages.length,
-        'already sent a reply to ' + leadEmail + ' before -- follow-up reply, left for the team',
-        'already sent a reply to ' + leadEmail + ' before -- this is a follow-up reply, per policy leaving it for the team',
-        subject);
-      continue;
-    }
-
-    const replyBody = extractProspectFreshReplyText(lastMsg);
-
-    const alreadyLabeledStop = threadHasLabel(thread, CONFIG.LABEL_STOP);
-    if (alreadyLabeledStop || OPT_OUT_PATTERNS.test(replyBody)) {
-      if (CONFIG.AUTO_APPLY_BUSINESS_LABELS && labelStop && !alreadyLabeledStop) thread.addLabel(labelStop);
-      thread.addLabel(labelDrafted);
-      delete skipCache[threadId]; // now permanently excluded via label -- any earlier cache entry is moot
-      Logger.log('Suppressed (opt-out): ' + subject + ' <' + leadEmail + '>');
-      processed++;
-      continue;
-    }
-
-    // FIX (19 Aug 2026, real incident): AUTOREPLY_PATTERNS only checked
-    // replyBody (extractProspectFreshReplyText's output), which walks the
-    // "fresh" text before the first quoted "On ... wrote:" line. For a
-    // DOUBLE-forwarded auto-reply (Mike McDonagh's OOO, itself wrapped in
-    // a "---------- Forwarded message ---------" block that is itself
-    // inside another layer of quoting), the entire OOO text ends up on
-    // quoted ("> ") lines with no unquoted "fresh" text above it --
-    // extractProspectFreshReplyText finds nothing, the regex tests against
-    // an empty/wrong string, and the thread slips through to the LLM. The
-    // LLM correctly recognized it as an OOO auto-reply in its own reasoning
-    // ("no reply should be drafted") but nothing acts on that -- a draft
-    // still got created, with no real content. Checking the last message's
-    // own Subject header too closes this gap cheaply and safely: an
-    // auto-responder almost always stamps "Out of Office" / "Automatic
-    // reply:" directly into its own subject line, and checking one
-    // message's own subject (not the full quoted body) doesn't reintroduce
-    // the false-positive risk the body-only check was deliberately built to
-    // avoid.
-    if (AUTOREPLY_PATTERNS.test(replyBody) || AUTOREPLY_PATTERNS.test(lastMsg.getSubject())) {
-      thread.addLabel(labelDrafted);
-      delete skipCache[threadId];
-      Logger.log('Suppressed (auto-reply/OOO, not a real reply): ' + subject + ' <' + leadEmail + '>');
-      processed++;
-      continue;
-    }
-
-    // ADDED (24 Aug 2026, per direct request -- "you are paying full price to
-    // classify declines and throwing the result away"). REAL WASTE, measured:
-    // 37 LLM calls today produced 2 drafts. Every thread reaching this point
-    // used to go straight into the full classifyAndDraft() call -- ~9k tokens
-    // of SOP plus a fully written reply body -- and THEN, only after paying
-    // for all of it, DRAFT_ONLY_POSITIVE_FOR_NOW would look at the returned
-    // category and bin the whole thing if it was a decline.
-    //
-    // This is a cheap gate in front of that: a short prompt (no SOP at all,
-    // just the reply text) that answers one question -- is this obviously a
-    // decline? On a hit we skip the expensive call entirely, saving the SOP
-    // input AND the drafted body we were never going to use.
-    //
-    // DELIBERATELY CONSERVATIVE, because the failure modes are not symmetric.
-    // Wrongly skipping a real lead is the Montell/Mariann/Mumu incident of
-    // 17 Aug -- a genuinely interested reply written off, which is the worst
-    // outcome this system has. Wrongly continuing just costs one full call,
-    // which is what happened every time before today. So the gate only acts
-    // on an unambiguous decline and is told in the prompt to answer "unsure"
-    // whenever there is any doubt at all; anything but a confident "decline"
-    // falls through to the full path unchanged.
-    //
-    // Only runs while DRAFT_ONLY_POSITIVE_FOR_NOW is on -- and as of 24 Aug
-    // 2026 it is off (see CONFIG), so this whole block is currently a no-op.
-    // Left in place rather than deleted: it's a real, tested cost-saver for
-    // exactly the situation the flag describes (declines are being binned,
-    // so don't pay full price to classify one), and turning that situation
-    // back on is one config flip away. Once DRAFT_ONLY_POSITIVE_FOR_NOW is
-    // off, there is nothing being binned, so there is nothing to save by
-    // skipping the full call -- every category, decline included, now gets
-    // a real classification and a real draft.
-    if (CONFIG.DRAFT_ONLY_POSITIVE_FOR_NOW) {
-      const cheapVerdict = looksLikeDeclineCheaply_(replyBody, subject);
-      if (cheapVerdict === 'decline') {
-        skipCache[threadId] = { reason: 'cheap pre-check read it as a clear decline (deprioritized, no full LLM call made)', lastCheckedAt: new Date(), messageCount: messages.length };
-        Logger.log('DIAGNOSTIC -- skipped BEFORE the expensive call (cheap pre-check: clear decline, and declines are deprioritized right now), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
+      // CACHE CHECK (17 Aug 2026, real incident): also before the expensive
+      // getMessages() fetch. If this thread hit a state-dependent skip
+      // reason recently (see the "SKIP CACHE" block above), don't redo the
+      // expensive check yet -- but unlike the subject-mismatch label above,
+      // this expires, so the thread gets a fresh look once the TTL passes.
+      const threadId = thread.getId();
+      const cacheEntry = skipCache[threadId];
+      const currentMessageCount = thread.getMessageCount(); // cheap thread-level metadata, not getMessages()
+      if (isSkipCacheFresh_(cacheEntry, currentMessageCount)) {
+        Logger.log('DIAGNOSTIC -- skipped (cached ' + Math.round((Date.now() - cacheEntry.lastCheckedAt.getTime()) / 60000) + 'm ago: ' + cacheEntry.reason + '): ' + subject);
         continue;
       }
-      Logger.log('DIAGNOSTIC -- cheap pre-check returned "' + cheapVerdict + '" for: ' + subject + ' -- proceeding to the full classify/draft call.');
-    }
 
-    const state = extractStateFromSubject(subject);
-    const matchedShow = state ? stateDirectory[normalizeState(state)] : null;
+      const messages = thread.getMessages();
+      // SELF-TRACKED QUOTA COUNTER (22 Aug 2026, per direct request): see the
+      // fuller comment in quota_guard_and_alerting.gs -- this is a per-thread
+      // proxy, not an exact Gmail API call count, meant to self-stop BEFORE
+      // Google's real daily limit throws instead of only reacting after.
+      recordGmailQuotaUsage_(1);
+      const lastMsg = lastNonDraftMessage_(messages) || messages[messages.length - 1];
 
-    const context = buildThreadContext(messages);
-    const sopMode = assignSopMode(threadId);
-    const likelyBlankOrSignatureOnly = looksLikeBlankOrSignatureOnly_(replyBody);
-    // systemPrompt is passed through UNCHANGED (pure SOP text) so it stays
-    // byte-identical across every call and both providers can actually cache
-    // it -- the mode override rides in the user prompt now.
-    const result = classifyAndDraft(systemPrompt, subject, context, leadEmail, state, matchedShow, buildSopModeOverride(sopMode), likelyBlankOrSignatureOnly);
+      if (!isCcdToNetworkGroupAnywhereInThread(messages)) {
+        skipCache[threadId] = { reason: 'network never CC-d anywhere in this thread', lastCheckedAt: new Date(), messageCount: messages.length };
+        Logger.log('DIAGNOSTIC -- skipped (network never CC-d anywhere in this thread), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
+        continue;
+      }
 
-    if (!result) {
-      skipCache[threadId] = { reason: 'classification/draft failed', lastCheckedAt: new Date(), messageCount: messages.length };
-      Logger.log('Classification/draft failed for: ' + subject + ', cached for ' + SKIP_CACHE_TTL_HOURS + 'h.');
-      continue;
-    }
+      const lastSenderEmail = extractEmail(lastMsg.getFrom());
+      if (isRealTeamReply(lastSenderEmail)) {
+        recordPermanentSkip_(thread, labelAlreadyAnsweredByTeam, CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM, skipCache, threadId, messages.length,
+          'already answered by ' + lastSenderEmail,
+          'already answered by ' + lastSenderEmail,
+          subject);
+        continue;
+      }
 
-    // OFF as of 24 Aug 2026 (see CONFIG.DRAFT_ONLY_POSITIVE_FOR_NOW -- per
-    // direct request, "handle declines too"). Was TEMPORARY since 18 Aug to
-    // focus review capacity on positive replies while the hub-guest-invite
-    // close on declines was unproven; that close has been live and working
-    // for weeks. This guard, and the cheap pre-check gate above it, both key
-    // off the same flag and both currently no-op -- flip it back to true to
-    // restore the old deprioritize-declines behavior in one place.
-    if (CONFIG.DRAFT_ONLY_POSITIVE_FOR_NOW && (result.category === 'no_decline' || result.category === 'no_data_error')) {
-      skipCache[threadId] = { reason: 'deprioritized (' + result.category + ') -- focusing on positive replies for now', lastCheckedAt: new Date(), messageCount: messages.length };
-      Logger.log('DIAGNOSTIC -- skipped (deprioritized ' + result.category + ' per today\'s request), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
-      continue;
-    }
+      // FIX (13 Aug 2026): if the last message's actual sender is neither an
+      // internal team address nor the network alias itself, it IS the real
+      // lead replying directly (network just CC'd) -- no need to parse the
+      // body for a forward header or quote line at all. Found via Karlie's
+      // thread: her direct reply has deeply nested ">>"-prefixed quote lines
+      // that never match the forward-parser's "On ... wrote:" check, causing
+      // a false "could not parse" even though the real email was sitting
+      // right there in the From header the whole time.
+      // FIX (27 Aug 2026, real incident): the 13 Aug shortcut below assumes a
+      // last sender who is neither internal nor the network address must BE the
+      // lead. Maildoso's sending aliases break that assumption -- they are
+      // neither, yet they are us. Treat an alias exactly like the network
+      // address: a signal to parse the forwarded body for the real lead, never
+      // a lead in its own right. See CONFIG.FORWARDING_ALIAS_DOMAINS.
+      const isAliasItself = CONFIG.REQUIRED_CC_ADDRESSES.some(addr => addr.toLowerCase() === lastSenderEmail.toLowerCase())
+        || isForwardedFromSendingAlias_(lastMsg, lastSenderEmail);
+      let leadEmail, originalSubjectFromForward;
 
-    if (result.category === 'no_decline' && matchedShow) {
-      commitNoDeclineVariation(result.candidateVariationIndex);
-    }
-
-    try {
-      const priorityNote = buildPriorityCheckNote(result);
-      const sopModeNote = buildSopModeNote(sopMode);
-      const llmProviderNote = buildLlmProviderNote(result.llmProvider);
-      // ADDED (25 Aug 2026, per direct request): a needsTeammateRouting draft
-      // is, by definition, handing this lead to a real qualification call --
-      // point the (BOOKING_LINK) token at Sean's Qualification Call link
-      // instead of Joana's own. Still just a default: nothing here is ever
-      // auto-sent, so if it should really be Bens, Joana swaps it before
-      // sending, same correction she was already making by hand.
-      const bookingLinkForThisDraft = result.needsTeammateRouting ? CONFIG.SEAN_QUALIFICATION_CALL_URL : null;
-      const aiReplyPlain = priorityNote + sopModeNote + llmProviderNote + sanitizeEmojiForGmail(markdownLinksToPlain(result.draftBody, bookingLinkForThisDraft));
-      const historyPlain = stripForwardHeaderKeepHistory(lastMsg.getPlainBody());
-      const fullPlainBody = aiReplyPlain + '\n\n' + historyPlain;
-
-      const priorityNoteHtml = escapeHtml(priorityNote).replace(/\n/g, '<br>');
-      const sopModeNoteHtml = escapeHtml(sopModeNote).replace(/\n/g, '<br>');
-      const llmProviderNoteHtml = escapeHtml(llmProviderNote).replace(/\n/g, '<br>');
-      const aiReplyHtml = priorityNoteHtml + sopModeNoteHtml + llmProviderNoteHtml + emojiToHtmlEntities(sanitizeEmojiForGmail(markdownLinksToHtml(result.draftBody, bookingLinkForThisDraft)));
-      const historyHtml = emojiToHtmlEntities(escapeHtml(historyPlain).replace(/\n/g, '<br>'));
-      const fullHtmlBody = aiReplyHtml + '<br><br>' + historyHtml;
-
-      const cleanSubject = (originalSubjectFromForward || subject).replace(/^(fwd:\s*)+/i, '').trim();
-      // FIX (17 Aug 2026, real incident -- Joana's top-priority, repeatedly
-      // flagged complaint): GmailApp.createDraft() composed a brand-new,
-      // unthreaded message every time. See createThreadedDraft_() above for
-      // the full history and why the base service can't do this correctly.
-      createThreadedDraft_(thread, lastMsg, leadEmail, CONFIG.NETWORK_CC_ON_REPLY, cleanSubject, fullPlainBody, fullHtmlBody);
-      // ADDED (25 Aug 2026, per direct request -- weighted quota tracking):
-      // actual draft creation is several real Gmail Advanced Service calls
-      // (not the flat "1" already recorded per thread above) -- creating the
-      // draft itself, plus the label operations right after this block.
-      // Weighted at 5 as a conservative estimate, not an exact count.
-      recordGmailQuotaUsage_(5);
-      var draftLink = 'https://mail.google.com/mail/u/0/#all/' + thread.getId();
-      draftedThisRun.add(leadEmail.toLowerCase());
-      draftsCreated++;
-      delete skipCache[threadId]; // now permanently excluded via LABEL_AI_DRAFTED below -- any earlier cache entry is moot
-    } catch (e) {
-      Logger.log('Draft creation failed for ' + subject + ': ' + e);
-      continue;
-    }
-
-    if (CONFIG.AUTO_APPLY_BUSINESS_LABELS) {
-      applyBusinessLabel(thread, result.category, labelYes, labelYesPenciled, labelNo);
-    }
-
-    thread.addLabel(labelDrafted);
-    if (result.needsTeammateRouting && labelNeedsRouting) {
-      thread.addLabel(labelNeedsRouting);
-    }
-    if (result.priority) {
-      const labelPriority = GmailApp.getUserLabelByName(CONFIG.LABEL_PRIORITY);
-      if (labelPriority) {
-        thread.addLabel(labelPriority);
+      if (!isAliasItself) {
+        leadEmail = lastSenderEmail;
+        originalSubjectFromForward = null;
       } else {
-        Logger.log('WARNING: CONFIG.LABEL_PRIORITY label not found in Gmail -- priority flag set but could not apply label.');
+        const forwardInfo = extractForwardedLeadInfo(lastMsg);
+        if (!forwardInfo) {
+          skipCache[threadId] = { reason: 'could not parse forwarded lead info', lastCheckedAt: new Date(), messageCount: messages.length };
+          Logger.log('Could not parse forwarded lead info for: ' + subject + ' -- skipping rather than guessing, cached for ' + SKIP_CACHE_TTL_HOURS + 'h.');
+          continue;
+        }
+        leadEmail = forwardInfo.email;
+        originalSubjectFromForward = forwardInfo.originalSubject;
       }
+
+      // FIX (26 Aug 2026, real incident): a bounce/mail-delivery-failure
+      // message landing as the thread's last message (e.g. an earlier draft
+      // got sent to a dead address and Gmail threaded the bounce back in)
+      // was being treated as if the bounce SENDER were the real lead --
+      // isNonHumanSender() already existed (missed_leads_audit.gs, shared
+      // global scope) but was never called here. AUTOREPLY_PATTERNS below
+      // catches some of this too, but only after leadEmail has already been
+      // used for the draft-exists check and everything past it -- this
+      // catches it immediately, before leadEmail is used for anything.
+      if (isNonHumanSender(leadEmail)) {
+        skipCache[threadId] = { reason: 'lead email looks like a bounce/system address (' + leadEmail + '), not a real lead', lastCheckedAt: new Date(), messageCount: messages.length };
+        Logger.log('DIAGNOSTIC -- skipped (lead email looks like a bounce/system address: ' + leadEmail + '), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
+        continue;
+      }
+
+      // BACKSTOP (27 Aug 2026, real incident): whatever path produced leadEmail
+      // above, it must be an outside human before it is used as a draft
+      // recipient. A draft addressed to one of our own addresses is never
+      // useful and, when a reviewer sends it, either bounces (the confirmed
+      // a.palmer@topaustinseo.site case) or mails the team itself. Cheap check,
+      // and it fails safe: a genuine lead can never match one of our own
+      // domains. Cached rather than labeled, since a later message on the same
+      // thread may well carry a parseable real lead.
+      if (isUnmailableAsLead_(leadEmail)) {
+        skipCache[threadId] = { reason: 'resolved lead email (' + leadEmail + ') is one of our own addresses, not a real lead', lastCheckedAt: new Date(), messageCount: messages.length };
+        Logger.log('DIAGNOSTIC -- skipped (resolved lead email ' + leadEmail + ' is one of our own addresses -- team, sending alias, or the network list -- not a real lead), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
+        continue;
+      }
+
+      if (draftedThisRun.has(leadEmail.toLowerCase()) || draftAlreadyExistsFor(leadEmail, existingDrafts)) {
+        skipCache[threadId] = { reason: 'draft already exists for ' + leadEmail, lastCheckedAt: new Date(), messageCount: messages.length };
+        Logger.log('DIAGNOSTIC -- skipped (draft already exists for ' + leadEmail + '), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
+        continue;
+      }
+
+      // ADDED (24 Aug 2026, per direct request -- Joana): only ever draft a
+      // lead's FIRST reply to the cold-outreach sequence. If we've ever sent
+      // this lead anything before -- an earlier AI-drafted reply, or a fully
+      // manual one -- this is now an ongoing conversation and goes to a human,
+      // not back through the AI. Checked against the real Sent folder by lead
+      // email address (not thread/label state) specifically because a second
+      // reply doesn't reliably land back in the same Gmail thread that carries
+      // LABEL_AI_DRAFTED -- see CONFIG.LABEL_ALREADY_REPLIED_ONCE's comment.
+      if (hasAlreadySentReplyTo_(leadEmail)) {
+        recordPermanentSkip_(thread, labelAlreadyRepliedOnce, CONFIG.LABEL_ALREADY_REPLIED_ONCE, skipCache, threadId, messages.length,
+          'already sent a reply to ' + leadEmail + ' before -- follow-up reply, left for the team',
+          'already sent a reply to ' + leadEmail + ' before -- this is a follow-up reply, per policy leaving it for the team',
+          subject);
+        continue;
+      }
+
+      const replyBody = extractProspectFreshReplyText(lastMsg);
+
+      const alreadyLabeledStop = threadHasLabel(thread, CONFIG.LABEL_STOP);
+      if (alreadyLabeledStop || OPT_OUT_PATTERNS.test(replyBody)) {
+        if (CONFIG.AUTO_APPLY_BUSINESS_LABELS && labelStop && !alreadyLabeledStop) thread.addLabel(labelStop);
+        // CHANGED (27 Aug 2026): was thread.addLabel(labelDrafted) -- see
+        // CONFIG.LABEL_SUPPRESSED_NO_DRAFT for the nightly ping-pong that caused.
+        recordPermanentSkip_(thread, labelSuppressedNoDraft, CONFIG.LABEL_SUPPRESSED_NO_DRAFT, skipCache, threadId, messages.length,
+          'opt-out -- suppressed, no draft made',
+          'suppressed (opt-out): ' + leadEmail,
+          subject);
+        processed++;
+        continue;
+      }
+
+      // FIX (19 Aug 2026, real incident): AUTOREPLY_PATTERNS only checked
+      // replyBody (extractProspectFreshReplyText's output), which walks the
+      // "fresh" text before the first quoted "On ... wrote:" line. For a
+      // DOUBLE-forwarded auto-reply (Mike McDonagh's OOO, itself wrapped in
+      // a "---------- Forwarded message ---------" block that is itself
+      // inside another layer of quoting), the entire OOO text ends up on
+      // quoted ("> ") lines with no unquoted "fresh" text above it --
+      // extractProspectFreshReplyText finds nothing, the regex tests against
+      // an empty/wrong string, and the thread slips through to the LLM. The
+      // LLM correctly recognized it as an OOO auto-reply in its own reasoning
+      // ("no reply should be drafted") but nothing acts on that -- a draft
+      // still got created, with no real content. Checking the last message's
+      // own Subject header too closes this gap cheaply and safely: an
+      // auto-responder almost always stamps "Out of Office" / "Automatic
+      // reply:" directly into its own subject line, and checking one
+      // message's own subject (not the full quoted body) doesn't reintroduce
+      // the false-positive risk the body-only check was deliberately built to
+      // avoid.
+      if (AUTOREPLY_PATTERNS.test(replyBody) || AUTOREPLY_PATTERNS.test(lastMsg.getSubject())) {
+        // CHANGED (27 Aug 2026): was thread.addLabel(labelDrafted) -- see
+        // CONFIG.LABEL_SUPPRESSED_NO_DRAFT for the nightly ping-pong that caused.
+        recordPermanentSkip_(thread, labelSuppressedNoDraft, CONFIG.LABEL_SUPPRESSED_NO_DRAFT, skipCache, threadId, messages.length,
+          'auto-reply/OOO -- suppressed, no draft made',
+          'suppressed (auto-reply/OOO, not a real reply): ' + leadEmail,
+          subject);
+        processed++;
+        continue;
+      }
+
+      // ADDED (24 Aug 2026, per direct request -- "you are paying full price to
+      // classify declines and throwing the result away"). REAL WASTE, measured:
+      // 37 LLM calls today produced 2 drafts. Every thread reaching this point
+      // used to go straight into the full classifyAndDraft() call -- ~9k tokens
+      // of SOP plus a fully written reply body -- and THEN, only after paying
+      // for all of it, DRAFT_ONLY_POSITIVE_FOR_NOW would look at the returned
+      // category and bin the whole thing if it was a decline.
+      //
+      // This is a cheap gate in front of that: a short prompt (no SOP at all,
+      // just the reply text) that answers one question -- is this obviously a
+      // decline? On a hit we skip the expensive call entirely, saving the SOP
+      // input AND the drafted body we were never going to use.
+      //
+      // DELIBERATELY CONSERVATIVE, because the failure modes are not symmetric.
+      // Wrongly skipping a real lead is the Montell/Mariann/Mumu incident of
+      // 17 Aug -- a genuinely interested reply written off, which is the worst
+      // outcome this system has. Wrongly continuing just costs one full call,
+      // which is what happened every time before today. So the gate only acts
+      // on an unambiguous decline and is told in the prompt to answer "unsure"
+      // whenever there is any doubt at all; anything but a confident "decline"
+      // falls through to the full path unchanged.
+      //
+      // Only runs while DRAFT_ONLY_POSITIVE_FOR_NOW is on -- and as of 24 Aug
+      // 2026 it is off (see CONFIG), so this whole block is currently a no-op.
+      // Left in place rather than deleted: it's a real, tested cost-saver for
+      // exactly the situation the flag describes (declines are being binned,
+      // so don't pay full price to classify one), and turning that situation
+      // back on is one config flip away. Once DRAFT_ONLY_POSITIVE_FOR_NOW is
+      // off, there is nothing being binned, so there is nothing to save by
+      // skipping the full call -- every category, decline included, now gets
+      // a real classification and a real draft.
+      if (CONFIG.DRAFT_ONLY_POSITIVE_FOR_NOW) {
+        const cheapVerdict = looksLikeDeclineCheaply_(replyBody, subject);
+        if (cheapVerdict === 'decline') {
+          skipCache[threadId] = { reason: 'cheap pre-check read it as a clear decline (deprioritized, no full LLM call made)', lastCheckedAt: new Date(), messageCount: messages.length };
+          Logger.log('DIAGNOSTIC -- skipped BEFORE the expensive call (cheap pre-check: clear decline, and declines are deprioritized right now), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
+          continue;
+        }
+        Logger.log('DIAGNOSTIC -- cheap pre-check returned "' + cheapVerdict + '" for: ' + subject + ' -- proceeding to the full classify/draft call.');
+      }
+
+      const state = extractStateFromSubject(subject);
+      const matchedShow = state ? stateDirectory[normalizeState(state)] : null;
+
+      const context = buildThreadContext(messages);
+      const sopMode = assignSopMode(threadId);
+      const likelyBlankOrSignatureOnly = looksLikeBlankOrSignatureOnly_(replyBody);
+      // systemPrompt is passed through UNCHANGED (pure SOP text) so it stays
+      // byte-identical across every call and both providers can actually cache
+      // it -- the mode override rides in the user prompt now.
+      const result = classifyAndDraft(systemPrompt, subject, context, leadEmail, state, matchedShow, buildSopModeOverride(sopMode), likelyBlankOrSignatureOnly);
+
+      if (!result) {
+        skipCache[threadId] = { reason: 'classification/draft failed', lastCheckedAt: new Date(), messageCount: messages.length };
+        Logger.log('Classification/draft failed for: ' + subject + ', cached for ' + SKIP_CACHE_TTL_HOURS + 'h.');
+        continue;
+      }
+
+      // OFF as of 24 Aug 2026 (see CONFIG.DRAFT_ONLY_POSITIVE_FOR_NOW -- per
+      // direct request, "handle declines too"). Was TEMPORARY since 18 Aug to
+      // focus review capacity on positive replies while the hub-guest-invite
+      // close on declines was unproven; that close has been live and working
+      // for weeks. This guard, and the cheap pre-check gate above it, both key
+      // off the same flag and both currently no-op -- flip it back to true to
+      // restore the old deprioritize-declines behavior in one place.
+      if (CONFIG.DRAFT_ONLY_POSITIVE_FOR_NOW && (result.category === 'no_decline' || result.category === 'no_data_error')) {
+        skipCache[threadId] = { reason: 'deprioritized (' + result.category + ') -- focusing on positive replies for now', lastCheckedAt: new Date(), messageCount: messages.length };
+        Logger.log('DIAGNOSTIC -- skipped (deprioritized ' + result.category + ' per today\'s request), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
+        continue;
+      }
+
+      if (result.category === 'no_decline' && matchedShow) {
+        commitNoDeclineVariation(result.candidateVariationIndex);
+      }
+
+      try {
+        const priorityNote = buildPriorityCheckNote(result);
+        const sopModeNote = buildSopModeNote(sopMode);
+        const llmProviderNote = buildLlmProviderNote(result.llmProvider);
+        // ADDED (25 Aug 2026, per direct request): a needsTeammateRouting draft
+        // is, by definition, handing this lead to a real qualification call --
+        // point the (BOOKING_LINK) token at Sean's Qualification Call link
+        // instead of Joana's own. Still just a default: nothing here is ever
+        // auto-sent, so if it should really be Bens, Joana swaps it before
+        // sending, same correction she was already making by hand.
+        const bookingLinkForThisDraft = result.needsTeammateRouting ? CONFIG.SEAN_QUALIFICATION_CALL_URL : null;
+        const aiReplyPlain = priorityNote + sopModeNote + llmProviderNote + sanitizeEmojiForGmail(markdownLinksToPlain(result.draftBody, bookingLinkForThisDraft));
+        const historyPlain = stripForwardHeaderKeepHistory(lastMsg.getPlainBody());
+        const fullPlainBody = aiReplyPlain + '\n\n' + historyPlain;
+
+        const priorityNoteHtml = escapeHtml(priorityNote).replace(/\n/g, '<br>');
+        const sopModeNoteHtml = escapeHtml(sopModeNote).replace(/\n/g, '<br>');
+        const llmProviderNoteHtml = escapeHtml(llmProviderNote).replace(/\n/g, '<br>');
+        const aiReplyHtml = priorityNoteHtml + sopModeNoteHtml + llmProviderNoteHtml + emojiToHtmlEntities(sanitizeEmojiForGmail(markdownLinksToHtml(result.draftBody, bookingLinkForThisDraft)));
+        const historyHtml = emojiToHtmlEntities(escapeHtml(historyPlain).replace(/\n/g, '<br>'));
+        const fullHtmlBody = aiReplyHtml + '<br><br>' + historyHtml;
+
+        const cleanSubject = (originalSubjectFromForward || subject).replace(/^(fwd:\s*)+/i, '').trim();
+        // FIX (17 Aug 2026, real incident -- Joana's top-priority, repeatedly
+        // flagged complaint): GmailApp.createDraft() composed a brand-new,
+        // unthreaded message every time. See createThreadedDraft_() above for
+        // the full history and why the base service can't do this correctly.
+        createThreadedDraft_(thread, lastMsg, leadEmail, CONFIG.NETWORK_CC_ON_REPLY, cleanSubject, fullPlainBody, fullHtmlBody);
+        // ADDED (25 Aug 2026, per direct request -- weighted quota tracking):
+        // actual draft creation is several real Gmail Advanced Service calls
+        // (not the flat "1" already recorded per thread above) -- creating the
+        // draft itself, plus the label operations right after this block.
+        // Weighted at 5 as a conservative estimate, not an exact count.
+        recordGmailQuotaUsage_(5);
+        var draftLink = 'https://mail.google.com/mail/u/0/#all/' + thread.getId();
+        draftedThisRun.add(leadEmail.toLowerCase());
+        draftsCreated++;
+        delete skipCache[threadId]; // now permanently excluded via LABEL_AI_DRAFTED below -- any earlier cache entry is moot
+      } catch (e) {
+        Logger.log('Draft creation failed for ' + subject + ': ' + e);
+        continue;
+      }
+
+      if (CONFIG.AUTO_APPLY_BUSINESS_LABELS) {
+        applyBusinessLabel(thread, result.category, labelYes, labelYesPenciled, labelNo);
+      }
+
+      thread.addLabel(labelDrafted);
+      if (result.needsTeammateRouting && labelNeedsRouting) {
+        thread.addLabel(labelNeedsRouting);
+      }
+      if (result.priority) {
+        const labelPriority = GmailApp.getUserLabelByName(CONFIG.LABEL_PRIORITY);
+        if (labelPriority) {
+          thread.addLabel(labelPriority);
+        } else {
+          Logger.log('WARNING: CONFIG.LABEL_PRIORITY label not found in Gmail -- priority flag set but could not apply label.');
+        }
+      }
+
+      logDraftToSheet(thread.getId(), subject, leadEmail, result.category, result.needsTeammateRouting, result.draftBody, draftLink, sopMode, result.llmProvider, result.llmCostUsd);
+
+        processed++;
+      }
+
+      if (page.length < PAGE_SIZE) break; // short page -- that was the last of the real backlog
+      pageStart += PAGE_SIZE;
     }
-
-    logDraftToSheet(thread.getId(), subject, leadEmail, result.category, result.needsTeammateRouting, result.draftBody, draftLink, sopMode, result.llmProvider, result.llmCostUsd);
-
-      processed++;
-    }
-
-    if (page.length < PAGE_SIZE) break; // short page -- that was the last of the real backlog
-    pageStart += PAGE_SIZE;
+  } finally {
+    saveSkipCache(ss, skipCache);
   }
 
-  saveSkipCache(ss, skipCache);
   Logger.log('Run complete. Threads processed: ' + processed + ', drafts created: ' + draftsCreated);
 }
 
@@ -1538,7 +1599,8 @@ const SELF_OWNED_TRACKING_LABELS = [
   'AI-NeedsTeammateRouting',
   'AI-Skipped-AlreadyAnsweredByTeam',
   'AI-Skipped-NotPodcastOutreach',
-  'AI-Skipped-AlreadyRepliedOnce'
+  'AI-Skipped-AlreadyRepliedOnce',
+  'AI-Skipped-Suppressed'
 ];
 
 // FIX (27 Aug 2026, real incident): CONFIG.LABEL_ALREADY_REPLIED_ONCE was
@@ -2002,11 +2064,31 @@ function countPendingAiDrafts_() {
 // just leadEmail and keep the original always-fresh behavior.
 function draftAlreadyExistsFor(leadEmail, precomputedDrafts) {
   const drafts = precomputedDrafts || GmailApp.getDraftMessages();
-  const target = leadEmail.toLowerCase();
+  const target = leadEmail.toLowerCase().trim();
   for (let i = 0; i < drafts.length; i++) {
     try {
-      const to = (drafts[i].getTo() || '').toLowerCase();
-      if (to.indexOf(target) !== -1) return true;
+      // FIX (27 Aug 2026, real incident): this was a SUBSTRING test --
+      // to.indexOf(target) !== -1 -- so any lead address that happens to be a
+      // substring of a different draft's recipient matched. ann@x.com matched
+      // a draft addressed to joann@x.com; sara@y.com matched tamsara@y.com.
+      // The thread was then skipped as "draft already exists" AND that verdict
+      // was written to the skip cache for SKIP_CACHE_TTL_HOURS, so a single
+      // spurious match suppressed a real lead for six hours at a stretch.
+      //
+      // This is what diagnoseDraftRecipients() was added on 26 Aug to chase:
+      // a run reported "draft already exists" for four unrelated leads against
+      // a folder holding one draft. It was read at the time as a human editing
+      // drafts mid-run. It was not -- it was this.
+      //
+      // Compare parsed addresses instead. getTo() returns a comma-separated
+      // recipient list which may be either bare addresses or "Name <addr>"
+      // form, so split and run each through extractEmail (which handles both).
+      const recipients = String(drafts[i].getTo() || '').split(',');
+      for (let r = 0; r < recipients.length; r++) {
+        const one = recipients[r].trim();
+        if (!one) continue;
+        if (extractEmail(one) === target) return true;
+      }
     } catch (e) {
       Logger.log('Skipped a draft while checking for duplicates (likely being edited/deleted concurrently): ' + e);
     }

@@ -661,6 +661,40 @@ function runLeadFollowUpCycle() {
   // getting silently wiped by Git Pull. Both draft-creation paths below
   // (Podcast Sales and Hub Guest follow-ups) go through createThreadedDraft_().
   if (!assertGmailAdvancedServiceEnabled('runLeadFollowUpCycle')) return;
+
+  // ADDED (27 Aug 2026, real incident): this is the project's OTHER
+  // draft-creating entry point and it held no script lock, so the lock
+  // runReplyDrafter takes provided no mutual exclusion between the only two
+  // things that write drafts. They overlap most days -- this fires at 6 AM,
+  // the drafter every 15 minutes.
+  //
+  // Three consequences, all real. (1) The drafter snapshots the folder count
+  // once at the start of its run and reasons from it for the next 5 minutes;
+  // drafts created here in that window are invisible to it, so
+  // MAX_PENDING_DRAFTS_IN_FOLDER can be overshot -- the exact cap added after
+  // the 19-20 Aug incident. (2) Both systems ask draftAlreadyExistsFor the
+  // same question over the same folder, so a follow-up draft to a lead makes
+  // the drafter skip that lead's genuine new inbound reply, and cache the
+  // skip for 6 hours at a time, for as long as the follow-up sits unreviewed.
+  // (3) With no lock, two concurrent copies of THIS function (the wrong-account
+  // trigger scenario documented in setup_all_triggers.gs) both read the daily
+  // counters before either writes, and both blow through the caps.
+  //
+  // 2 minutes, and an alert rather than a silent return, for the same reason
+  // as reconcileMissingDrafts: this runs once a day, so waiting out a drafter
+  // run beats losing the day -- and a lost batch of follow-ups should never be
+  // something you find out about by noticing an empty queue a week later.
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(120000)) {
+    Logger.log('runLeadFollowUpCycle could not acquire the script lock within 2 minutes -- another job in this project (most likely runReplyDrafter, which holds it for up to 5 minutes) is still running. Skipping this run.');
+    sendOpsAlert(
+      'runLeadFollowUpCycle skipped -- could not get the script lock',
+      'runLeadFollowUpCycle waited 2 minutes for the project-wide script lock and did not get it, so today\'s follow-up batch was NOT drafted. Goodness will have no new follow-up drafts to review today. The lock is held by whichever job was running -- runReplyDrafter fires every 15 minutes and holds it for up to 5, so it is the usual holder. If this repeats, the 6 AM schedule is colliding with the drafter and one of them should move.'
+    );
+    return;
+  }
+
+  try {
   ensureFollowUpTabsExistV2();
   // SELF-HEAL (15 Aug 2026): reconcile BEFORE registering/advancing, so any
   // row stuck at "_APPROVAL" whose draft was deleted (manually or via a wipe)
@@ -678,6 +712,9 @@ function runLeadFollowUpCycle() {
     Logger.log('Hub Guest follow-up drafting SKIPPED -- HUB_GUEST_FOLLOWUPS_ENABLED is false pending a fix to the upstream no_decline misclassification. Registration still ran; no new drafts created for this cadence.');
   }
   Logger.log('Lead follow-up cycle complete (Podcast Sales active, Hub Guest paused).');
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function runFollowUpDeepDiveBackfill() {
