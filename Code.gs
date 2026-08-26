@@ -985,6 +985,21 @@ function runReplyDrafterInner() {
       originalSubjectFromForward = forwardInfo.originalSubject;
     }
 
+    // FIX (26 Aug 2026, real incident): a bounce/mail-delivery-failure
+    // message landing as the thread's last message (e.g. an earlier draft
+    // got sent to a dead address and Gmail threaded the bounce back in)
+    // was being treated as if the bounce SENDER were the real lead --
+    // isNonHumanSender() already existed (missed_leads_audit.gs, shared
+    // global scope) but was never called here. AUTOREPLY_PATTERNS below
+    // catches some of this too, but only after leadEmail has already been
+    // used for the draft-exists check and everything past it -- this
+    // catches it immediately, before leadEmail is used for anything.
+    if (isNonHumanSender(leadEmail)) {
+      skipCache[threadId] = { reason: 'lead email looks like a bounce/system address (' + leadEmail + '), not a real lead', lastCheckedAt: new Date(), messageCount: messages.length };
+      Logger.log('DIAGNOSTIC -- skipped (lead email looks like a bounce/system address: ' + leadEmail + '), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
+      continue;
+    }
+
     if (draftedThisRun.has(leadEmail.toLowerCase()) || draftAlreadyExistsFor(leadEmail, existingDrafts)) {
       skipCache[threadId] = { reason: 'draft already exists for ' + leadEmail, lastCheckedAt: new Date(), messageCount: messages.length };
       Logger.log('DIAGNOSTIC -- skipped (draft already exists for ' + leadEmail + '), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
