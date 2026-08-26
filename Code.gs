@@ -116,12 +116,25 @@ const CONFIG = {
   //
   // Match is by domain, since the local part rotates per sending mailbox.
   // Add new outreach domains here as Maildoso sending accounts are added.
+  // Harvested from a live sweep of Joana's mailbox (27 Aug 2026), not from
+  // guesswork. Maildoso spins up new sending domains continuously, so this
+  // list WILL fall behind -- it is the secondary net. The primary detection
+  // is structural and needs no list; see isForwardedFromSendingAlias_().
   FORWARDING_ALIAS_DOMAINS: [
-    'topaustinseo.site',            // a.palmer@ -- confirmed, caused the bounce above
-    'reachpilotteam.com',           // anna.wilson@
-    'iconsrealestatesteam.site',    // j.peixe@
-    'pixingsproduct.com',           // joanap@ -- seen in a forwarded To: line
-    'theiconsofrealestatepodcast.com' // kris.r@ -- retired (outreach ran under Kris's name before Joana)
+    'topaustinseo.site',              // a.palmer@       -- bounced 25 Aug (Jennifer)
+    'scalingflowly.com',              // joana-peixe@    -- bounced 21 Aug (Michael)
+    'iconsrealestatenet.com',         // joana_peixe@    -- bounced 21 Aug (Kathy)
+    'scaleflowly.com',                // joana@          -- bounced 25 May (Cameron)
+    'iconsofrealestatepodcasts.com',  // joana@          -- bounced twice, 21 Aug
+    'reachpilotteam.com',             // anna.wilson@
+    'reachpilothub.com',              // awilson@        -- distinct domain from the above
+    'iconsrealestatesteam.site',      // j.peixe@
+    'iconsrealestatemedia.com',       // jpeixe@
+    'iconsrealestatefocus.com',       // joana@
+    'iconsrealestate.com',            // joana@          -- note: NOT iconsofrealestate.com
+    'pixingsproduct.com',             // joanap@
+    'battletowardssafetymail.info',   // tevin@
+    'theiconsofrealestatepodcast.com' // kris.r@         -- retired (outreach ran under Kris's name before Joana)
   ],
 
   LABEL_YES: '1. Spam YES',
@@ -1058,7 +1071,7 @@ function runReplyDrafterInner() {
     // address: a signal to parse the forwarded body for the real lead, never
     // a lead in its own right. See CONFIG.FORWARDING_ALIAS_DOMAINS.
     const isAliasItself = CONFIG.REQUIRED_CC_ADDRESSES.some(addr => addr.toLowerCase() === lastSenderEmail.toLowerCase())
-      || isForwardingAlias(lastSenderEmail);
+      || isForwardedFromSendingAlias_(lastMsg, lastSenderEmail);
     let leadEmail, originalSubjectFromForward;
 
     if (!isAliasItself) {
@@ -1581,6 +1594,32 @@ function isForwardingAlias(email) {
   if (!email) return false;
   const e = String(email).toLowerCase().trim();
   return CONFIG.FORWARDING_ALIAS_DOMAINS.some(domain => e.endsWith('@' + domain));
+}
+
+// PRIMARY sending-alias detection (27 Aug 2026). A domain allowlist alone
+// cannot hold: a live sweep of Joana's mailbox turned up 14 distinct Maildoso
+// sending domains and they keep rotating, so any hardcoded list is out of
+// date the moment a new mailbox is provisioned -- and being out of date here
+// means drafting to an address that bounces.
+//
+// The structural signal needs no list. Every alias forward looks the same:
+// the message is addressed TO the network list (not merely CC-d to it, which
+// is what a lead's own reply does) and its body opens with Gmail's forward
+// header block. A genuine direct reply from a lead is addressed to Joana with
+// network@ on Cc, so it never matches.
+//
+// Requiring BOTH conditions is what keeps this safe. Checking for a forward
+// block alone would misfire constantly, since a lead replying directly quotes
+// the whole chain -- forward header included -- in their own reply.
+function isForwardedFromSendingAlias_(message, senderEmail) {
+  if (isForwardingAlias(senderEmail)) return true;  // known domain -- secondary net
+  if (isInternal(senderEmail)) return false;        // a real teammate; isRealTeamReply handles that
+
+  const to = (message.getTo() || '').toLowerCase();
+  const addressedToNetwork = CONFIG.REQUIRED_CC_ADDRESSES.some(addr => to.indexOf(addr.toLowerCase()) !== -1);
+  if (!addressedToNetwork) return false;
+
+  return /-{3,}\s*Forwarded message\s*-{3,}/i.test(message.getPlainBody());
 }
 
 // A lead address must be a real outside human: not the team, not a sending
