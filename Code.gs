@@ -1768,6 +1768,31 @@ function draftAlreadyExistsFor(leadEmail, precomputedDrafts) {
   return false;
 }
 
+/**
+ * ONE-OFF DIAGNOSTIC (26 Aug 2026, real incident) -- run this manually to
+ * see exactly what getTo()/getCc()/getSubject() return for every draft
+ * currently in the folder. Added because draftAlreadyExistsFor() was
+ * matching several clearly-unrelated lead emails against what should be
+ * a single draft in the folder -- logging the raw values settles what's
+ * actually in there instead of guessing.
+ */
+function diagnoseDraftRecipients() {
+  const drafts = GmailApp.getDraftMessages();
+  Logger.log('diagnoseDraftRecipients -- ' + drafts.length + ' draft(s) in the folder.');
+  drafts.forEach((d, i) => {
+    try {
+      Logger.log(
+        '[' + i + '] subject=' + JSON.stringify(d.getSubject()) +
+        ' to=' + JSON.stringify(d.getTo()) +
+        ' cc=' + JSON.stringify(d.getCc()) +
+        ' bcc=' + JSON.stringify(d.getBcc())
+      );
+    } catch (e) {
+      Logger.log('[' + i + '] FAILED to read: ' + e);
+    }
+  });
+}
+
 // ADDED (24 Aug 2026, per direct request -- Joana): ground truth for
 // "have we ever sent this lead a reply before," checked directly against
 // the Sent folder rather than any label or sheet-row state. GmailApp.search
