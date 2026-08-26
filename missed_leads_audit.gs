@@ -42,20 +42,35 @@
  *     cumulative, so nothing is lost by checking weekly instead of daily.
  */
 
-const NON_HUMAN_SENDER_PATTERNS = /\b(no-?reply|donotreply|do-not-reply|mailer-daemon|postmaster|catch-all|catchall|automated|autoreply)\b/i;
-
+// FIX (27 Aug 2026, real risk found in review, verified by execution): \b
+// only creates a boundary against non-word characters. Two failure
+// directions confirmed live: `no-?reply` requires a literal hyphen or
+// nothing at all, so `no_reply@x.com` and `no.reply@x.com` (both real
+// separator conventions) slipped through as human; and \b fails between a
+// letter and a following digit (both are word characters), so
+// `noreply2@x.com` also slipped through. In the other direction,
+// `dan.hunnicutt+noreply@compass.com` -- a real human's OWN plus-tag, not an
+// automated mailbox -- matched and was dropped as a bot.
+//
+// Fixed by testing only the CANONICAL local part (before any `+tag`, since
+// a plus-tag is the sender's own routing label and shouldn't affect
+// classification of the underlying mailbox) and widening the separator
+// class to `[-._]` with no reliance on \b at all.
 function isNonHumanSender(email) {
-  return NON_HUMAN_SENDER_PATTERNS.test(email);
+  const raw = String(email || '').toLowerCase();
+  const at = raw.indexOf('@');
+  const localPart = at === -1 ? raw : raw.slice(0, at);
+  const canonical = localPart.split('+')[0];
+  return NON_HUMAN_SENDER_PATTERNS.test(canonical);
 }
 
-// Kept in sync with AUTOREPLY_PATTERNS in Code.gs (extended 17 Aug 2026 to
-// also catch a real person saying their email is no longer used/reachable --
-// same suppression intent as a true bounce/auto-reply, since nobody reads a
-// reply sent to an address they've said they don't check. Broadened same-day
-// from an order-specific phrase to a general "no longer
-// reached/used/valid/active/monitored/using" match after "I can no longer be
-// reached at this email" slipped through the narrower version.)
-const BOUNCE_OR_AUTOREPLY_PATTERNS = /(mailbox that is not actively monitored|does not correspond to a valid address|delivery (has |)failed|undeliverable|out of (the |)office|automatic reply|auto-reply|this is an automated|no longer (be |)(reach(ed|able)|used?|valid|active|monitored|using)|do not (send|reply|use) to this email|please use (my |the |a )?(new|updated) email)/i;
+const NON_HUMAN_SENDER_PATTERNS = /(^|[^a-z0-9])(no[-._]?reply|do[-._]?not[-._]?reply|mailer[-._]?daemon|postmaster|catch[-._]?all|automated|autoreply|bounces?)/i;
+
+// FIX (27 Aug 2026): this used to be its own copy of Code.gs's
+// AUTOREPLY_PATTERNS, tested against the full quoted body (see the fix at
+// the call site below) -- both problems Code.gs's looksLikeAutoReplyBody_
+// was written to fix are shared, so reuse that function directly instead of
+// keeping a second, drifting copy of the same regex in sync by hand.
 
 // WEEKEND DEEP AUDIT (11 Aug 2026): same tested logic and dedup as above,
 // just with a months-long lookback instead of the daily 14-day one. Shares
@@ -108,6 +123,19 @@ function runMissedLeadsAudit(daysBack) {
     .join(' OR ');
   const query = '(' + addressClauses + ') newer_than:' + lookback + 'd';
   const threads = GmailApp.search(query, 0, 500);
+  // FIX (27 Aug 2026, real risk found in review): GmailApp.search's third
+  // argument has a hard 500-result ceiling (Code.gs documents and paginates
+  // around this same limit) -- this call never did. On the 180-day deep
+  // audit especially, hitting exactly 500 means older threads were silently
+  // never examined, with no distinguishable trace in a normal-looking
+  // completion log. Not paginating here (unlike Code.gs) since this is a
+  // read-only audit, not a job with a draft cap to respect -- but the
+  // truncation must at least be visible.
+  if (threads.length === 500) {
+    Logger.log('WARNING -- runMissedLeadsAudit hit the 500-thread search ceiling for lookback=' + lookback + 'd. Results are TRUNCATED -- older threads within this window were NOT examined this run.');
+    sendOpsAlert('Missed leads audit hit the 500-result ceiling',
+      'runMissedLeadsAudit(' + lookback + ') got exactly 500 threads back from GmailApp.search, which is that call\'s hard per-request ceiling. Older threads inside the ' + lookback + '-day window were not examined this run. If this recurs, the audit needs to paginate the same way runReplyDrafterInner does in Code.gs.');
+  }
 
   const trackingLabels = [
     CONFIG.LABEL_AI_DRAFTED,
@@ -118,13 +146,18 @@ function runMissedLeadsAudit(daysBack) {
   ];
 
   const missed = [];
+  let skippedTracked = 0, skippedNoCc = 0, skippedInternal = 0, skippedNonHuman = 0, skippedOptOut = 0, skippedAutoReply = 0;
 
   threads.forEach(thread => {
     const threadId = thread.getId();
     if (alreadyLogged.has(threadId)) return;
 
     const hasTrackingLabel = thread.getLabels().some(l => trackingLabels.indexOf(l.getName()) !== -1);
-    if (hasTrackingLabel) return;
+    if (hasTrackingLabel) {
+      Logger.log('DIAGNOSTIC -- audit skipped ' + threadId + ' (already carries a tracking label)');
+      skippedTracked++;
+      return;
+    }
 
     // SELF-TRACKED QUOTA COUNTER (22 Aug 2026, per direct request): see the
     // fuller comment in quota_guard_and_alerting.gs.
@@ -138,10 +171,18 @@ function runMissedLeadsAudit(daysBack) {
     // routed back through the network@ mailing-list address) won't
     // individually carry it. Checking the whole thread still excludes
     // anything network@ never touched at all.
-    if (!isCcdToNetworkGroupAnywhereInThread(messages)) return;
+    if (!isCcdToNetworkGroupAnywhereInThread(messages)) {
+      Logger.log('DIAGNOSTIC -- audit skipped ' + threadId + ' (network never CC-d anywhere in this thread)');
+      skippedNoCc++;
+      return;
+    }
 
     let lastSender = extractEmail(last.getFrom());
-    if (isInternal(lastSender)) return;
+    if (isInternal(lastSender)) {
+      Logger.log('DIAGNOSTIC -- audit skipped ' + threadId + ' (last sender ' + lastSender + ' is internal -- already answered)');
+      skippedInternal++;
+      return;
+    }
 
     // FIX (27 Aug 2026, same incident as Code.gs's FORWARDING_ALIAS_DOMAINS):
     // on a Maildoso-forwarded thread the last message's From is the sending
@@ -156,11 +197,32 @@ function runMissedLeadsAudit(daysBack) {
       lastSender = (forwardInfo && forwardInfo.email) ? forwardInfo.email : lastSender + ' (UNRESOLVED -- forwarding alias, real lead is inside the thread)';
     }
 
-    if (isNonHumanSender(lastSender)) return;
+    if (isNonHumanSender(lastSender)) {
+      Logger.log('DIAGNOSTIC -- audit skipped ' + threadId + ' (last sender ' + lastSender + ' looks like a bounce/system address)');
+      skippedNonHuman++;
+      return;
+    }
 
-    const body = last.getPlainBody();
-    if (OPT_OUT_PATTERNS.test(body)) return;
-    if (BOUNCE_OR_AUTOREPLY_PATTERNS.test(body)) return;
+    // FIX (27 Aug 2026, real risk found in review): this used to test
+    // last.getPlainBody() -- the WHOLE message including every quoted layer
+    // beneath the lead's reply, i.e. the entire cold-outreach chain. Every
+    // other consumer of these patterns tests extractProspectFreshReplyText()
+    // instead, specifically to avoid matching boilerplate elsewhere in the
+    // thread -- this audit, whose entire job is proving nothing was missed,
+    // was the one place that didn't, so a lead replying "Sure, what's
+    // involved?" to an outreach email whose OWN footer said "reply STOP to
+    // unsubscribe" was silently and permanently dropped from the audit.
+    const freshReply = extractProspectFreshReplyText(last);
+    if (OPT_OUT_PATTERNS.test(freshReply)) {
+      Logger.log('DIAGNOSTIC -- audit skipped ' + threadId + ' (opt-out language in fresh reply)');
+      skippedOptOut++;
+      return;
+    }
+    if (looksLikeAutoReplyBody_(freshReply) || AUTOREPLY_SUBJECT_PATTERNS.test(last.getSubject())) {
+      Logger.log('DIAGNOSTIC -- audit skipped ' + threadId + ' (bounce/auto-reply language)');
+      skippedAutoReply++;
+      return;
+    }
 
     const daysUnanswered = Math.floor((Date.now() - last.getDate().getTime()) / (1000 * 60 * 60 * 24));
 
@@ -182,7 +244,11 @@ function runMissedLeadsAudit(daysBack) {
     emailMissedLeadsAlert(missed);
   }
 
-  Logger.log('Missed leads audit complete. Lookback: ' + lookback + ' days. New misses found: ' + missed.length);
+  Logger.log('Missed leads audit complete. Lookback: ' + lookback + ' days. New misses found: ' + missed.length +
+    '. Skipped -- already tracked: ' + skippedTracked + ', no network CC: ' + skippedNoCc +
+    ', already answered (internal): ' + skippedInternal + ', non-human sender: ' + skippedNonHuman +
+    ', opt-out: ' + skippedOptOut + ', auto-reply/bounce: ' + skippedAutoReply +
+    ', already logged (dedup): ' + (threads.length - skippedTracked - skippedNoCc - skippedInternal - skippedNonHuman - skippedOptOut - skippedAutoReply - missed.length) + '.');
 }
 
 function emailMissedLeadsAlert(missed) {

@@ -65,7 +65,7 @@ function runDailyReport() {
   const recentThreads = GmailApp.search('(' + addressClauses + ') newer_than:1d', 0, 200);
   let leadsReceivedToday = 0;
   recentThreads.forEach(thread => {
-    if (CONFIG.SUBJECT_PATTERN.test(thread.getFirstMessageSubject())) leadsReceivedToday++;
+    if (matchesSubjectPattern_(thread.getFirstMessageSubject())) leadsReceivedToday++;
   });
 
   const draftsData = draftsTab.getDataRange().getValues().slice(1);

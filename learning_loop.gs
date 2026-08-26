@@ -277,8 +277,15 @@ function findSentReplyAfterDraft(thread, draftCreatedAt, leadEmail) {
     // every candidate -- an unverifiable match is better than none here,
     // and this loop already tolerates some noise (see textsRoughlyMatch()).
     if (leadEmail) {
-      const recipients = (messages[i].getTo() + ' ' + messages[i].getCc()).toLowerCase();
-      if (recipients.indexOf(leadEmail) === -1) continue;
+      // FIX (27 Aug 2026, real risk found in review): was a substring test
+      // via string concatenation -- joann@x.com matched a search for
+      // ann@x.com, and `getTo() + ' ' + getCc()` stringifies a null Cc to
+      // the literal word "null" via JS's + coercion. recipientListIncludes_
+      // (Code.gs) compares parsed addresses and is called once per header
+      // instead.
+      const isRecipient = recipientListIncludes_(messages[i].getTo(), leadEmail) ||
+        recipientListIncludes_(messages[i].getCc(), leadEmail);
+      if (!isRecipient) continue;
     }
 
     return messages[i];

@@ -67,7 +67,10 @@ const BOUNCE_AUDIT_RUNTIME_BUDGET_MS = 4 * 60 * 1000; // 4 min, inside the ~6 mi
 // cards Gmail renders for Workspace users.
 const BOUNCE_RECIPIENT_PATTERNS = [
   /Final-Recipient:\s*rfc822;\s*([^\s<>]+@[^\s<>,;]+)/i,
-  /(?:wasn'?t|was not) delivered to\s+([^\s<>]+@[^\s<>,;]+)/i,
+  // Gmail's own boilerplate consistently uses a straight apostrophe here,
+  // but tolerate a curly one (U+2019) too -- cheap, and consistent with the
+  // same fix applied to lead-authored text elsewhere in this project.
+  /(?:wasn['’]?t|was not) delivered to\s+([^\s<>]+@[^\s<>,;]+)/i,
   /delivering your message to\s+([^\s<>]+@[^\s<>,;]+)/i,
   /Your message to\s+([^\s<>]+@[^\s<>,;]+)\s+has been blocked/i,
   /message to\s+([^\s<>]+@[^\s<>,;]+)\s+(?:has been|could not be)/i

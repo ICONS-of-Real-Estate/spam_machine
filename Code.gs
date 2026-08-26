@@ -81,7 +81,21 @@ const CONFIG = {
   // every single run, forever, with no log line (this continue doesn't log),
   // which is why leads like Rhondalynn/Maria/Deborah/Diana kept showing as
   // untouched no matter how many times the script ran.
-  SUBJECT_PATTERN: /(up for hosting|want to host|thinking about hosting|ever considered hosting|open to hosting).*(real estate )?(podcast|show)/i,
+  // FIX (27 Aug 2026, real risk found in review, verified by execution): the
+  // single combined regex below required the hosting phrase to come BEFORE
+  // "podcast"/"show" in the subject. Verified failing to match real, valid
+  // subject shapes that just reorder the same words -- "Podcast in Texas --
+  // are you up for hosting?" and "Your own real estate show -- open to
+  // hosting?" -- both real Maildoso subject-line variants. A miss here
+  // applies LABEL_SUBJECT_MISMATCH, documented elsewhere as PERMANENT (a
+  // thread's first-message subject can never change), so one reworded
+  // subject line in a sequence silently and permanently excludes every lead
+  // in it. Split into two independent patterns, tested with AND instead of
+  // one ordered regex -- see matchesSubjectPattern_() below. Also \b-bounded
+  // "podcast|show" so "showing" (as in an open house) can no longer
+  // false-positive match "show".
+  HOSTING_PHRASE_PATTERN: /(up for hosting|want to host|thinking about hosting|ever considered hosting|open to hosting)/i,
+  PODCAST_OR_SHOW_PATTERN: /\b(podcast|show)\b/i,
 
   INTERNAL_DOMAINS: ['iconsofrealestate.com', 'ardorseo.com'],
 
@@ -392,7 +406,23 @@ const CONFIG = {
 // any reply." That's a real gap: a hostile/profane reply is functionally an
 // opt-out (drafting a follow-up to it would be actively bad), but nothing
 // here caught it.
-const OPT_OUT_PATTERNS = /\b(stop|unsubscribe|remove me|take me off|do not (contact|email) me|fuck off|fuck you|piss off|get lost|leave me (the fuck )?alone|don'?t (contact|email|message|text) me again)\b/i;
+// FIX (27 Aug 2026, real risk found in review, verified by execution): the
+// bare \bstop\b alternative matched ordinary business English, not just
+// opt-outs. Confirmed true (and therefore permanently suppressed) against
+// "one-stop shop for agents!", "stop by our office any time", and
+// "non-stop showings this week" -- \b matches at a hyphen (non-word char),
+// so hyphenation offered no protection either. Until 27 Aug this bug was
+// partly masked: a false-positive got AI-Drafted-PendingReview, which the
+// nightly reconciler stripped, giving the thread another chance. Once
+// AI-Skipped-Suppressed replaced that (see CONFIG.LABEL_SUPPRESSED_NO_DRAFT),
+// a false positive became permanent -- which is what makes this now urgent
+// rather than latent. Replaced the bare word with the phrasings that
+// actually mean opt-out: alone-on-a-line "STOP", "please stop", "reply
+// STOP", and "stop " immediately followed by the verb being objected to.
+// Also tolerates a curly apostrophe (U+2019) in "don't" -- iOS/macOS Mail
+// and Outlook autocorrect to it by default, and the straight-quote-only
+// `'?` silently missed every phone-composed "don't contact me again".
+const OPT_OUT_PATTERNS = /(^\s*stop[.!]?\s*$|\bplease\s+stop\b|\breply\s+stop\b|\bstop\s+(sending|emailing|contacting|texting|messaging)\b|\bunsubscribe\b|\bremove me\b|\btake me off\b|\bdo not (contact|email) me\b|\bfuck off\b|\bfuck you\b|\bpiss off\b|\bget lost\b|\bleave me (the fuck )?alone\b|\bdon['’]?t (contact|email|message|text) me again\b)/i;
 
 // Same pattern already proven in missed_leads_audit.gs -- common phrasing in
 // genuine bounce-backs and out-of-office auto-replies. Checked against the
@@ -413,7 +443,59 @@ const OPT_OUT_PATTERNS = /\b(stop|unsubscribe|remove me|take me off|do not (cont
 // narrow, order-specific phrase with a general "no longer
 // (reached/used/valid/active/monitored/using)" match that doesn't care what
 // comes before or after it.
-const AUTOREPLY_PATTERNS = /(mailbox that is not actively monitored|does not correspond to a valid address|delivery (has |)failed|undeliverable|out of (the |)office|automatic reply|auto-reply|this is an automated|heavy volume of emails|currently unavailable and will respond|no longer (be |)(reach(ed|able)|used?|valid|active|monitored|using)|do not (send|reply|use) to this email|please use (my |the |a )?(new|updated) email)/i;
+// FIX (27 Aug 2026, real risk found in review, verified by execution): the
+// combined pattern below was applied to the lead's FRESH reply body as well
+// as the subject. Two of its alternatives are too broad for real prose:
+// "out of (the )?office" matched "Sounds great! I'm out of the office until
+// Monday but let's set something up after" -- an interested lead, not an
+// auto-reply -- and "no longer (be |)(...|used?|valid|active|...)" matched
+// "We no longer use that CRM, but the podcast idea sounds interesting" and
+// "I'm no longer active in Dallas -- I moved to Austin. Still want in!".
+// Both permanently suppress a lead who said yes.
+//
+// A real auto-responder always LEADS with "out of office" (it has nothing
+// else to say); a real lead mentioning their own OOO status puts their
+// actual answer first. So AUTOREPLY_SUBJECT_PATTERNS below (unchanged,
+// still broad) is for the SUBJECT line only, where "Automatic reply:" /
+// "Out of Office:" prefixes are unambiguous regardless of position and
+// short subjects carry little false-positive risk. The BODY check
+// (looksLikeAutoReplyBody_ below) requires "out of office" to open the
+// message, and requires the generic "no longer X" verbs to be anchored to
+// an actual contact channel (email/address/number/mailbox/inbox) rather
+// than matching anywhere in a sentence.
+const AUTOREPLY_SUBJECT_PATTERNS = /(mailbox that is not actively monitored|does not correspond to a valid address|delivery (has |)failed|undeliverable|out of (the |)office|automatic reply|auto-reply|this is an automated|heavy volume of emails|currently unavailable and will respond|no longer (be |)(reach(ed|able)|used?|valid|active|monitored|using)|do not (send|reply|use) to this email|please use (my |the |a )?(new|updated) email)/i;
+
+// Unambiguous regardless of where they appear -- these phrases essentially
+// never occur in a genuine interested reply, so no position anchoring
+// needed.
+const AUTOREPLY_BODY_UNAMBIGUOUS_PATTERNS = /(mailbox that is not actively monitored|does not correspond to a valid address|delivery (has |)failed|undeliverable|automatic reply|auto-reply|this is an automated|heavy volume of emails|currently unavailable and will respond|do not (send|reply|use) to this email|please use (my |the |a )?(new|updated) email)/i;
+
+// The generic "no longer X" verbs only count as a dead-contact signal when
+// anchored to an actual contact channel -- either "no longer reachable at
+// this email" (channel after) or "this email is no longer used/valid/
+// active/monitored" (channel before). Tolerates a small amount of text
+// between the two halves ("my old email is honestly no longer valid").
+const CONTACT_CHANNEL_NOUN_ = '(email( address)?|address|number|mailbox|inbox|contact( info(rmation)?)?)';
+const NO_LONGER_REACHABLE_PATTERN_ = new RegExp(
+  'no longer (be )?reach(ed|able)( at)? (this|that|my|the) ' + CONTACT_CHANNEL_NOUN_ +
+  '|(this|that|my|the) ' + CONTACT_CHANNEL_NOUN_ + '[^.!?\\n]{0,40}no longer (be )?(used?|valid|active|monitored|in use)' +
+  '|no longer (be )?(used?|valid|active|monitored|in use)[^.!?\\n]{0,40}(this|that|my|the) ' + CONTACT_CHANNEL_NOUN_,
+  'i'
+);
+
+function looksLikeAutoReplyBody_(freshText) {
+  const text = (freshText || '').trim();
+  if (!text) return false;
+  if (AUTOREPLY_BODY_UNAMBIGUOUS_PATTERNS.test(text)) return true;
+  if (NO_LONGER_REACHABLE_PATTERN_.test(text)) return true;
+  // "out of office" only counts when it opens the message, with nothing but
+  // a subject pronoun/adverb in front -- see comment above. A window-based
+  // check ("within the first N words") isn't tight enough: "Sounds great!
+  // I'm out of the office until Monday" still lands inside a small word
+  // window. Anchored to the very start of the trimmed text instead.
+  if (/^\s*(i am|i'm)?\s*(currently\s+)?out of (the )?office/i.test(text)) return true;
+  return false;
+}
 
 const US_STATES = [
   'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut',
@@ -903,6 +985,19 @@ function runReplyDrafterInner() {
   // pagination` sites, the folder-full return, and any throw. The separate
   // save that used to sit on the folder-full path is gone, since a return
   // inside try runs the finally on its way out.
+  //
+  // FIX (27 Aug 2026, real regression from the change above): processed and
+  // draftsCreated were declared INSIDE this try block, but the closing
+  // Logger.log that reads them sits AFTER the finally -- outside the try's
+  // scope. Every run that reached the bottom of the loop threw
+  // ReferenceError on its own completion line, which runReplyDrafter's catch
+  // then reported as "failed (not quota) -- this needs a real look" even
+  // though the run had already done all its real work correctly. Declared
+  // here, above the try, so both the loop body and the final log line share
+  // one scope.
+  let processed = 0;
+  let draftsCreated = 0;
+
   try {
 
     const systemPrompt = buildSystemPrompt();
@@ -921,9 +1016,6 @@ function runReplyDrafterInner() {
     const searchQuery = '(' + addressClauses + ') newer_than:180d -label:"' + CONFIG.LABEL_AI_DRAFTED + '" -label:"' + CONFIG.LABEL_STOP + '" -label:"' + CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM + '" -label:"' + CONFIG.LABEL_SUBJECT_MISMATCH + '" -label:"' + CONFIG.LABEL_ALREADY_REPLIED_ONCE + '" -label:"' + CONFIG.LABEL_SUPPRESSED_NO_DRAFT + '"';
 
     Logger.log('DIAGNOSTIC -- search query: ' + searchQuery);
-
-    let processed = 0;
-    let draftsCreated = 0;
 
     // FIX (17 Aug 2026, real incident): widening the date window to 180d
     // surfaced a real backlog, but GmailApp.search's third argument has a HARD
@@ -1067,7 +1159,7 @@ function runReplyDrafterInner() {
       // describe the thread's CURRENT state and could flip with new
       // activity) -- safe to label and exclude from the search permanently.
       const subject = thread.getFirstMessageSubject();
-      if (!CONFIG.SUBJECT_PATTERN.test(subject)) {
+      if (!matchesSubjectPattern_(subject)) {
         if (labelSubjectMismatch) thread.addLabel(labelSubjectMismatch);
         Logger.log('DIAGNOSTIC -- skipped (subject pattern), labeled so it stops reappearing: ' + subject);
         continue;
@@ -1225,7 +1317,7 @@ function runReplyDrafterInner() {
       // message's own subject (not the full quoted body) doesn't reintroduce
       // the false-positive risk the body-only check was deliberately built to
       // avoid.
-      if (AUTOREPLY_PATTERNS.test(replyBody) || AUTOREPLY_PATTERNS.test(lastMsg.getSubject())) {
+      if (looksLikeAutoReplyBody_(replyBody) || AUTOREPLY_SUBJECT_PATTERNS.test(lastMsg.getSubject())) {
         // CHANGED (27 Aug 2026): was thread.addLabel(labelDrafted) -- see
         // CONFIG.LABEL_SUPPRESSED_NO_DRAFT for the nightly ping-pong that caused.
         recordPermanentSkip_(thread, labelSuppressedNoDraft, CONFIG.LABEL_SUPPRESSED_NO_DRAFT, skipCache, threadId, messages.length,
@@ -1380,7 +1472,18 @@ function runReplyDrafterInner() {
       pageStart += PAGE_SIZE;
     }
   } finally {
-    saveSkipCache(ss, skipCache);
+    // FIX (27 Aug 2026, real risk in the change above): saveSkipCache does an
+    // unguarded clearContent()+setValues(). A throw inside a finally DISCARDS
+    // the in-flight exception and propagates the new one instead -- so a
+    // genuine Gmail quota error escaping the try above could be replaced by a
+    // Sheets error, isQuotaExceededError would then see the wrong error and
+    // return false, and the circuit breaker would never trip. Guarding this
+    // save can never mask a real failure; letting it throw always could.
+    try {
+      saveSkipCache(ss, skipCache);
+    } catch (saveErr) {
+      Logger.log('saveSkipCache failed in finally (not masking the run\'s real error, if any): ' + saveErr);
+    }
   }
 
   Logger.log('Run complete. Threads processed: ' + processed + ', drafts created: ' + draftsCreated);
@@ -1643,6 +1746,12 @@ function extractEmail(fromHeader) {
   return (match ? match[1] : fromHeader).toLowerCase().trim();
 }
 
+// See CONFIG.HOSTING_PHRASE_PATTERN / CONFIG.PODCAST_OR_SHOW_PATTERN for why
+// this is two independent tests ANDed together rather than one ordered regex.
+function matchesSubjectPattern_(subject) {
+  return CONFIG.HOSTING_PHRASE_PATTERN.test(subject) && CONFIG.PODCAST_OR_SHOW_PATTERN.test(subject);
+}
+
 function isInternal(email) {
   return CONFIG.INTERNAL_DOMAINS.some(domain => email.endsWith('@' + domain));
 }
@@ -1822,38 +1931,107 @@ function isRealTeamReply(email) {
   return isInternal(email);
 }
 
+// FIX (27 Aug 2026, real incident -- verified by execution, not just
+// reading). The old version located the first unquoted "On ... wrote:" line
+// and collected everything AFTER it. But in a standard top-posted reply the
+// lead's own words are BEFORE that line, and the line right after it is
+// "> quoted text", which broke the collector on its very first iteration.
+// Verified: run against a real top-posted Gmail reply, this returned "".
+// Every consumer -- OPT_OUT_PATTERNS, AUTOREPLY_PATTERNS, the cheap decline
+// pre-check, looksLikeBlankOrSignatureOnly_ -- then evaluated an empty
+// string, so all of them silently became no-ops, and
+// looksLikeBlankOrSignatureOnly_ returned true for EVERY thread -- the exact
+// opposite of what it exists to detect.
+//
+// When there was no "On ... wrote:" line at all (an Outlook-style quote
+// header, or a lead's first-ever reply with nothing to quote), the old
+// version fell back to returning the WHOLE body, quoted cold-outreach
+// footer included. Verified: OPT_OUT_PATTERNS then matched the "Reply STOP
+// to unsubscribe" line from OUR OWN quoted outreach email -- text the lead
+// never wrote -- and the thread was suppressed permanently.
+//
+// Now collects the lines BEFORE the first quote marker instead, which is
+// where a lead's fresh words actually live, and recognizes the Outlook
+// "From:/Sent:/Subject:" quote-header shape as a boundary too, not just
+// Gmail's "On ... wrote:" and ">" prefixes.
 function extractProspectFreshReplyText(message) {
   const body = message.getPlainBody();
   const lines = body.split('\n');
-  let startIdx = -1;
 
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    if (!trimmed.startsWith('>') && /^On .+wrote:\s*$/i.test(trimmed)) {
-      startIdx = i + 1;
-      break;
-    }
-  }
-  if (startIdx === -1) return body;
+  const QUOTE_START = /^(On .+wrote:\s*$|-{3,}\s*Forwarded message\s*-{3,}|From\s*:\s|Sent\s*:\s|Subject\s*:\s)/i;
 
   const freshLines = [];
-  for (let i = startIdx; i < lines.length; i++) {
+  for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
     if (trimmed.startsWith('>')) break;
-    if (/^On .+wrote:\s*$/i.test(trimmed)) break;
+    if (QUOTE_START.test(trimmed)) break;
     freshLines.push(lines[i]);
   }
   return freshLines.join('\n').trim();
 }
 
+// FIX (27 Aug 2026, real incident -- verified by execution, not just reading):
+// the old approach was one bounded regex per field --
+// `From:\s*([^\s<>]+@[^\s<>\n]+)` -- which demands the address be the FIRST
+// whitespace-delimited token after "From:". Gmail's own forward header is
+// "From: Katie Beaman <katie@beamanrealty.com>" -- the first token is
+// "Katie", which has no "@", so the match fails outright. Confirmed live:
+// a bare "From: katie@beamanrealty.com" parses; the exact same address with
+// a display name in front of it does not. This is very likely the real
+// cause behind the 13 Aug comment below recording "144/144 genuine
+// unanswered leads failing to parse" -- that was diagnosed as "no true
+// forward header exists"; the header exists, the old regex just couldn't
+// read it. It also silently defeated the 27 Aug "lead is in the To: line"
+// repair, since that fix lived entirely inside `if (forwardMatch)`.
+//
+// Parses the header block line-by-line into a {from, to, subject, cc} map
+// instead of one bounded, order-dependent regex. This removes both the
+// display-name blind spot and the fixed-byte-window / fixed-field-order
+// assumptions the old regex carried (a long recipient list or an inserted
+// Cc/Reply-To line could push a real field past the old {0,200}/{0,400}
+// windows or past the old From/Date/Subject/To ordering).
+function parseForwardHeaderBlock_(body) {
+  const sepMatch = body.match(/-{3,}\s*Forwarded message\s*-{3,}/i);
+  if (!sepMatch) return null;
+
+  // The separator's own trailing newline becomes an empty first element
+  // when split below -- strip it first so the "blank line ends the header
+  // block" check further down doesn't fire immediately on that artifact
+  // instead of on a genuine blank line after the real header fields.
+  const afterSep = body.slice(sepMatch.index + sepMatch[0].length).replace(/^\r?\n+/, '').split('\n');
+  const header = {};
+  let lastKey = null;
+  const MAX_HEADER_LINES = 20; // safety cap -- a real forward header block is a handful of lines
+
+  for (let i = 0; i < afterSep.length && i < MAX_HEADER_LINES; i++) {
+    const line = afterSep[i];
+    if (line.trim() === '') break; // blank line -- end of header block, quoted body follows
+
+    const m = line.match(/^\s*(From|Date|Subject|To|Cc|Reply-To)\s*:\s*(.*)$/i);
+    if (m) {
+      const key = m[1].toLowerCase().replace('-', '');
+      if (!(key in header)) header[key] = m[2].trim();
+      lastKey = key;
+    } else if (lastKey && /^\s+\S/.test(line)) {
+      // a wrapped continuation of the previous header value (e.g. a long
+      // recipient list), not a new field
+      header[lastKey] = (header[lastKey] + ' ' + line.trim()).trim();
+    } else {
+      break; // not a header line and not a continuation -- header block is over
+    }
+  }
+
+  return header;
+}
+
 function extractForwardedLeadInfo(message) {
   const body = message.getPlainBody();
 
-  // Primary case: a real Gmail "Forward" with the standard header block.
-  const forwardMatch = body.match(/-{3,}\s*Forwarded message\s*-{3,}[\s\S]{0,200}?From:\s*([^\s<>]+@[^\s<>\n]+)[\s\S]{0,400}?Subject:\s*([^\n\r]+)/i);
-  if (forwardMatch) {
-    const fromEmail = forwardMatch[1].trim().toLowerCase();
-    const originalSubject = forwardMatch[2].trim();
+  // Primary case: a real Gmail/Outlook "Forward" with a header block.
+  const header = parseForwardHeaderBlock_(body);
+  if (header && header.from) {
+    const fromEmail = extractEmail(header.from).toLowerCase().trim();
+    const originalSubject = header.subject ? header.subject.trim() : null;
 
     // FIX (27 Aug 2026, real incident): the forwarded block is not always a
     // lead's INBOUND message. Two real shapes exist on these threads:
@@ -1871,9 +2049,8 @@ function extractForwardedLeadInfo(message) {
     // lead officerjenny77@gmail.com -- right there in the To: line -- got
     // nothing. When the From is one of ours, the lead is the To.
     if (isInternal(fromEmail) || isForwardingAlias(fromEmail)) {
-      const toMatch = body.match(/-{3,}\s*Forwarded message\s*-{3,}[\s\S]{0,600}?To:\s*([^\s<>]+@[^\s<>\n]+)/i);
-      if (toMatch) {
-        const toEmail = toMatch[1].trim().toLowerCase();
+      if (header.to) {
+        const toEmail = extractEmail(header.to).toLowerCase().trim();
         if (!isUnmailableAsLead_(toEmail)) {
           return { email: toEmail, originalSubject: originalSubject };
         }
@@ -1883,7 +2060,9 @@ function extractForwardedLeadInfo(message) {
       return null;
     }
 
-    return { email: fromEmail, originalSubject: originalSubject };
+    if (fromEmail.indexOf('@') !== -1) {
+      return { email: fromEmail, originalSubject: originalSubject };
+    }
   }
 
   // FALLBACK (added 13 Aug 2026): no true forward header exists -- this is a
@@ -1929,8 +2108,15 @@ function extractForwardedLeadInfo(message) {
   return null;
 }
 
+// FIX (27 Aug 2026): the old regex hardcoded the Gmail field order
+// (From/Date/Subject/To). An Outlook-order forward (e.g. From/Date/To/
+// Subject) or one with an inserted Cc/Reply-To line didn't match at all, so
+// the whole header block survived into the draft body -- a duplicated
+// forward header pasted above the quoted history in what Joana reviews.
+// Strips generically instead: from the separator to the first blank line,
+// whatever fields are in between and in whatever order.
 function stripForwardHeaderKeepHistory(plainBody) {
-  const headerBlock = /-{3,}\s*Forwarded message\s*-{3,}\s*\n\s*From:[^\n]*\n\s*Date:[^\n]*\n\s*Subject:[^\n]*\n\s*To:[^\n]*\n+/i;
+  const headerBlock = /-{3,}\s*Forwarded message\s*-{3,}[\s\S]*?\n\s*\n/i;
   return plainBody.replace(headerBlock, '').trim();
 }
 
@@ -2062,6 +2248,21 @@ function countPendingAiDrafts_() {
 // (reconcile_missing_drafts.gs, lead_followup_sequences.gs) check one lead
 // in isolation, not in a per-thread loop, so they're left calling this with
 // just leadEmail and keep the original always-fresh behavior.
+// FIX (27 Aug 2026, real risk found in review): the same substring-match bug
+// draftAlreadyExistsFor was fixed for on 27 Aug -- `recipients.indexOf(target)
+// !== -1`, where a lead like ann@x.com matched a header actually addressed to
+// joann@x.com -- was independently present in four other places that each
+// parse a raw To/Cc header string looking for one address. Shared here so all
+// of them compare parsed addresses instead of doing their own substring test.
+function recipientListIncludes_(rawRecipients, targetEmail) {
+  const target = String(targetEmail || '').toLowerCase().trim();
+  if (!target) return false;
+  return String(rawRecipients || '').split(',').some(one => {
+    const trimmed = one.trim();
+    return trimmed && extractEmail(trimmed) === target;
+  });
+}
+
 function draftAlreadyExistsFor(leadEmail, precomputedDrafts) {
   const drafts = precomputedDrafts || GmailApp.getDraftMessages();
   const target = leadEmail.toLowerCase().trim();

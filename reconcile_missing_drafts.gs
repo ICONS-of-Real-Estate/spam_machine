@@ -179,8 +179,9 @@ function hasSentReplyToLead_(thread, leadEmail) {
   for (let i = 0; i < messages.length; i++) {
     const from = (messages[i].getFrom() || '').toLowerCase();
     if (from.indexOf(EXPECTED_RUN_ACCOUNT) === -1) continue;
-    const recipients = (messages[i].getTo() + ' ' + messages[i].getCc()).toLowerCase();
-    if (recipients.indexOf(target) !== -1) return true;
+    // FIX (27 Aug 2026, real risk found in review): same substring-match bug
+    // as draftAlreadyExistsFor -- see recipientListIncludes_ in Code.gs.
+    if (recipientListIncludes_(messages[i].getTo(), target) || recipientListIncludes_(messages[i].getCc(), target)) return true;
   }
   return false;
 }

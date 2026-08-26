@@ -137,7 +137,12 @@ const FOLLOWUP_DAILY_DRAFT_CAP = 5;
 // threadContainsDecline() helper below scan every message already fetched
 // (no extra Gmail quota cost) and immediately stop the cadence if a
 // decline is found anywhere, not just in the most recent message.
-const DECLINE_PATTERNS = /\b(not interested|no longer interested|not a good fit|no thank you|not right now|not for me|going to pass|i'll pass|not something (i'm|i am) interested in)\b/i;
+// FIX (27 Aug 2026, real risk found in review): a straight-quote-only `'?`
+// misses U+2019, the curly apostrophe iOS/macOS Mail and Outlook autocorrect
+// to by default -- "I'll pass" (curly) did not match "i'll pass" (straight
+// required), so a lead who declined on their phone got a follow-up nudge
+// drafted anyway.
+const DECLINE_PATTERNS = /\b(not interested|no longer interested|not a good fit|no thank you|not right now|not for me|going to pass|i['’]ll pass|not something (i'm|i am) interested in)\b/i;
 
 // Scans every message in the thread that came from the external lead (not
 // our own team), checking their fresh reply text against both the broad
@@ -1089,9 +1094,13 @@ function wipeFollowUpQueueDrafts(applyDeletions) {
     const d = drafts[i];
     let msg;
     try { msg = d.getMessage(); } catch (e) { continue; } // draft being edited/deleted concurrently
-    const to = (msg.getTo() || '').toLowerCase();
+    // FIX (27 Aug 2026, real risk found in review): substring match on a raw
+    // To header -- a draft to joann@x.com matched a queue containing
+    // ann@x.com and was marked for deletion. This function DELETES drafts,
+    // so a false positive here is destructive, not just a wrong count.
+    const to = msg.getTo() || '';
     let isQueueDraft = false;
-    queueEmails.forEach(email => { if (to.indexOf(email) !== -1) isQueueDraft = true; });
+    queueEmails.forEach(email => { if (recipientListIncludes_(to, email)) isQueueDraft = true; });
     if (!isQueueDraft) continue;
 
     matched++;
@@ -1394,9 +1403,11 @@ function countFollowUpDraftsRemaining() {  const account = getRunningAccountEmai
   drafts.forEach(d => {
     let msg;
     try { msg = d.getMessage(); } catch (e) { return; }
-    const to = (msg.getTo() || '').toLowerCase();
+    // FIX (27 Aug 2026, real risk found in review): same substring-match bug
+    // as the delete path above -- see recipientListIncludes_ in Code.gs.
+    const to = msg.getTo() || '';
     let isQueueDraft = false;
-    queueEmails.forEach(email => { if (to.indexOf(email) !== -1) isQueueDraft = true; });
+    queueEmails.forEach(email => { if (recipientListIncludes_(to, email)) isQueueDraft = true; });
     if (isQueueDraft) matched++;
   });
 
