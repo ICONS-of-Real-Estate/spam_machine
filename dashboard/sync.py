@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 
 import fixtures
 
-SYNC_MODE = os.environ.get("DASHBOARD_SYNC_MODE", "mock")  # "mock" or "live"
+SYNC_MODE = os.environ.get("DASHBOARD_SYNC_MODE", "mock").strip().lower()  # "mock" or "live"
 SHEET_ID = os.environ.get("SPAM_MACHINE_SHEET_ID", "")
 SERVICE_ACCOUNT_FILE = os.environ.get("DASHBOARD_SERVICE_ACCOUNT_FILE", "service_account.json")
 DB_PATH = os.environ.get("DASHBOARD_DB_PATH", "dashboard.db")

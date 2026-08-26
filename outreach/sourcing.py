@@ -19,7 +19,7 @@ Podchaser. SOURCING_MODE stays "mock" until they do.
 """
 import os
 
-SOURCING_MODE = os.environ.get("OUTREACH_SOURCING_MODE", "mock")  # "mock" or "live"
+SOURCING_MODE = os.environ.get("OUTREACH_SOURCING_MODE", "mock").strip().lower()  # "mock" or "live"
 
 # Starting list per the original ask -- expected to grow over time.
 SPONSOR_CATEGORIES = ["mortgage_broker", "title_company", "home_insurance"]

@@ -4,6 +4,7 @@ for the architecture (SQLite mirror for reads, direct Sheets API for
 writes, Gmail writes stubbed pending a real credential).
 """
 import os
+import secrets
 import sqlite3
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -35,6 +36,35 @@ DEV_BYPASS_AUTH = (
     and not os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
 )
 DEV_BYPASS_EMAIL = "dev-bypass@iconsofrealestate.com"
+
+# FIX (27 Aug 2026, real risk found in review): this used to be
+# os.environ.get("DASHBOARD_SESSION_SECRET", "dev-secret-change-me") --
+# a fallback to a literal string checked into git. Worse, .env.example
+# ships DASHBOARD_SESSION_SECRET= (blank), and os.environ.get treats an
+# empty string as present, so the git-committed default was never even
+# reached in that state -- Starlette signed sessions with an empty key
+# instead. Either way, anyone who can reach the port can forge a session
+# cookie (e.g. {"user_email": "kris@iconsofrealestate.com"}), skipping
+# OAuth, the domain check, and the allowlist entirely, and inheriting
+# whatever the live Sheets write path (sheets_write.py) can do.
+#
+# Fails closed at import time instead: a real deployment cannot start
+# without a real secret. The one exception is DEV_BYPASS_AUTH, which is
+# already gated two ways (must be explicitly enabled AND disables itself
+# the moment a real OAuth client is configured) -- there, a fresh random
+# secret is generated per process start rather than reusing a fixed
+# string, since a dev session doesn't need to survive a restart anyway.
+_SESSION_SECRET = os.environ.get("DASHBOARD_SESSION_SECRET") or ""
+if DEV_BYPASS_AUTH and not _SESSION_SECRET:
+    _SESSION_SECRET = secrets.token_urlsafe(32)
+elif len(_SESSION_SECRET) < 32:
+    raise RuntimeError(
+        "DASHBOARD_SESSION_SECRET is missing or too short. Set it to a real random "
+        "value (32+ chars) in your .env before starting this app -- generate one with: "
+        "python3 -c \"import secrets; print(secrets.token_urlsafe(32))\". "
+        "(This check is skipped only when DASHBOARD_DEV_BYPASS_AUTH is on with no "
+        "GOOGLE_OAUTH_CLIENT_ID set -- local/demo mode.)"
+    )
 
 app = FastAPI(title="spam_machine dashboard")
 templates = Jinja2Templates(directory="templates")
@@ -69,7 +99,7 @@ class RequireLoginMiddleware(BaseHTTPMiddleware):
 app.add_middleware(RequireLoginMiddleware)
 app.add_middleware(
     SessionMiddleware,
-    secret_key=os.environ.get("DASHBOARD_SESSION_SECRET", "dev-secret-change-me"),
+    secret_key=_SESSION_SECRET,
 )
 
 
@@ -99,6 +129,15 @@ def base_context(request: Request):
         "user_name": request.session.get("user_name"),
         "last_synced_at": synced_at,
         "sync_freshness": freshness.check_freshness(synced_at),
+        # ADDED (27 Aug 2026, real risk found in review): a mock-mode
+        # dashboard was visually indistinguishable from a live one -- the
+        # fixture alert "Gmail quota at 100% -- stopping for today" and two
+        # fabricated missed leads rendered exactly like real production
+        # data, with nothing on screen to say otherwise. outreach/'s
+        # equivalent app already surfaces its mode in every template;
+        # mirrored here. base.html renders a persistent banner whenever
+        # this isn't "live".
+        "sync_mode": sync.SYNC_MODE,
     }
 
 

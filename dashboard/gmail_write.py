@@ -20,7 +20,7 @@ and reviewed without real Gmail access.
 """
 import os
 
-GMAIL_WRITE_MODE = os.environ.get("GMAIL_WRITE_MODE", "mock")  # "mock" or "live"
+GMAIL_WRITE_MODE = os.environ.get("GMAIL_WRITE_MODE", "mock").strip().lower()  # "mock" or "live"
 GMAIL_WRITE_SERVICE_ACCOUNT_FILE = os.environ.get("GMAIL_WRITE_SERVICE_ACCOUNT_FILE", "")
 IMPERSONATE_EMAIL = "joana@iconsofrealestate.com"
 

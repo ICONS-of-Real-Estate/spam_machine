@@ -10,6 +10,7 @@ compliance.py and CLAUDE.md for why sending is deliberately not built
 yet.
 """
 import os
+import secrets
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -30,6 +31,22 @@ DEV_BYPASS_AUTH = (
     and not os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
 )
 DEV_BYPASS_EMAIL = "dev-bypass@iconsofrealestate.com"
+
+# FIX (27 Aug 2026, real risk found in review): same fix as dashboard/app.py
+# -- see that file's comment for the full incident. A fallback to a literal
+# string checked into git meant anyone who could reach the port could forge
+# a session cookie and skip OAuth/the allowlist entirely.
+_SESSION_SECRET = os.environ.get("OUTREACH_SESSION_SECRET") or ""
+if DEV_BYPASS_AUTH and not _SESSION_SECRET:
+    _SESSION_SECRET = secrets.token_urlsafe(32)
+elif len(_SESSION_SECRET) < 32:
+    raise RuntimeError(
+        "OUTREACH_SESSION_SECRET is missing or too short. Set it to a real random "
+        "value (32+ chars) in your .env before starting this app -- generate one with: "
+        "python3 -c \"import secrets; print(secrets.token_urlsafe(32))\". "
+        "(This check is skipped only when OUTREACH_DEV_BYPASS_AUTH is on with no "
+        "GOOGLE_OAUTH_CLIENT_ID set -- local/demo mode.)"
+    )
 
 app = FastAPI(title="outreach engine")
 templates = Jinja2Templates(directory="templates")
@@ -59,7 +76,7 @@ class RequireLoginMiddleware(BaseHTTPMiddleware):
 app.add_middleware(RequireLoginMiddleware)
 app.add_middleware(
     SessionMiddleware,
-    secret_key=os.environ.get("OUTREACH_SESSION_SECRET", "dev-secret-change-me"),
+    secret_key=_SESSION_SECRET,
 )
 
 

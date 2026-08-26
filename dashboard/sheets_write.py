@@ -18,9 +18,31 @@ Code.gs's own migrateAddSopModeColumn() and the LLM Cost Log
 Outcome/Error migration already use for code-generated tabs.
 """
 import os
+from datetime import datetime, timezone
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+
+# FIX (27 Aug 2026, real risk found in review): this was the ONE integration
+# module in this app with NO mock-mode guard at all -- sync.py and
+# gmail_write.py both gate on their own MODE env var; this module didn't,
+# despite CLAUDE.md in this directory saying to "keep this pattern for any
+# new integration." Consequence: deploy with DASHBOARD_SYNC_MODE still at
+# its "mock" default (the state setup_vps.sh's own precondition -- it
+# refuses to install without service_account_write.json -- can easily leave
+# you in, if credentials are provisioned before the mode flag is flipped),
+# and the UI renders the three FIXTURE suggestions from fixtures.py. Clicking
+# Approve on one writes "approved" into the REAL production Sheet's row 2
+# and appends new header columns to it. Gated on DASHBOARD_SYNC_MODE (the
+# same flag sync.py already uses) rather than a new one, since this and
+# sync.py reading/writing the same live sheet should never disagree about
+# which mode they're in.
+#
+# .strip().lower() normalizes the env var: a value like "Mock" or "mock "
+# (a trailing space can survive `export $(cat .env | xargs)` in some
+# shells) used to silently select the live branch on a straight `== "mock"`
+# comparison.
+WRITE_MODE = os.environ.get("DASHBOARD_SYNC_MODE", "mock").strip().lower()
 
 SHEET_ID = os.environ.get("SPAM_MACHINE_SHEET_ID", "")
 WRITE_SERVICE_ACCOUNT_FILE = os.environ.get(
@@ -77,12 +99,39 @@ def set_suggestion_status(sheet_row_num, status, reviewer_email, comment=None):
     if status not in ("approved", "rejected"):
         raise ValueError(f"status must be 'approved' or 'rejected', got {status!r}")
 
-    service = _sheets_service()
-    header_row = service.spreadsheets().values().get(
-        spreadsheetId=SHEET_ID, range=f"'{TAB_NAME}'!A1:ZZ1"
-    ).execute().get("values", [[]])[0]
+    if WRITE_MODE == "mock":
+        print(
+            f"[MOCK] sheets_write.set_suggestion_status: would set row "
+            f"{sheet_row_num} to {status!r} (reviewer={reviewer_email!r}, "
+            f"comment={comment!r}) -- DASHBOARD_SYNC_MODE=mock, no real "
+            f"Sheets API call made."
+        )
+        return
 
-    status_col = header_row.index(STATUS_COLUMN_HEADER)
+    service = _sheets_service()
+    # FIX (27 Aug 2026, real risk found in review): .get("values", [[]])[0]
+    # only falls back when the "values" KEY is absent. The Sheets API
+    # returns {"values": []} for a genuinely empty range, and [0] on that
+    # empty list raises IndexError -- e.g. if the tab exists but its header
+    # row hasn't landed yet. `or [[]]` catches both the missing-key and the
+    # empty-list case.
+    values = service.spreadsheets().values().get(
+        spreadsheetId=SHEET_ID, range=f"'{TAB_NAME}'!A1:ZZ1"
+    ).execute().get("values") or [[]]
+    header_row = values[0]
+
+    # FIX (27 Aug 2026, real risk found in review): header_row.index() raises
+    # a bare ValueError with no context if the Status column was ever
+    # renamed -- surfaced to whoever clicked Approve as an opaque 500.
+    try:
+        status_col = header_row.index(STATUS_COLUMN_HEADER)
+    except ValueError:
+        raise RuntimeError(
+            f"'{TAB_NAME}' tab is missing the expected header "
+            f"{STATUS_COLUMN_HEADER!r}. Found headers: {header_row!r}. "
+            f"Has this column been renamed?"
+        )
+
     updates = [{
         "range": f"'{TAB_NAME}'!{_col_letter(status_col)}{sheet_row_num}",
         "values": [[status]],
@@ -94,9 +143,14 @@ def set_suggestion_status(sheet_row_num, status, reviewer_email, comment=None):
         "range": f"'{TAB_NAME}'!{_col_letter(reviewed_by_col)}{sheet_row_num}",
         "values": [[reviewer_email]],
     })
+    # FIX (27 Aug 2026, real risk found in review): datetime.now() with no
+    # timezone is ambiguous by an hour or two -- the rest of this system
+    # runs on Europe/Paris while the VPS this deploys to is likely UTC.
+    # Explicit UTC removes the ambiguity; also hoisted the import to the
+    # top of the file instead of __import__ inline.
     updates.append({
         "range": f"'{TAB_NAME}'!{_col_letter(reviewed_at_col)}{sheet_row_num}",
-        "values": [[__import__("datetime").datetime.now().isoformat()]],
+        "values": [[datetime.now(timezone.utc).isoformat()]],
     })
 
     if comment:

@@ -24,6 +24,7 @@
   .freshness { color:#6a7385; font-size:0.8rem; }
   .freshness.stale { color:#e8c86a; }
   .stale-banner { background:#3a3115; color:#e8c86a; padding:0.6rem 1rem; border-radius:6px; margin-bottom:1rem; font-size:0.9rem; }
+  .mock-banner { background:#152a3a; color:#6ac8e8; padding:0.6rem 1rem; border-radius:6px; margin-bottom:1rem; font-size:0.9rem; }
   a.link { color:#7dc4ff; }
   form.inline { display:inline; }
   textarea, button, select, input[type="text"] { font-family:inherit; font-size:0.9rem; }
@@ -55,6 +56,11 @@
   </div>
 </header>
 <main>
+{% if sync_mode != "live" %}
+<div class="mock-banner">
+  MOCK DATA -- this dashboard is running with <code>DASHBOARD_SYNC_MODE={{ sync_mode }}</code>. Everything below (drafts, alerts, missed leads, costs) is fixture data, not real production data. See <code>SETUP_CHECKLIST.md</code> to switch to live mode.
+</div>
+{% endif %}
 {% if sync_freshness.is_stale %}
 <div class="stale-banner">
   {% if sync_freshness.never_synced %}

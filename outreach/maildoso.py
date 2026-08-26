@@ -23,7 +23,7 @@ view against an unconfirmed data source.
 """
 import os
 
-MAILDOSO_MODE = os.environ.get("OUTREACH_MAILDOSO_MODE", "mock")  # "mock" or "live"
+MAILDOSO_MODE = os.environ.get("OUTREACH_MAILDOSO_MODE", "mock").strip().lower()  # "mock" or "live"
 MAILDOSO_API_KEY = os.environ.get("MAILDOSO_API_KEY", "")
 
 
