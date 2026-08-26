@@ -43,6 +43,27 @@ exist) to Gmail drafts.
   Tailscale-only bind for Phase A, no Docker, no public ports. See
   `deploy/setup_vps.sh` and `README.md`.
 
+## Mock mode
+
+No real credentials exist yet (see `SETUP_CHECKLIST.md` for what to get
+and in what order). Until then, everything defaults to mock/bypass so
+the app is genuinely usable today:
+
+- `sync.py` pulls from `fixtures.py` instead of the real Sheets API
+  (`DASHBOARD_SYNC_MODE=mock`, default) — through the *same* parsing code
+  path as live mode (a fake Sheets-API-shaped object, not a separate
+  branch), so mock-mode testing actually exercises the real logic.
+- `app.py`'s login can be bypassed for local dev
+  (`DASHBOARD_DEV_BYPASS_AUTH=true`) — guarded so it's automatically
+  ignored the instant a real `GOOGLE_OAUTH_CLIENT_ID` is set, so
+  configuring real login can't leave the bypass silently active.
+- `gmail_write.py` mocks Gmail entirely (`GMAIL_WRITE_MODE=mock`,
+  default) until the write-capable service account exists.
+
+Keep this pattern for any new integration added before its real
+credential exists — mock behind the same interface, not a parallel
+"if mock" branch sprinkled through calling code.
+
 ## Conventions
 
 - Column-name-keyed Sheet parsing, not position-keyed — tabs get columns

@@ -5,8 +5,6 @@ writes, Gmail writes stubbed pending a real credential).
 """
 import os
 import sqlite3
-from collections import defaultdict
-from datetime import datetime
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import RedirectResponse
@@ -15,15 +13,35 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 import auth
+import cost_stats
 import sheets_write
 import sync
 
 DB_PATH = os.environ.get("DASHBOARD_DB_PATH", "dashboard.db")
 
+# Lets someone click through the whole app locally with fixture data and
+# no real Google OAuth client -- see SETUP_CHECKLIST.md step 3. Guarded
+# two ways so it can never accidentally activate on a real deployment:
+# (1) it must be explicitly turned on, AND (2) it's ignored outright the
+# moment a real OAuth client ID is configured, so setting up real login
+# automatically and permanently disables this, no separate step needed.
+DEV_BYPASS_AUTH = (
+    os.environ.get("DASHBOARD_DEV_BYPASS_AUTH", "").lower() in ("1", "true", "yes")
+    and not os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
+)
+DEV_BYPASS_EMAIL = "dev-bypass@iconsofrealestate.com"
+
 app = FastAPI(title="spam_machine dashboard")
 templates = Jinja2Templates(directory="templates")
 
 app.include_router(auth.router)
+
+if DEV_BYPASS_AUTH:
+    print(
+        "==> DASHBOARD_DEV_BYPASS_AUTH is on and no GOOGLE_OAUTH_CLIENT_ID is set: "
+        "every request is auto-logged-in as a fake dev user. Local/demo use only -- "
+        "this turns itself off the moment a real OAuth client ID is configured."
+    )
 
 
 class RequireLoginMiddleware(BaseHTTPMiddleware):
@@ -31,7 +49,11 @@ class RequireLoginMiddleware(BaseHTTPMiddleware):
         if request.url.path in auth.PUBLIC_PATHS or request.url.path.startswith("/static"):
             return await call_next(request)
         if not request.session.get("user_email"):
-            return RedirectResponse(url="/login")
+            if DEV_BYPASS_AUTH:
+                request.session["user_email"] = DEV_BYPASS_EMAIL
+                request.session["user_name"] = "Dev Bypass"
+            else:
+                return RedirectResponse(url="/login")
         return await call_next(request)
 
 
@@ -166,26 +188,7 @@ async def costs(request: Request):
     finally:
         conn.close()
 
-    daily = defaultdict(lambda: defaultdict(float))
-    for row in rows:
-        ts = row["timestamp"] or ""
-        day = ts[:10]  # 'YYYY-MM-DD' prefix, however the timestamp was formatted
-        try:
-            cost = float(row["estimated_cost_usd"] or 0)
-        except ValueError:
-            cost = 0.0
-        daily[day][row["provider"] or "unknown"] += cost
-
-    days_sorted = sorted(daily.keys(), reverse=True)
-    providers = sorted({p for day_costs in daily.values() for p in day_costs})
-    table = [
-        {
-            "day": day,
-            "by_provider": {p: daily[day].get(p, 0.0) for p in providers},
-            "total": sum(daily[day].values()),
-        }
-        for day in days_sorted
-    ]
+    table, providers = cost_stats.aggregate_costs_by_day(rows)
 
     return templates.TemplateResponse(
         "costs.html",

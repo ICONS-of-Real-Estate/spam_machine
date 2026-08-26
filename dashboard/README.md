@@ -12,19 +12,32 @@ project it reports on.
 
 ## Status
 
-Scaffold only. Not deployed, not connected to real credentials for
-Gmail writes yet. What's real right now:
+No real credentials wired up yet — see `SETUP_CHECKLIST.md` for exactly
+what to get and in what order. Until then it runs entirely on fixture
+data (`DASHBOARD_SYNC_MODE=mock`, the default) so the whole thing can be
+clicked through today. What's real right now:
 
 - Auth (`auth.py`) — same 3-layer Google Workspace OAuth pattern as
-  `sales_review_project`'s dashboard.
+  `sales_review_project`'s dashboard. Local dev doesn't need a real OAuth
+  client at all: `DASHBOARD_DEV_BYPASS_AUTH=true` (on by default in
+  `.env.example`) auto-logs-in as a fake dev user, and turns itself off
+  the instant a real `GOOGLE_OAUTH_CLIENT_ID` is configured — see
+  checklist step 3 for real login.
 - Sync (`sync.py`) — pulls `AI Drafts Log`, `Learning Log`,
-  `SOP Suggestions`, `LLM Cost Log`, and `Ops Alert Log` from
-  spam_machine's real Sheet into a local SQLite mirror.
+  `SOP Suggestions`, `LLM Cost Log`, and `Ops Alert Log`, either from
+  spam_machine's real Sheet (`DASHBOARD_SYNC_MODE=live`) or from
+  realistic fixture data (`fixtures.py`, the default) into a local
+  SQLite mirror.
 - Reads (`app.py` + `templates/`) — drafts list, SOP suggestions list,
   cost-by-day table, ops alerts list, all served from the mirror.
 - SOP suggestion writes (`sheets_write.py`) — approve/reject/comment
   writes straight to the live Sheet, then triggers an immediate re-sync
-  of that one tab.
+  of that one tab. Needs `DASHBOARD_SYNC_MODE=live` and a real write
+  credential — mock mode doesn't cover this path.
+- Tests (`tests/`, run with `pytest`) — cover the sheet-parsing logic in
+  `sync.py`, the cost aggregation in `cost_stats.py`, and the A1-notation
+  column math in `sheets_write.py`. All run against fixtures, no
+  credentials needed.
 
 What's stubbed:
 
@@ -40,14 +53,17 @@ What's stubbed:
 ```bash
 cd dashboard
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env    # fill in real values
-# Put a read-only service_account.json (Viewer on the Sheet) here.
-# Put a write-capable service_account_write.json (Editor) here too.
-export $(cat .env | xargs)   # or use direnv / your usual approach
-python sync.py               # populate dashboard.db once
+pip install -r requirements-dev.txt   # requirements.txt + pytest
+pytest tests/                          # sanity check, no credentials needed
+cp .env.example .env                   # defaults already run in mock mode
+export $(cat .env | xargs)             # or use direnv / your usual approach
+python sync.py                         # populates dashboard.db from fixtures.py
 uvicorn app:app --reload --port 8010
 ```
+
+That's enough to click through the whole UI with realistic fake data —
+no service account, no OAuth client, no Sheet access needed. To point it
+at real data, see `SETUP_CHECKLIST.md`.
 
 ## Deploy (same VPS, same style as sales_review_project's dashboard)
 

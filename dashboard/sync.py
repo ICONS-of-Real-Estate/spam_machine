@@ -17,15 +17,24 @@ script never writes. Writes (SOP suggestion approve/reject/comment) go
 through sheets_write.py instead, using a separate write-capable
 credential, and call sync_one_tab() directly afterward for an immediate
 refresh rather than waiting for the next timer firing.
+
+DASHBOARD_SYNC_MODE=mock (default, until real credentials exist) pulls
+from fixtures.py instead of the real Sheets API -- lets the whole
+dashboard be run and clicked through with realistic-looking data before
+any service account or Sheet-sharing step has happened. Set
+DASHBOARD_SYNC_MODE=live once SPAM_MACHINE_SHEET_ID and
+DASHBOARD_SERVICE_ACCOUNT_FILE are real. Same mock/live switch pattern as
+qc-pipeline's services/hub_client.py (HUB_MODE) and this app's own
+gmail_write.py (GMAIL_WRITE_MODE).
 """
 import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
 
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
+import fixtures
 
+SYNC_MODE = os.environ.get("DASHBOARD_SYNC_MODE", "mock")  # "mock" or "live"
 SHEET_ID = os.environ.get("SPAM_MACHINE_SHEET_ID", "")
 SERVICE_ACCOUNT_FILE = os.environ.get("DASHBOARD_SERVICE_ACCOUNT_FILE", "service_account.json")
 DB_PATH = os.environ.get("DASHBOARD_DB_PATH", "dashboard.db")
@@ -95,6 +104,14 @@ TABS = {
 
 
 def _sheets_service():
+    if SYNC_MODE == "mock":
+        return fixtures.MockSheetsService()
+
+    # Imported lazily so mock-mode runs (e.g. in tests, or a quick local
+    # click-through) don't need google-api-python-client installed at all.
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
     creds = service_account.Credentials.from_service_account_file(
         SERVICE_ACCOUNT_FILE, scopes=SCOPES
     )
@@ -147,10 +164,11 @@ def sync_one_tab(service, conn, tab_name):
 
 
 def sync_all():
-    if not SHEET_ID:
+    if SYNC_MODE != "mock" and not SHEET_ID:
         print("SPAM_MACHINE_SHEET_ID not set -- aborting.", file=sys.stderr)
         sys.exit(1)
 
+    print(f"==> Syncing in {SYNC_MODE.upper()} mode" + ("" if SYNC_MODE == "mock" else f" from sheet {SHEET_ID}"))
     service = _sheets_service()
     conn = sqlite3.connect(DB_PATH)
     try:
