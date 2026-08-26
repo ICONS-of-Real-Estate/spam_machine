@@ -6,7 +6,7 @@ writes, Gmail writes stubbed pending a real credential).
 import os
 import sqlite3
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -14,6 +14,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 import auth
 import cost_stats
+import gmail_write
 import sheets_write
 import sync
 
@@ -86,8 +87,9 @@ def last_synced_at():
 
 
 def base_context(request: Request):
+    # Starlette's TemplateResponse(request, name, context) auto-injects
+    # "request" into the template context -- no need to add it here too.
     return {
-        "request": request,
         "user_email": request.session.get("user_email"),
         "user_name": request.session.get("user_name"),
         "last_synced_at": last_synced_at(),
@@ -117,6 +119,7 @@ async def home(request: Request):
         conn.close()
 
     return templates.TemplateResponse(
+        request,
         "index.html",
         {
             **base_context(request),
@@ -137,8 +140,47 @@ async def drafts(request: Request):
     finally:
         conn.close()
     return templates.TemplateResponse(
-        "drafts.html", {**base_context(request), "drafts": rows}
+        request, "drafts.html", {**base_context(request), "drafts": rows}
     )
+
+
+@app.get("/drafts/{thread_id}")
+async def draft_detail(request: Request, thread_id: str):
+    conn = db()
+    try:
+        draft = conn.execute(
+            "SELECT * FROM drafts WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if draft is None:
+        raise HTTPException(status_code=404, detail=f"No draft logged for thread {thread_id!r}")
+
+    body = gmail_write.get_draft_body(thread_id)
+    return templates.TemplateResponse(
+        request,
+        "draft_detail.html",
+        {
+            **base_context(request),
+            "draft": draft,
+            "body": body,
+            "gmail_write_mode": gmail_write.GMAIL_WRITE_MODE,
+        },
+    )
+
+
+@app.post("/drafts/{thread_id}/edit")
+async def draft_edit(request: Request, thread_id: str, new_body: str = Form(...)):
+    editor_email = request.session.get("user_email")
+    gmail_write.update_draft_body(thread_id, new_body, editor_email)
+    return RedirectResponse(url=f"/drafts/{thread_id}", status_code=303)
+
+
+@app.post("/drafts/{thread_id}/approve")
+async def draft_approve(request: Request, thread_id: str):
+    approver_email = request.session.get("user_email")
+    gmail_write.mark_draft_approved(thread_id, approver_email)
+    return RedirectResponse(url=f"/drafts/{thread_id}", status_code=303)
 
 
 @app.get("/sop-suggestions")
@@ -151,7 +193,7 @@ async def sop_suggestions(request: Request):
     finally:
         conn.close()
     return templates.TemplateResponse(
-        "sop_suggestions.html", {**base_context(request), "suggestions": rows}
+        request, "sop_suggestions.html", {**base_context(request), "suggestions": rows}
     )
 
 
@@ -179,7 +221,10 @@ async def review_sop_suggestion(
 
 
 @app.get("/costs")
-async def costs(request: Request):
+async def costs(request: Request, period: str = "day"):
+    if period not in cost_stats.PERIODS:
+        period = "day"
+
     conn = db()
     try:
         rows = conn.execute(
@@ -188,11 +233,18 @@ async def costs(request: Request):
     finally:
         conn.close()
 
-    table, providers = cost_stats.aggregate_costs_by_day(rows)
+    table, providers = cost_stats.aggregate_costs_by_period(rows, period)
 
     return templates.TemplateResponse(
+        request,
         "costs.html",
-        {**base_context(request), "table": table, "providers": providers},
+        {
+            **base_context(request),
+            "table": table,
+            "providers": providers,
+            "period": period,
+            "periods": cost_stats.PERIODS,
+        },
     )
 
 
@@ -206,5 +258,5 @@ async def alerts(request: Request):
     finally:
         conn.close()
     return templates.TemplateResponse(
-        "alerts.html", {**base_context(request), "alerts": rows}
+        request, "alerts.html", {**base_context(request), "alerts": rows}
     )

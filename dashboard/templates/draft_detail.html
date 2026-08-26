@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}{{ draft.subject }} — spam_machine dashboard{% endblock %}
+{% block content %}
+<p><a class="link" href="/drafts">&larr; back to drafts</a></p>
+<h1>{{ draft.subject }}</h1>
+<p>
+  {{ draft.prospect_email }} &middot; {{ draft.category }}
+  {% if draft.needs_teammate_routing == 'true' or draft.needs_teammate_routing == 'TRUE' %}<span class="badge pending">routing</span>{% endif %}
+  &middot; {{ draft.sop_mode }} / {{ draft.llm_provider }} &middot; ${{ draft.estimated_cost_usd }}
+  {% if draft.draft_link %} &middot; <a class="link" href="{{ draft.draft_link }}" target="_blank">Open in Gmail</a>{% endif %}
+</p>
+
+{% if gmail_write_mode == 'mock' %}
+<p class="badge pending">Gmail write access not connected yet — this is fixture text, editing/approving here doesn't touch a real draft. See dashboard/SETUP_CHECKLIST.md step 5.</p>
+{% endif %}
+
+<form method="post" action="/drafts/{{ draft.thread_id }}/edit">
+  <textarea name="new_body" rows="14" style="width:100%; background:#171d2c; color:#e8ecf4; border:1px solid #232b3d; border-radius:6px; padding:0.75rem;">{{ body }}</textarea>
+  <p>
+    <button type="submit">Save edit</button>
+  </p>
+</form>
+
+<form method="post" action="/drafts/{{ draft.thread_id }}/approve">
+  <button type="submit">Approve as-is</button>
+</form>
+<p class="freshness">Approving here only records the decision — spam_machine never auto-sends; a human still sends from Gmail.</p>
+{% endblock %}

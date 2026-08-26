@@ -1,19 +1,25 @@
 {% extends "base.html" %}
 {% block title %}Costs — spam_machine dashboard{% endblock %}
 {% block content %}
-<h1>LLM cost by day</h1>
+<h1>LLM cost by {{ period }}</h1>
 <p>From the "LLM Cost Log" tab, including billed-but-unusable calls
 (Outcome/Error columns) -- so this reflects real spend, not just
 successful drafts.</p>
+<p>
+  {% for p in periods %}
+    {% if p == period %}<strong>{{ p }}</strong>{% else %}<a class="link" href="/costs?period={{ p }}">{{ p }}</a>{% endif %}
+    {% if not loop.last %} · {% endif %}
+  {% endfor %}
+</p>
 <table>
   <tr>
-    <th>Day</th>
+    <th>{{ period|capitalize }}</th>
     {% for p in providers %}<th>{{ p }}</th>{% endfor %}
     <th>Total</th>
   </tr>
   {% for row in table %}
   <tr>
-    <td>{{ row.day }}</td>
+    <td>{{ row.bucket }}</td>
     {% for p in providers %}<td>${{ "%.4f"|format(row.by_provider[p]) }}</td>{% endfor %}
     <td>${{ "%.4f"|format(row.total) }}</td>
   </tr>

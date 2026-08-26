@@ -13,13 +13,13 @@ credential described in <code>gmail_write.py</code>.</p>
   {% for d in drafts %}
   <tr>
     <td>{{ d.timestamp }}</td>
-    <td>{{ d.subject }}</td>
+    <td><a class="link" href="/drafts/{{ d.thread_id }}">{{ d.subject }}</a></td>
     <td>{{ d.prospect_email }}</td>
     <td>{{ d.category }}{% if d.needs_teammate_routing == 'true' or d.needs_teammate_routing == 'TRUE' %} <span class="badge pending">routing</span>{% endif %}</td>
     <td>{{ d.sop_mode }}</td>
     <td>{{ d.llm_provider }}</td>
     <td>${{ d.estimated_cost_usd }}</td>
-    <td>{% if d.draft_link %}<a class="link" href="{{ d.draft_link }}" target="_blank">Open in Gmail</a>{% endif %}</td>
+    <td>{% if d.draft_link %}<a class="link" href="{{ d.draft_link }}" target="_blank">Gmail</a>{% endif %}</td>
   </tr>
   {% endfor %}
 </table>

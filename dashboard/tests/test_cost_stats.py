@@ -1,4 +1,4 @@
-from cost_stats import aggregate_costs_by_day
+from cost_stats import aggregate_costs_by_day, aggregate_costs_by_period
 
 
 def row(timestamp, provider, cost):
@@ -53,3 +53,42 @@ def test_day_is_taken_from_timestamp_prefix_regardless_of_format():
     rows = [row("2026-08-26T08:14:00Z", "kimi", "0.01")]
     table, _ = aggregate_costs_by_day(rows)
     assert table[0]["day"] == "2026-08-26"
+
+
+def test_month_period_groups_across_days():
+    rows = [
+        row("2026-08-01 08:00:00", "kimi", "0.01"),
+        row("2026-08-26 08:00:00", "kimi", "0.02"),
+        row("2026-07-31 08:00:00", "kimi", "0.05"),
+    ]
+    table, _ = aggregate_costs_by_period(rows, "month")
+    by_bucket = {r["bucket"]: r["total"] for r in table}
+    assert by_bucket["2026-08"] == 0.03
+    assert by_bucket["2026-07"] == 0.05
+    # most-recent-first
+    assert [r["bucket"] for r in table] == ["2026-08", "2026-07"]
+
+
+def test_week_period_uses_iso_week_and_spans_month_boundary():
+    # 2026-08-31 (Mon) and 2026-09-01 (Tue) are the same ISO week --
+    # should land in the same bucket even though the month differs.
+    rows = [
+        row("2026-08-31 08:00:00", "kimi", "0.01"),
+        row("2026-09-01 08:00:00", "kimi", "0.02"),
+    ]
+    table, _ = aggregate_costs_by_period(rows, "week")
+    assert len(table) == 1
+    assert table[0]["total"] == 0.03
+
+
+def test_unparseable_date_falls_back_to_unknown_bucket_not_a_crash():
+    rows = [row("not-a-date", "kimi", "0.01")]
+    table, _ = aggregate_costs_by_period(rows, "week")
+    assert table[0]["bucket"] == "unknown"
+    assert table[0]["total"] == 0.01
+
+
+def test_invalid_period_raises():
+    import pytest
+    with pytest.raises(ValueError):
+        aggregate_costs_by_period([], "year")
