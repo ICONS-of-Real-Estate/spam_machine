@@ -565,7 +565,18 @@ function ensureSkipCacheTabExists(ss) {
   let tab = ss.getSheetByName(SKIP_CACHE_TAB);
   if (!tab) {
     tab = ss.insertSheet(SKIP_CACHE_TAB);
-    tab.appendRow(['Thread ID', 'Skip Reason', 'Last Checked At']);
+    tab.appendRow(['Thread ID', 'Skip Reason', 'Last Checked At', 'Message Count At Cache']);
+    return tab;
+  }
+
+  // MIGRATION (26 Aug 2026, real incident): 'Message Count At Cache' is new
+  // -- see isSkipCacheFresh_ below for why. This tab is pure cache with no
+  // human-readable history value (rewritten wholesale by saveSkipCache
+  // every run), so just extend the header in place -- old rows without a
+  // count read back as null and fail the freshness check safely (forces an
+  // immediate re-check rather than trusting a stale verdict).
+  if (tab.getLastColumn() < 4) {
+    tab.getRange(1, 4).setValue('Message Count At Cache');
   }
   return tab;
 }
@@ -581,15 +592,36 @@ function loadSkipCache(ss) {
     const threadId = values[i][0];
     const reason = values[i][1];
     const lastCheckedAt = values[i][2];
+    const messageCount = values[i][3];
     if (threadId && lastCheckedAt instanceof Date) {
-      map[threadId] = { reason: reason, lastCheckedAt: lastCheckedAt };
+      map[threadId] = {
+        reason: reason,
+        lastCheckedAt: lastCheckedAt,
+        messageCount: (typeof messageCount === 'number' && messageCount > 0) ? messageCount : null,
+      };
     }
   }
   return map;
 }
 
-function isSkipCacheFresh_(entry) {
+// FIX (26 Aug 2026, real incident): these skip reasons are documented
+// above as state-dependent ("could flip with new activity"), but the only
+// invalidation was this blind SKIP_CACHE_TTL_HOURS timer -- a thread that
+// got real new activity (e.g. a lead's follow-up reply restoring the
+// network CC) kept returning its stale verdict for up to 6 more hours.
+// Confirmed via a real thread: cached "not CC-d to network on last
+// message" 30 minutes prior, but the lead's actual latest message (which
+// arrived after that check) DID have the CC and was asking a live,
+// answerable question -- the drafter would have sat on it for hours.
+// currentMessageCount comes from thread.getMessageCount(), a cheap
+// thread-level metadata call (same category as getFirstMessageSubject()
+// above -- NOT the expensive getMessages() fetch), so checking it doesn't
+// reintroduce the cost this cache exists to avoid.
+function isSkipCacheFresh_(entry, currentMessageCount) {
   if (!entry) return false;
+  if (entry.messageCount != null && currentMessageCount != null && entry.messageCount !== currentMessageCount) {
+    return false; // new activity since this was cached -- always worth a fresh look, TTL or not
+  }
   const ageHours = (Date.now() - entry.lastCheckedAt.getTime()) / (1000 * 60 * 60);
   return ageHours < SKIP_CACHE_TTL_HOURS;
 }
@@ -602,12 +634,12 @@ function isSkipCacheFresh_(entry) {
 function saveSkipCache(ss, cacheMap) {
   const tab = ensureSkipCacheTabExists(ss);
   const rows = Object.keys(cacheMap).map(threadId =>
-    [threadId, cacheMap[threadId].reason, cacheMap[threadId].lastCheckedAt]
+    [threadId, cacheMap[threadId].reason, cacheMap[threadId].lastCheckedAt, cacheMap[threadId].messageCount || '']
   );
 
   const lastRow = tab.getLastRow();
-  if (lastRow > 1) tab.getRange(2, 1, lastRow - 1, 3).clearContent();
-  if (rows.length > 0) tab.getRange(2, 1, rows.length, 3).setValues(rows);
+  if (lastRow > 1) tab.getRange(2, 1, lastRow - 1, 4).clearContent();
+  if (rows.length > 0) tab.getRange(2, 1, rows.length, 4).setValues(rows);
 }
 
 // ---------- MAIN ENTRY POINT ----------
@@ -875,7 +907,8 @@ function runReplyDrafterInner() {
     // this expires, so the thread gets a fresh look once the TTL passes.
     const threadId = thread.getId();
     const cacheEntry = skipCache[threadId];
-    if (isSkipCacheFresh_(cacheEntry)) {
+    const currentMessageCount = thread.getMessageCount(); // cheap thread-level metadata, not getMessages()
+    if (isSkipCacheFresh_(cacheEntry, currentMessageCount)) {
       Logger.log('DIAGNOSTIC -- skipped (cached ' + Math.round((Date.now() - cacheEntry.lastCheckedAt.getTime()) / 60000) + 'm ago: ' + cacheEntry.reason + '): ' + subject);
       continue;
     }
@@ -889,7 +922,7 @@ function runReplyDrafterInner() {
     const lastMsg = lastNonDraftMessage_(messages) || messages[messages.length - 1];
 
     if (!isCcdToNetworkGroup(lastMsg)) {
-      skipCache[threadId] = { reason: 'not CC-d to network on last message', lastCheckedAt: new Date() };
+      skipCache[threadId] = { reason: 'not CC-d to network on last message', lastCheckedAt: new Date(), messageCount: messages.length };
       Logger.log('DIAGNOSTIC -- skipped (not CC-d to network on last message), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
       continue;
     }
@@ -919,7 +952,7 @@ function runReplyDrafterInner() {
     } else {
       const forwardInfo = extractForwardedLeadInfo(lastMsg);
       if (!forwardInfo) {
-        skipCache[threadId] = { reason: 'could not parse forwarded lead info', lastCheckedAt: new Date() };
+        skipCache[threadId] = { reason: 'could not parse forwarded lead info', lastCheckedAt: new Date(), messageCount: messages.length };
         Logger.log('Could not parse forwarded lead info for: ' + subject + ' -- skipping rather than guessing, cached for ' + SKIP_CACHE_TTL_HOURS + 'h.');
         continue;
       }
@@ -928,7 +961,7 @@ function runReplyDrafterInner() {
     }
 
     if (draftedThisRun.has(leadEmail.toLowerCase()) || draftAlreadyExistsFor(leadEmail, existingDrafts)) {
-      skipCache[threadId] = { reason: 'draft already exists for ' + leadEmail, lastCheckedAt: new Date() };
+      skipCache[threadId] = { reason: 'draft already exists for ' + leadEmail, lastCheckedAt: new Date(), messageCount: messages.length };
       Logger.log('DIAGNOSTIC -- skipped (draft already exists for ' + leadEmail + '), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
       continue;
     }
@@ -1020,7 +1053,7 @@ function runReplyDrafterInner() {
     if (CONFIG.DRAFT_ONLY_POSITIVE_FOR_NOW) {
       const cheapVerdict = looksLikeDeclineCheaply_(replyBody, subject);
       if (cheapVerdict === 'decline') {
-        skipCache[threadId] = { reason: 'cheap pre-check read it as a clear decline (deprioritized, no full LLM call made)', lastCheckedAt: new Date() };
+        skipCache[threadId] = { reason: 'cheap pre-check read it as a clear decline (deprioritized, no full LLM call made)', lastCheckedAt: new Date(), messageCount: messages.length };
         Logger.log('DIAGNOSTIC -- skipped BEFORE the expensive call (cheap pre-check: clear decline, and declines are deprioritized right now), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
         continue;
       }
@@ -1039,7 +1072,7 @@ function runReplyDrafterInner() {
     const result = classifyAndDraft(systemPrompt, subject, context, leadEmail, state, matchedShow, buildSopModeOverride(sopMode), likelyBlankOrSignatureOnly);
 
     if (!result) {
-      skipCache[threadId] = { reason: 'classification/draft failed', lastCheckedAt: new Date() };
+      skipCache[threadId] = { reason: 'classification/draft failed', lastCheckedAt: new Date(), messageCount: messages.length };
       Logger.log('Classification/draft failed for: ' + subject + ', cached for ' + SKIP_CACHE_TTL_HOURS + 'h.');
       continue;
     }
@@ -1052,7 +1085,7 @@ function runReplyDrafterInner() {
     // off the same flag and both currently no-op -- flip it back to true to
     // restore the old deprioritize-declines behavior in one place.
     if (CONFIG.DRAFT_ONLY_POSITIVE_FOR_NOW && (result.category === 'no_decline' || result.category === 'no_data_error')) {
-      skipCache[threadId] = { reason: 'deprioritized (' + result.category + ') -- focusing on positive replies for now', lastCheckedAt: new Date() };
+      skipCache[threadId] = { reason: 'deprioritized (' + result.category + ') -- focusing on positive replies for now', lastCheckedAt: new Date(), messageCount: messages.length };
       Logger.log('DIAGNOSTIC -- skipped (deprioritized ' + result.category + ' per today\'s request), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
       continue;
     }
