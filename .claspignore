@@ -3,3 +3,18 @@
 .gitignore
 README.md
 .clasp.json
+
+# ADDED (26 Aug 2026, real incident): dashboard/ and outreach/ are
+# separate Python/FastAPI apps living in this same repo (see their own
+# CLAUDE.md/README.md), NOT part of the Apps Script project. Without
+# these, clasp push would try to push their .html templates (Apps
+# Script treats .html as a real script file type) and everything else
+# in these trees into the live Apps Script project. Caught before it
+# happened -- if you're reading this after it already ran once, check
+# the Apps Script editor for stray files under these names and remove
+# them by hand; clasp push does not undo a previous push on its own.
+dashboard/**
+outreach/**
+research/**
+sop_change_requests/**
+FUTURE_FEATURES.md
