@@ -81,6 +81,10 @@ function runLearningLoop() {
   }
   try {
     runLearningLoopInner();
+  } catch (e) {
+    // FIX (27 Aug 2026, real risk found in review): no path here could ever
+    // trip the Gmail quota circuit breaker -- see handleGmailJobError_.
+    handleGmailJobError_('runLearningLoop', e);
   } finally {
     lock.releaseLock();
   }
@@ -161,13 +165,34 @@ function runLearningLoopInner() {
     const threadId = row[threadIdCol];
     if (!threadId || alreadyCompared.has(threadId)) continue;
 
+    // FIX (27 Aug 2026, real risk found in review): this catch accepted ANY
+    // exception and asserted one cause ("deleted") for all of them --
+    // including the real Gmail daily quota error. isGmailQuotaExhausted()
+    // just above only reads the project's SELF-tracked flag, which stays
+    // false until something calls markGmailQuotaExhausted() -- and nothing
+    // in this loop did. So a genuine quota trip mid-run used to make every
+    // remaining row throw, every throw got silently swallowed here, and the
+    // run finished reporting "Newly compared: 0" -- indistinguishable from
+    // a genuinely quiet week. cleanup_poisoned_emails.gs's own header
+    // documents this exact anti-pattern ("a quota exception got treated
+    // identically to 'this thread genuinely can't be parsed'... halt,
+    // don't catch") -- the lesson just hadn't reached this file yet.
     let thread;
     try {
       thread = GmailApp.getThreadById(threadId);
     } catch (e) {
-      continue; // thread may have been deleted
+      if (isGmailSpecificQuotaError(e)) {
+        markGmailQuotaExhausted();
+        Logger.log('runLearningLoopInner -- Gmail quota exceeded at row ' + (i + 1) + ', stopping rather than silently skipping the rest of the backlog.');
+        break;
+      }
+      Logger.log('runLearningLoopInner -- could not open thread ' + threadId + ' (row ' + (i + 1) + '), skipping: ' + e);
+      continue;
     }
-    if (!thread) continue;
+    if (!thread) {
+      Logger.log('runLearningLoopInner -- thread ' + threadId + ' (row ' + (i + 1) + ') returned null (likely deleted), skipping.');
+      continue;
+    }
     // SELF-TRACKED QUOTA COUNTER (22 Aug 2026, per direct request): see the
     // fuller comment in quota_guard_and_alerting.gs.
     recordGmailQuotaUsage_(1);
@@ -375,6 +400,10 @@ function generateSopSuggestions() {
   }
   try {
     generateSopSuggestionsInner();
+  } catch (e) {
+    // FIX (27 Aug 2026, real risk found in review): no path here could ever
+    // trip the Gmail quota circuit breaker -- see handleGmailJobError_.
+    handleGmailJobError_('generateSopSuggestions', e);
   } finally {
     lock.releaseLock();
   }
@@ -486,12 +515,43 @@ function generateSopSuggestionsInner(opts) {
     const textBlock = data.content.find(c => c.type === 'text');
     if (!textBlock) break;
 
+    // FIX (27 Aug 2026, real risk found in review): on a parse failure this
+    // used to fall back to suggestions = [] and then continue straight on to
+    // marking the batch's rows reviewed anyway. The LLM call was already
+    // paid for, nothing was written to "SOP Suggestions", and those Learning
+    // Log rows -- the only signal this loop has -- were gone permanently
+    // (they'd never be re-sent, since the selection query is "not yet
+    // reviewed"). The 23 Aug incident this file already documents (a
+    // truncated response) only raised max_tokens; it didn't fix the
+    // underlying "parse failed -> mark reviewed anyway" behavior, which can
+    // still be hit by anything else that makes JSON.parse throw. Also
+    // stripped a markdown code fence before parsing -- the sibling
+    // implementation in lead_followup_sequences.gs already does this, and a
+    // model wrapping its JSON in ```json fences is a routine occurrence, not
+    // an edge case.
     let suggestions;
+    let parseOk = true;
     try {
-      suggestions = JSON.parse(textBlock.text.trim());
+      const cleaned = textBlock.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+      suggestions = JSON.parse(cleaned);
     } catch (e) {
-      Logger.log('Failed to parse suggestions JSON: ' + textBlock.text);
+      Logger.log('generateSopSuggestions -- failed to parse suggestions JSON, NOT marking this batch\'s rows reviewed (will retry next run): ' + textBlock.text);
+      parseOk = false;
       suggestions = [];
+    }
+    if (parseOk && !Array.isArray(suggestions)) {
+      Logger.log('generateSopSuggestions -- expected a JSON array, got ' + typeof suggestions + ' -- treating as a parse failure, NOT marking reviewed: ' + textBlock.text);
+      parseOk = false;
+      suggestions = [];
+    }
+
+    if (!parseOk) {
+      // Don't mark these rows reviewed, don't advance past them, and don't
+      // keep spending LLM calls this run on a response shape that just
+      // failed -- these rows are still "unreviewed" in the sheet and will be
+      // picked up again on the next firing (daily, or the 5-min catch-up
+      // trigger while one is running).
+      break;
     }
 
     suggestions.forEach(s => {
@@ -633,7 +693,27 @@ function removeSopSuggestionsCatchupTrigger() {
   });
 }
 
+// FIX (27 Aug 2026, real risk found in review): this 5-minute trigger only
+// ever removed itself when generateSopSuggestionsInner returned
+// backlogCleared === true. If it throws every run instead -- both LLM
+// providers down, or a bad response shape neither Array.isArray guard
+// catches -- there was no attempt cap, no age cap, and no quota check, so
+// it would fire every 5 minutes indefinitely, each time looping LLM calls
+// for up to its own runtime budget. This is the clearest unbounded-API-call
+// path in the project. Capped at 24h since install: if the backlog still
+// hasn't cleared by then, something is systematically wrong and continuing
+// to retry every 5 minutes isn't going to fix it -- it needs a human.
+const SOP_CATCHUP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 function runSopSuggestionsCatchup() {
+  const startIso = PropertiesService.getScriptProperties().getProperty(SOP_CATCHUP_START_PROP);
+  if (startIso && (Date.now() - new Date(startIso).getTime()) > SOP_CATCHUP_MAX_AGE_MS) {
+    removeSopSuggestionsCatchupTrigger();
+    sendOpsAlert('SOP catch-up trigger self-removed after 24h',
+      'runSopSuggestionsCatchup never reported the backlog cleared within 24 hours of being installed -- removing its 5-minute trigger rather than continuing to fire indefinitely. Check the execution log for the repeating error, then re-run installSopSuggestionsCatchupTrigger() once it is fixed.');
+    return;
+  }
+
   const lock = LockService.getScriptLock();
   const gotLock = lock.tryLock(10000);
   if (!gotLock) {
@@ -646,6 +726,13 @@ function runSopSuggestionsCatchup() {
       finalizeSopSuggestionsCatchup();
       removeSopSuggestionsCatchupTrigger();
     }
+  } catch (e) {
+    // FIX (27 Aug 2026, real risk found in review): no path here could ever
+    // trip the Gmail quota circuit breaker -- see handleGmailJobError_. Note
+    // this job's actual API cost is LLM calls, not Gmail, but a quota error
+    // here still needs the same visibility rather than silently retrying
+    // every 5 minutes.
+    handleGmailJobError_('runSopSuggestionsCatchup', e);
   } finally {
     lock.releaseLock();
   }

@@ -717,6 +717,12 @@ function runLeadFollowUpCycle() {
     Logger.log('Hub Guest follow-up drafting SKIPPED -- HUB_GUEST_FOLLOWUPS_ENABLED is false pending a fix to the upstream no_decline misclassification. Registration still ran; no new drafts created for this cadence.');
   }
   Logger.log('Lead follow-up cycle complete (Podcast Sales active, Hub Guest paused).');
+  } catch (e) {
+    // FIX (27 Aug 2026, real risk found in review): this is the project's
+    // other draft-creating entry point, and it had no way to ever trip the
+    // Gmail quota circuit breaker -- see handleGmailJobError_ in
+    // quota_guard_and_alerting.gs.
+    handleGmailJobError_('runLeadFollowUpCycle', e);
   } finally {
     lock.releaseLock();
   }

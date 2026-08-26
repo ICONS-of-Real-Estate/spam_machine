@@ -58,11 +58,71 @@
  * individually.
  */
 
-const QUOTA_ERROR_SUBSTRING_GLOBAL = 'too many times for one day';
+// FIX (27 Aug 2026, real risk found in review): a bare English substring had
+// three failure modes. (1) Apps Script renders thrown errors in the RUNNING
+// ACCOUNT'S language, so under any non-English locale a genuine daily quota
+// error never contains this exact English phrase -- the breaker silently
+// never trips, and runReplyDrafter's catch alerts "failed (not quota) --
+// the usual wait-for-tomorrow fix does not apply", which is backwards. (2)
+// The short-window limit ("Service invoked too many times in a short time")
+// doesn't contain "for one day" either, so it's correctly NOT classified as
+// daily exhaustion -- but nothing in this project backs off or retries on
+// it, so it's silently retried at full speed next firing. (3) The same
+// English phrase appears for OTHER services too -- "too many times for one
+// day: urlfetch" or ": drive" -- which would wrongly call
+// markGmailQuotaExhausted() and shut down every Gmail-touching trigger for
+// a Gmail quota that was never actually hit.
+const QUOTA_ERROR_PATTERNS = [
+  /too many times for one day/i,
+];
+const GMAIL_SERVICE_HINT = /gmail/i;
 const QUOTA_EXHAUSTED_PROPERTY_KEY = 'GMAIL_QUOTA_EXHAUSTED_DATE_PACIFIC';
 
+// FIX (27 Aug 2026): read e.message first -- String(e) on a thrown
+// non-Error value (or certain host exceptions) can stringify to
+// "[object Object]", silently defeating every check below it.
+function errorText_(e) {
+  return String((e && e.message) || e || '');
+}
+
 function isQuotaExceededError(e) {
-  return String(e).indexOf(QUOTA_ERROR_SUBSTRING_GLOBAL) !== -1;
+  const text = errorText_(e);
+  return QUOTA_ERROR_PATTERNS.some(p => p.test(text));
+}
+
+// FIX (27 Aug 2026, real risk found in review): isQuotaExceededError alone
+// doesn't say WHICH service hit its daily cap -- a urlfetch or Drive quota
+// error contains the identical English phrase. Callers that are about to
+// call markGmailQuotaExhausted() (which shuts down every Gmail-touching
+// trigger for the rest of the day) should use this, not the bare check.
+function isGmailSpecificQuotaError(e) {
+  const text = errorText_(e);
+  return isQuotaExceededError(e) && GMAIL_SERVICE_HINT.test(text);
+}
+
+// FIX (27 Aug 2026, real risk found in review): only runReplyDrafter (and
+// one manual cleanup) could ever call markGmailQuotaExhausted() -- every
+// other Gmail-touching entry point CHECKED isGmailQuotaExhausted() at the
+// top but had no catch that could ever SET it. runLeadFollowUpCycle is the
+// project's other draft-creating entry point; when IT exhausts the quota,
+// the flag stayed clear and every other job kept firing into a dead API for
+// the rest of the day. Shared handler so each entry point's own try/catch
+// gets the same classification and alerting runReplyDrafter already has,
+// without seven copies of the same block.
+function handleGmailJobError_(jobName, e) {
+  if (isGmailSpecificQuotaError(e)) {
+    markGmailQuotaExhausted();
+    sendOpsAlert(
+      'Gmail quota exhausted -- ' + jobName + ' stopped',
+      jobName + ' hit the Gmail daily quota. Every Gmail-touching trigger in this project checks isGmailQuotaExhausted() and will now skip itself for the rest of today (Pacific time). This should resolve automatically tomorrow. Raw error: ' + e
+    );
+    return;
+  }
+  Logger.log(jobName + ' failed with a non-quota error -- this needs a real look: ' + e);
+  sendOpsAlert(
+    jobName + ' failed (not quota)',
+    jobName + ' threw an error that is NOT the Gmail quota message, so the usual "wait for tomorrow" fix does not apply here. Raw error: ' + e
+  );
 }
 
 function todayPacificDateString() {

@@ -932,7 +932,13 @@ function runReplyDrafter() {
   try {
     runReplyDrafterInner();
   } catch (e) {
-    if (isQuotaExceededError(e)) {
+    // FIX (27 Aug 2026, real risk found in review): isQuotaExceededError
+    // alone matches ANY service's daily-quota error (urlfetch, Drive, ...),
+    // not just Gmail's. isGmailSpecificQuotaError additionally requires the
+    // error text to name Gmail, so a non-Gmail quota error correctly falls
+    // to the "not quota" branch below instead of shutting down every
+    // Gmail-touching trigger for a quota that was never actually hit.
+    if (isGmailSpecificQuotaError(e)) {
       markGmailQuotaExhausted();
       sendOpsAlert(
         'Gmail quota exhausted -- runReplyDrafter stopped',
@@ -997,6 +1003,13 @@ function runReplyDrafterInner() {
   // one scope.
   let processed = 0;
   let draftsCreated = 0;
+  // FIX (27 Aug 2026, real risk found in review): see the catch around
+  // createThreadedDraft_ below -- this counts consecutive draft-creation
+  // failures so a persistent Gmail-side problem (rate limit, quota, a
+  // revoked scope) stops the run instead of burning a full LLM call per
+  // remaining thread only to fail identically each time.
+  let consecutiveDraftFailures = 0;
+  const MAX_CONSECUTIVE_DRAFT_FAILURES = 3;
 
   try {
 
@@ -1440,9 +1453,29 @@ function runReplyDrafterInner() {
         var draftLink = 'https://mail.google.com/mail/u/0/#all/' + thread.getId();
         draftedThisRun.add(leadEmail.toLowerCase());
         draftsCreated++;
+        consecutiveDraftFailures = 0;
         delete skipCache[threadId]; // now permanently excluded via LABEL_AI_DRAFTED below -- any earlier cache entry is moot
       } catch (e) {
+        // FIX (27 Aug 2026, real risk found in review): this catch had no
+        // quota check, no markGmailQuotaExhausted(), and no failure-count
+        // bailout. When Gmail starts returning 429/403, the loop used to
+        // `continue` straight to the next thread -- which pays a FRESH full
+        // classifyAndDraft() call (a written reply body, real LLM cost)
+        // before failing at exactly the same step, up to MAX_THREADS_PER_RUN
+        // times, every 15 minutes, all day. recordGmailQuotaUsage_ was also
+        // only called on the success path above, so these failing calls
+        // were invisible to the self-tracked quota counter too.
         Logger.log('Draft creation failed for ' + subject + ': ' + e);
+        recordGmailQuotaUsage_(5); // it was attempted against Gmail; it cost, success or not
+        if (isGmailSpecificQuotaError(e)) throw e; // let runReplyDrafter's catch trip the real circuit breaker
+        consecutiveDraftFailures++;
+        if (consecutiveDraftFailures >= MAX_CONSECUTIVE_DRAFT_FAILURES) {
+          sendOpsAlert(
+            'runReplyDrafter -- draft creation failing repeatedly',
+            consecutiveDraftFailures + ' consecutive createThreadedDraft_ failures. Stopping this run rather than continuing to pay a full LLM call per remaining thread for the same failure. Last error: ' + e
+          );
+          break pagination;
+        }
         continue;
       }
 
@@ -2266,6 +2299,7 @@ function recipientListIncludes_(rawRecipients, targetEmail) {
 function draftAlreadyExistsFor(leadEmail, precomputedDrafts) {
   const drafts = precomputedDrafts || GmailApp.getDraftMessages();
   const target = leadEmail.toLowerCase().trim();
+  let readFailures = 0;
   for (let i = 0; i < drafts.length; i++) {
     try {
       // FIX (27 Aug 2026, real incident): this was a SUBSTRING test --
@@ -2292,7 +2326,24 @@ function draftAlreadyExistsFor(leadEmail, precomputedDrafts) {
       }
     } catch (e) {
       Logger.log('Skipped a draft while checking for duplicates (likely being edited/deleted concurrently): ' + e);
+      readFailures++;
     }
+  }
+
+  // FIX (27 Aug 2026, real risk found in review): every per-draft failure
+  // above was swallowed, and the loop fell through to `return false` even
+  // when EVERY read failed -- turning a quota/rate-limit error into "no
+  // duplicate exists". The project's own incident record notes the 25 Aug
+  // quota wall was preceded by repeated instances of the log line above;
+  // each one was a false negative, and each one risked a real duplicate
+  // draft to a lead who already had one (or, at the reconcile.gs/
+  // lead_followup_sequences.gs call sites, a live draft's label being
+  // stripped as a false "phantom"). A single concurrently-edited draft
+  // (the case this catch names) is still fine to skip quietly -- it's a
+  // majority of reads failing that means the data can't be trusted.
+  if (drafts.length > 0 && readFailures >= Math.ceil(drafts.length / 2)) {
+    throw new Error('draftAlreadyExistsFor: ' + readFailures + '/' + drafts.length +
+      ' draft reads failed -- refusing to report "no duplicate exists" on unreliable data.');
   }
   return false;
 }

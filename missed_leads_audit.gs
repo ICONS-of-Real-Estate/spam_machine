@@ -102,6 +102,7 @@ function runMissedLeadsAudit(daysBack) {
     return;
   }
 
+  try {
   if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') {
     Logger.log('CONFIG.SPREADSHEET_ID not set -- skipping missed leads audit.');
     return;
@@ -249,6 +250,11 @@ function runMissedLeadsAudit(daysBack) {
     ', already answered (internal): ' + skippedInternal + ', non-human sender: ' + skippedNonHuman +
     ', opt-out: ' + skippedOptOut + ', auto-reply/bounce: ' + skippedAutoReply +
     ', already logged (dedup): ' + (threads.length - skippedTracked - skippedNoCc - skippedInternal - skippedNonHuman - skippedOptOut - skippedAutoReply - missed.length) + '.');
+  } catch (e) {
+    // FIX (27 Aug 2026, real risk found in review): no path here could ever
+    // trip the Gmail quota circuit breaker -- see handleGmailJobError_.
+    handleGmailJobError_('runMissedLeadsAudit', e);
+  }
 }
 
 function emailMissedLeadsAlert(missed) {

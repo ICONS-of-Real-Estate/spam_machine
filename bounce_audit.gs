@@ -92,6 +92,7 @@ function runBounceAudit() {
     return;
   }
 
+  try {
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   let tab = ss.getSheetByName(BOUNCE_AUDIT_TAB);
   if (!tab) {
@@ -187,6 +188,11 @@ function runBounceAudit() {
     emailMisdirectedBounceAlert_(misdirected);
   } else {
     Logger.log('No misdirected bounces found -- no email sent (deliberately no "all clear" mail).');
+  }
+  } catch (e) {
+    // FIX (27 Aug 2026, real risk found in review): no path here could ever
+    // trip the Gmail quota circuit breaker -- see handleGmailJobError_.
+    handleGmailJobError_('runBounceAudit', e);
   }
 }
 

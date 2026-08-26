@@ -68,6 +68,8 @@ function runStalledBookingsAudit(daysThresholdOverride) {
     return;
   }
 
+  try {
+
   // ADDED (23 Aug 2026, per direct request -- "Needs more logging"):
   // confirmed live that a manual run went completely silent between the
   // opening assertRunningAsJoana() log line and "Execution cancelled" 21
@@ -261,6 +263,11 @@ function runStalledBookingsAudit(daysThresholdOverride) {
   }
 
   Logger.log('Stalled bookings audit complete. Threshold: ' + threshold + ' days. New stalls found: ' + stalled.length);
+  } catch (e) {
+    // FIX (27 Aug 2026, real risk found in review): no path here could ever
+    // trip the Gmail quota circuit breaker -- see handleGmailJobError_.
+    handleGmailJobError_('runStalledBookingsAudit', e);
+  }
 }
 
 // Direct MailApp.sendEmail (not sendOpsAlert) -- same choice

@@ -158,6 +158,10 @@ function reconcileMissingDrafts() {
     alreadyAnswered + ' threads left alone (already genuinely answered, not phantom). ' +
     couldNotParse + ' threads skipped (could not parse lead email, left untouched).'
   );
+  } catch (e) {
+    // FIX (27 Aug 2026, real risk found in review): no path here could ever
+    // trip the Gmail quota circuit breaker -- see handleGmailJobError_.
+    handleGmailJobError_('reconcileMissingDrafts', e);
   } finally {
     lock.releaseLock();
   }
