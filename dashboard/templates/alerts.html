@@ -3,7 +3,8 @@
 {% block content %}
 <h1>Ops Alerts (most recent 200)</h1>
 <p>From the "Ops Alert Log" tab -- quota warnings, exhaustion events, and
-other ops-only alerts sent to Kris.</p>
+other ops-only alerts sent to Kris.
+&nbsp;·&nbsp;<a class="link" href="/alerts.csv">Export CSV</a></p>
 <table>
   <tr><th>Timestamp</th><th>Pacific Date</th><th>Subject</th><th>Body</th></tr>
   {% for a in alerts %}

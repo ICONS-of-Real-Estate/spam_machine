@@ -10,6 +10,7 @@ successful drafts.</p>
     {% if p == period %}<strong>{{ p }}</strong>{% else %}<a class="link" href="/costs?period={{ p }}">{{ p }}</a>{% endif %}
     {% if not loop.last %} · {% endif %}
   {% endfor %}
+  &nbsp;·&nbsp;<a class="link" href="/costs.csv?period={{ period|urlencode }}">Export CSV</a>
 </p>
 <table>
   <tr>

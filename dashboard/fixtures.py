@@ -80,12 +80,24 @@ OPS_ALERT_LOG = [
      "Today's self-tracked Gmail operation count is at ~80% of the estimated daily limit..."],
 ]
 
+MISSED_LEADS_AUDIT = [
+    ["Found At", "Thread ID", "Subject", "Prospect Email", "Last Message Date",
+     "Days Unanswered", "Thread Link"],
+    ["2026-08-26 06:00:00", "t-mock-missed-1", "Re: guest availability?",
+     "leftonread@example.com", "2026-08-20 14:22:00", "6",
+     "https://mail.google.com/mail/u/0/#inbox/mock-missed-1"],
+    ["2026-08-26 06:00:00", "t-mock-missed-2", "Following up on sponsorship",
+     "quiet.lead@example.com", "2026-08-18 09:10:00", "8",
+     "https://mail.google.com/mail/u/0/#inbox/mock-missed-2"],
+]
+
 TAB_FIXTURES = {
     "AI Drafts Log": AI_DRAFTS_LOG,
     "Learning Log": LEARNING_LOG,
     "SOP Suggestions": SOP_SUGGESTIONS,
     "LLM Cost Log": LLM_COST_LOG,
     "Ops Alert Log": OPS_ALERT_LOG,
+    "Missed Leads Audit": MISSED_LEADS_AUDIT,
 }
 
 

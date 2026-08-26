@@ -24,13 +24,16 @@ clicked through today. What's real right now:
   the instant a real `GOOGLE_OAUTH_CLIENT_ID` is configured — see
   checklist step 3 for real login.
 - Sync (`sync.py`) — pulls `AI Drafts Log`, `Learning Log`,
-  `SOP Suggestions`, `LLM Cost Log`, and `Ops Alert Log`, either from
-  spam_machine's real Sheet (`DASHBOARD_SYNC_MODE=live`) or from
-  realistic fixture data (`fixtures.py`, the default) into a local
-  SQLite mirror.
+  `SOP Suggestions`, `LLM Cost Log`, `Ops Alert Log`, and
+  `Missed Leads Audit`, either from spam_machine's real Sheet
+  (`DASHBOARD_SYNC_MODE=live`) or from realistic fixture data
+  (`fixtures.py`, the default) into a local SQLite mirror.
 - Reads (`app.py` + `templates/`) — drafts list (with a per-thread detail
-  page), SOP suggestions list, cost table (daily/weekly/monthly, toggle
-  in the UI), ops alerts list, all served from the mirror.
+  page, filterable by category/provider/search), SOP suggestions list,
+  cost table (daily/weekly/monthly, toggle in the UI), a Learning Log
+  effectiveness view (edited-% and avg-similarity, overall/by-category/
+  by-provider), missed leads audit, ops alerts list, all served from the
+  mirror. Every list page has a CSV export link.
 - SOP suggestion writes (`sheets_write.py`) — approve/reject/comment
   writes straight to the live Sheet, then triggers an immediate re-sync
   of that one tab. Needs `DASHBOARD_SYNC_MODE=live` and a real write

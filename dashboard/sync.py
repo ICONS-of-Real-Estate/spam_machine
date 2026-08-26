@@ -100,6 +100,15 @@ TABS = {
         ("Subject", "subject"),
         ("Body", "body"),
     ]),
+    "Missed Leads Audit": ("missed_leads_audit", [
+        ("Found At", "found_at"),
+        ("Thread ID", "thread_id"),
+        ("Subject", "subject"),
+        ("Prospect Email", "prospect_email"),
+        ("Last Message Date", "last_message_date"),
+        ("Days Unanswered", "days_unanswered"),
+        ("Thread Link", "thread_link"),
+    ]),
 }
 
 

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Missed Leads — spam_machine dashboard{% endblock %}
+{% block content %}
+<h1>Missed Leads Audit</h1>
+<p>From the "Missed Leads Audit" tab -- threads that came in but never
+got answered, sorted by longest-waiting first. Produced by
+<code>missed_leads_audit.gs</code>'s weekly run.
+&nbsp;·&nbsp;<a class="link" href="/missed-leads.csv">Export CSV</a></p>
+<table>
+  <tr><th>Found At</th><th>Subject</th><th>Prospect Email</th><th>Last Message</th><th>Days Unanswered</th><th></th></tr>
+  {% for l in leads %}
+  <tr>
+    <td>{{ l.found_at }}</td>
+    <td>{{ l.subject }}</td>
+    <td>{{ l.prospect_email }}</td>
+    <td>{{ l.last_message_date }}</td>
+    <td>{% if l.days_unanswered|int >= 7 %}<span class="badge rejected">{{ l.days_unanswered }}</span>{% else %}<span class="badge pending">{{ l.days_unanswered }}</span>{% endif %}</td>
+    <td>{% if l.thread_link %}<a class="link" href="{{ l.thread_link }}" target="_blank">Open</a>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

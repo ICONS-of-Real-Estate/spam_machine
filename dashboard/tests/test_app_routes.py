@@ -97,6 +97,55 @@ def test_draft_edit_and_approve_round_trip_in_mock_mode():
     assert resp.history and resp.history[0].status_code == 303
 
 
+def test_missed_leads_page_renders_and_sorts_by_days_unanswered():
+    resp = client.get("/missed-leads")
+    assert resp.status_code == 200
+    assert "quiet.lead@example.com" in resp.text
+    # 8 days (quiet.lead) should render before 6 days (leftonread) -- sorted desc
+    assert resp.text.index("quiet.lead") < resp.text.index("leftonread")
+
+
+def test_drafts_csv_export_has_header_and_rows():
+    resp = client.get("/drafts.csv")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/csv")
+    assert "attachment" in resp.headers["content-disposition"]
+    lines = resp.text.strip().splitlines()
+    assert lines[0].startswith("Timestamp,")
+    assert len(lines) == 1 + 3  # header + 3 fixture drafts
+
+
+def test_drafts_csv_export_respects_filters():
+    resp = client.get("/drafts.csv?category=no_decline")
+    lines = resp.text.strip().splitlines()
+    assert len(lines) == 1 + 1  # header + only the 1 no_decline draft
+    assert "priya@example.com" in resp.text
+
+
+def test_costs_csv_export():
+    resp = client.get("/costs.csv?period=month")
+    assert resp.status_code == 200
+    assert resp.text.strip().splitlines()[0].startswith("Month,")
+
+
+def test_learning_csv_export():
+    resp = client.get("/learning.csv")
+    assert resp.status_code == 200
+    assert "Compared At" in resp.text
+
+
+def test_missed_leads_csv_export():
+    resp = client.get("/missed-leads.csv")
+    assert resp.status_code == 200
+    assert "quiet.lead@example.com" in resp.text
+
+
+def test_alerts_csv_export():
+    resp = client.get("/alerts.csv")
+    assert resp.status_code == 200
+    assert "Gmail quota at 100%" in resp.text
+
+
 def test_learning_page_renders_stats_and_rows():
     resp = client.get("/learning")
     assert resp.status_code == 200

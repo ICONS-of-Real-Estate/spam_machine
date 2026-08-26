@@ -7,13 +7,14 @@ import os
 import sqlite3
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 import auth
 import cost_stats
+import csv_export
 import draft_filters
 import freshness
 import gmail_write
@@ -101,6 +102,14 @@ def base_context(request: Request):
     }
 
 
+def _csv_response(csv_text, filename):
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
@@ -167,6 +176,30 @@ async def drafts(
             "search": search,
         },
     )
+
+
+DRAFTS_CSV_COLUMNS = [
+    ("Timestamp", "timestamp"), ("Thread ID", "thread_id"), ("Subject", "subject"),
+    ("Prospect Email", "prospect_email"), ("Category", "category"),
+    ("Needs Teammate Routing", "needs_teammate_routing"), ("SOP Mode", "sop_mode"),
+    ("LLM Provider", "llm_provider"), ("Estimated Cost USD", "estimated_cost_usd"),
+    ("Draft Link", "draft_link"),
+]
+
+
+@app.get("/drafts.csv")
+async def drafts_csv(
+    category: str = draft_filters.ALL,
+    provider: str = draft_filters.ALL,
+    search: str = "",
+):
+    conn = db()
+    try:
+        sql, params = draft_filters.build_drafts_query(category, provider, search)
+        rows = conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+    return _csv_response(csv_export.rows_to_csv(rows, DRAFTS_CSV_COLUMNS), "drafts.csv")
 
 
 @app.get("/drafts/{thread_id}")
@@ -245,6 +278,25 @@ async def review_sop_suggestion(
     return RedirectResponse(url="/sop-suggestions", status_code=303)
 
 
+LEARNING_CSV_COLUMNS = [
+    ("Compared At", "compared_at"), ("Subject", "subject"), ("Category", "category"),
+    ("LLM Provider", "llm_provider"), ("Was Edited", "was_edited"),
+    ("Draft Similarity %", "draft_similarity_pct"),
+]
+
+
+@app.get("/learning.csv")
+async def learning_csv():
+    conn = db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM learning_log ORDER BY compared_at DESC LIMIT 200"
+        ).fetchall()
+    finally:
+        conn.close()
+    return _csv_response(csv_export.rows_to_csv(rows, LEARNING_CSV_COLUMNS), "learning-log.csv")
+
+
 @app.get("/learning")
 async def learning(request: Request):
     conn = db()
@@ -262,6 +314,26 @@ async def learning(request: Request):
         "learning.html",
         {**base_context(request), "rows": rows, "stats": stats},
     )
+
+
+@app.get("/costs.csv")
+async def costs_csv(period: str = "day"):
+    if period not in cost_stats.PERIODS:
+        period = "day"
+    conn = db()
+    try:
+        rows = conn.execute(
+            "SELECT timestamp, provider, estimated_cost_usd, outcome FROM llm_cost_log"
+        ).fetchall()
+    finally:
+        conn.close()
+    table, providers = cost_stats.aggregate_costs_by_period(rows, period)
+    columns = [(period.capitalize(), "bucket")] + [(p, p) for p in providers] + [("Total", "total")]
+    csv_rows = [
+        {"bucket": r["bucket"], "total": r["total"], **r["by_provider"]}
+        for r in table
+    ]
+    return _csv_response(csv_export.rows_to_csv(csv_rows, columns), f"costs-by-{period}.csv")
 
 
 @app.get("/costs")
@@ -290,6 +362,57 @@ async def costs(request: Request, period: str = "day"):
             "periods": cost_stats.PERIODS,
         },
     )
+
+
+MISSED_LEADS_CSV_COLUMNS = [
+    ("Found At", "found_at"), ("Subject", "subject"), ("Prospect Email", "prospect_email"),
+    ("Last Message Date", "last_message_date"), ("Days Unanswered", "days_unanswered"),
+    ("Thread Link", "thread_link"),
+]
+
+
+@app.get("/missed-leads.csv")
+async def missed_leads_csv():
+    conn = db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM missed_leads_audit ORDER BY CAST(days_unanswered AS INTEGER) DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    return _csv_response(csv_export.rows_to_csv(rows, MISSED_LEADS_CSV_COLUMNS), "missed-leads.csv")
+
+
+@app.get("/missed-leads")
+async def missed_leads(request: Request):
+    conn = db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM missed_leads_audit ORDER BY CAST(days_unanswered AS INTEGER) DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    return templates.TemplateResponse(
+        request, "missed_leads.html", {**base_context(request), "leads": rows}
+    )
+
+
+ALERTS_CSV_COLUMNS = [
+    ("Timestamp", "timestamp"), ("Pacific Date", "pacific_date"),
+    ("Subject", "subject"), ("Body", "body"),
+]
+
+
+@app.get("/alerts.csv")
+async def alerts_csv():
+    conn = db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM ops_alert_log ORDER BY _row_num DESC LIMIT 200"
+        ).fetchall()
+    finally:
+        conn.close()
+    return _csv_response(csv_export.rows_to_csv(rows, ALERTS_CSV_COLUMNS), "ops-alerts.csv")
 
 
 @app.get("/alerts")

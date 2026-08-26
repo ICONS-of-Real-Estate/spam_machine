@@ -20,6 +20,7 @@ credential exists), or use the "Gmail" link to open the real draft.</p>
   {% if selected_category != 'all' or selected_provider != 'all' or search %}
   <a class="link" href="/drafts">Clear</a>
   {% endif %}
+  <a class="link" href="/drafts.csv?category={{ selected_category|urlencode }}&provider={{ selected_provider|urlencode }}&search={{ search|urlencode }}">Export CSV</a>
 </form>
 
 <table>
