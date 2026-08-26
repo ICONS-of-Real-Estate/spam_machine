@@ -61,6 +61,20 @@ def test_drafts_list_renders_fixture_rows():
     assert "/drafts/t-mock-1" in resp.text
 
 
+def test_drafts_filter_by_category_narrows_results():
+    resp = client.get("/drafts?category=no_decline")
+    assert resp.status_code == 200
+    assert "priya@example.com" in resp.text
+    assert "dueñas@example.com" not in resp.text  # yes_general, filtered out
+
+
+def test_drafts_search_matches_prospect_email():
+    resp = client.get("/drafts?search=priya")
+    assert resp.status_code == 200
+    assert "priya@example.com" in resp.text
+    assert "dueñas@example.com" not in resp.text
+
+
 def test_draft_detail_page_shows_mock_banner_and_body():
     resp = client.get("/drafts/t-mock-1")
     assert resp.status_code == 200
@@ -81,6 +95,14 @@ def test_draft_edit_and_approve_round_trip_in_mock_mode():
     resp = client.post("/drafts/t-mock-1/approve")
     assert resp.status_code == 200
     assert resp.history and resp.history[0].status_code == 303
+
+
+def test_learning_page_renders_stats_and_rows():
+    resp = client.get("/learning")
+    assert resp.status_code == 200
+    assert "Compared" in resp.text
+    assert "yes_general" in resp.text
+    assert "no_decline" in resp.text
 
 
 def test_sop_suggestions_list_renders():

@@ -1,10 +1,27 @@
 {% extends "base.html" %}
 {% block title %}Drafts — spam_machine dashboard{% endblock %}
 {% block content %}
-<h1>Drafts (most recent 200)</h1>
-<p>Read-only view of the "AI Drafts Log" tab. Opening a draft goes to
-Gmail directly for now -- in-dashboard edit/approve needs the Gmail-write
-credential described in <code>gmail_write.py</code>.</p>
+<h1>Drafts (most recent 200 matching)</h1>
+<p>Read-only view of the "AI Drafts Log" tab. Click a subject to open the
+in-dashboard detail/edit/approve page (fixture text until the Gmail-write
+credential exists), or use the "Gmail" link to open the real draft.</p>
+
+<form method="get" action="/drafts" style="margin-bottom:1rem;">
+  <select name="category">
+    <option value="all" {% if selected_category == 'all' %}selected{% endif %}>All categories</option>
+    {% for c in categories %}<option value="{{ c }}" {% if c == selected_category %}selected{% endif %}>{{ c }}</option>{% endfor %}
+  </select>
+  <select name="provider">
+    <option value="all" {% if selected_provider == 'all' %}selected{% endif %}>All providers</option>
+    {% for p in providers %}<option value="{{ p }}" {% if p == selected_provider %}selected{% endif %}>{{ p }}</option>{% endfor %}
+  </select>
+  <input type="text" name="search" value="{{ search }}" placeholder="search subject or email">
+  <button type="submit">Filter</button>
+  {% if selected_category != 'all' or selected_provider != 'all' or search %}
+  <a class="link" href="/drafts">Clear</a>
+  {% endif %}
+</form>
+
 <table>
   <tr>
     <th>Timestamp</th><th>Subject</th><th>Prospect Email</th><th>Category</th>

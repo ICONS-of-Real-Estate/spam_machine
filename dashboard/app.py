@@ -14,8 +14,10 @@ from starlette.middleware.sessions import SessionMiddleware
 
 import auth
 import cost_stats
+import draft_filters
 import freshness
 import gmail_write
+import learning_stats
 import sheets_write
 import sync
 
@@ -134,16 +136,36 @@ async def home(request: Request):
 
 
 @app.get("/drafts")
-async def drafts(request: Request):
+async def drafts(
+    request: Request,
+    category: str = draft_filters.ALL,
+    provider: str = draft_filters.ALL,
+    search: str = "",
+):
     conn = db()
     try:
-        rows = conn.execute(
-            "SELECT * FROM drafts ORDER BY timestamp DESC LIMIT 200"
-        ).fetchall()
+        sql, params = draft_filters.build_drafts_query(category, provider, search)
+        rows = conn.execute(sql, params).fetchall()
+        categories = [r["category"] for r in conn.execute(
+            "SELECT DISTINCT category FROM drafts WHERE category IS NOT NULL ORDER BY category"
+        ).fetchall()]
+        providers = [r["llm_provider"] for r in conn.execute(
+            "SELECT DISTINCT llm_provider FROM drafts WHERE llm_provider IS NOT NULL ORDER BY llm_provider"
+        ).fetchall()]
     finally:
         conn.close()
     return templates.TemplateResponse(
-        request, "drafts.html", {**base_context(request), "drafts": rows}
+        request,
+        "drafts.html",
+        {
+            **base_context(request),
+            "drafts": rows,
+            "categories": categories,
+            "providers": providers,
+            "selected_category": category,
+            "selected_provider": provider,
+            "search": search,
+        },
     )
 
 
@@ -221,6 +243,25 @@ async def review_sop_suggestion(
     finally:
         conn.close()
     return RedirectResponse(url="/sop-suggestions", status_code=303)
+
+
+@app.get("/learning")
+async def learning(request: Request):
+    conn = db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM learning_log ORDER BY compared_at DESC LIMIT 200"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    stats = learning_stats.summarize_learning_log(rows)
+
+    return templates.TemplateResponse(
+        request,
+        "learning.html",
+        {**base_context(request), "rows": rows, "stats": stats},
+    )
 
 
 @app.get("/costs")

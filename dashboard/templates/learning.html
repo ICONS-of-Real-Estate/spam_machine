@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Learning — spam_machine dashboard{% endblock %}
+{% block content %}
+<h1>Original AI draft vs. what was actually sent</h1>
+<p>From the "Learning Log" tab -- this is the real signal behind SOP
+Suggestions. A category or provider with a high edited % or low average
+similarity is exactly what should drive the next suggested SOP change,
+not the other way around.</p>
+
+<h2>Overall</h2>
+<div class="stat-row">
+  <div class="stat-tile">
+    <div class="n">{{ stats.overall.n }}</div>
+    <div class="label">Compared</div>
+  </div>
+  <div class="stat-tile">
+    <div class="n">{{ stats.overall.edited_pct|round|int }}%</div>
+    <div class="label">Edited before sending ({{ stats.overall.edited_count }}/{{ stats.overall.n }})</div>
+  </div>
+  <div class="stat-tile">
+    <div class="n">{% if stats.overall.avg_similarity_pct is not none %}{{ stats.overall.avg_similarity_pct|round|int }}%{% else %}—{% endif %}</div>
+    <div class="label">Avg draft similarity</div>
+  </div>
+</div>
+
+<h2>By category</h2>
+<table>
+  <tr><th>Category</th><th>N</th><th>Edited</th><th>Avg Similarity</th></tr>
+  {% for cat, s in stats.by_category.items() %}
+  <tr>
+    <td>{{ cat }}</td>
+    <td>{{ s.n }}</td>
+    <td>{{ s.edited_pct|round|int }}% ({{ s.edited_count }}/{{ s.n }})</td>
+    <td>{% if s.avg_similarity_pct is not none %}{{ s.avg_similarity_pct|round|int }}%{% else %}—{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h2>By LLM provider</h2>
+<table>
+  <tr><th>Provider</th><th>N</th><th>Edited</th><th>Avg Similarity</th></tr>
+  {% for prov, s in stats.by_provider.items() %}
+  <tr>
+    <td>{{ prov }}</td>
+    <td>{{ s.n }}</td>
+    <td>{{ s.edited_pct|round|int }}% ({{ s.edited_count }}/{{ s.n }})</td>
+    <td>{% if s.avg_similarity_pct is not none %}{{ s.avg_similarity_pct|round|int }}%{% else %}—{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h2>Individual comparisons (most recent 200)</h2>
+<table>
+  <tr><th>Compared At</th><th>Subject</th><th>Category</th><th>Provider</th><th>Similarity</th><th>Edited</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td>{{ r.compared_at }}</td>
+    <td>{{ r.subject }}</td>
+    <td>{{ r.category }}</td>
+    <td>{{ r.llm_provider }}</td>
+    <td>{{ r.draft_similarity_pct }}%</td>
+    <td>{% if r.was_edited == 'true' or r.was_edited == 'TRUE' %}<span class="badge pending">edited</span>{% else %}<span class="badge approved">as-is</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}
