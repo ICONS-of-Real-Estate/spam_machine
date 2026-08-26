@@ -69,6 +69,23 @@ function todayPacificDateString() {
   return Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd');
 }
 
+// Human-readable "time left until our own exhausted-flag ages out" -- the
+// flag is keyed to todayPacificDateString(), so it clears the moment that
+// rolls over, i.e. at midnight Pacific. Used only for logging/alert text;
+// NOT a claim about when Google's real quota recovers (that's a rolling
+// 24h window from first use, a different mechanism -- see the comments
+// above isGmailQuotaExhausted()).
+function timeUntilQuotaResetDescription_() {
+  const nowPacificStr = Utilities.formatDate(new Date(), 'America/Los_Angeles', "yyyy-MM-dd'T'HH:mm:ss");
+  const nowPacific = new Date(nowPacificStr);
+  const midnight = new Date(nowPacific.getFullYear(), nowPacific.getMonth(), nowPacific.getDate() + 1, 0, 0, 0);
+  const msLeft = midnight - nowPacific;
+  const totalMinutes = Math.max(0, Math.round(msLeft / 60000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return 'resets at midnight Pacific (~' + hours + 'h ' + minutes + 'm from now)';
+}
+
 // ---------- SELF-TRACKED CALL COUNTER (22 Aug 2026, per direct request) ----------
 //
 // PROBLEM THIS ADDS TO THE ABOVE: until now, the circuit breaker only ever

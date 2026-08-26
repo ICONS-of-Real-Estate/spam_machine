@@ -652,7 +652,7 @@ function runLeadFollowUpCycle() {
   // the quota circuit breaker -- only runReplyDrafter did. Same gap as
   // runLearningLoop; see that fix for the full incident.
   if (isGmailQuotaExhausted()) {
-    Logger.log('Skipping runLeadFollowUpCycle -- Gmail quota already known exhausted today.');
+    Logger.log('Skipping runLeadFollowUpCycle -- Gmail quota already known exhausted today, ' + timeUntilQuotaResetDescription_() + '.');
     return;
   }
 

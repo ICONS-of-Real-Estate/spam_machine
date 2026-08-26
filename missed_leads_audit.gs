@@ -83,7 +83,7 @@ function runMissedLeadsAudit(daysBack) {
   // never checked the quota circuit breaker -- only runReplyDrafter did.
   // Same gap as runLearningLoop; see that fix for the full incident.
   if (isGmailQuotaExhausted()) {
-    Logger.log('Skipping runMissedLeadsAudit -- Gmail quota already known exhausted today.');
+    Logger.log('Skipping runMissedLeadsAudit -- Gmail quota already known exhausted today, ' + timeUntilQuotaResetDescription_() + '.');
     return;
   }
 

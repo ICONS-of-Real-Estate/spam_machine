@@ -46,7 +46,7 @@ function reconcileMissingDrafts() {
   // idiom every other call site uses.
   if (!assertRunningAsJoana('reconcileMissingDrafts')) return;
   if (isGmailQuotaExhausted()) {
-    Logger.log('Skipping reconcileMissingDrafts -- Gmail quota already known exhausted today.');
+    Logger.log('Skipping reconcileMissingDrafts -- Gmail quota already known exhausted today, ' + timeUntilQuotaResetDescription_() + '.');
     return;
   }
 

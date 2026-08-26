@@ -115,7 +115,7 @@ function isCurrentlyBusinessHoursEastern() {
 
 function runHeartbeatCheck() {
   if (isGmailQuotaExhausted()) {
-    Logger.log('Heartbeat check skipped -- Gmail quota already known exhausted today, that alert already fired.');
+    Logger.log('Heartbeat check skipped -- Gmail quota already known exhausted today, that alert already fired, ' + timeUntilQuotaResetDescription_() + '.');
     return;
   }
 

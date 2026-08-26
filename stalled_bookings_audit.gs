@@ -57,7 +57,7 @@ function runStalledBookingsAudit(daysThresholdOverride) {
   // this it would grind through the whole list burning quota that
   // runReplyDrafter needs, on a morning when the breaker is already tripped.
   if (isGmailQuotaExhausted()) {
-    Logger.log('Skipping runStalledBookingsAudit -- Gmail quota already known exhausted today. Will run again on next week\'s trigger, or run it manually once the quota resets.');
+    Logger.log('Skipping runStalledBookingsAudit -- Gmail quota already known exhausted today, ' + timeUntilQuotaResetDescription_() + '. Will run again on next week\'s trigger, or run it manually once the quota resets.');
     return;
   }
 

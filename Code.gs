@@ -654,7 +654,7 @@ function runReplyDrafter() {
   if (!assertGmailAdvancedServiceEnabled('runReplyDrafter')) return;
 
   if (isGmailQuotaExhausted()) {
-    Logger.log('Skipping runReplyDrafter -- Gmail quota already known exhausted today.');
+    Logger.log('Skipping runReplyDrafter -- Gmail quota already known exhausted today, ' + timeUntilQuotaResetDescription_() + '.');
     return;
   }
 

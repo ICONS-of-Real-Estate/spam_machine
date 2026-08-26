@@ -62,7 +62,7 @@ function runLearningLoop() {
   // kept trying and failing instead of skipping cleanly like runReplyDrafter
   // already does.
   if (isGmailQuotaExhausted()) {
-    Logger.log('Skipping runLearningLoop -- Gmail quota already known exhausted today.');
+    Logger.log('Skipping runLearningLoop -- Gmail quota already known exhausted today, ' + timeUntilQuotaResetDescription_() + '.');
     return;
   }
 
