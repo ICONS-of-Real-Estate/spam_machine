@@ -642,6 +642,45 @@ function saveSkipCache(ss, cacheMap) {
   if (rows.length > 0) tab.getRange(2, 1, rows.length, 4).setValues(rows);
 }
 
+// FIX (27 Aug 2026, real incident): the "permanent skip" paths in
+// runReplyDrafterInner all looked like this:
+//
+//     if (someLabel) thread.addLabel(someLabel);
+//     delete skipCache[threadId];   // permanently excluded via label now
+//
+// The label was applied CONDITIONALLY but the cache entry was dropped
+// UNCONDITIONALLY, on the assumption the label had taken over the job of
+// excluding this thread. When the label doesn't exist that assumption is
+// false in the worst possible way: the thread ends up with NO suppression
+// at all -- not labeled (so the search query's -label: clause can't drop
+// it) and not cached (so the skip cache can't either) -- and gets fully
+// re-fetched and re-searched on every single run, forever.
+//
+// That is exactly what happened to AI-Skipped-AlreadyRepliedOnce, which
+// CONFIG has named since 24 Aug 2026 but which was never created in Gmail.
+// Two consecutive live runs 15 minutes apart re-processed the same ~85
+// threads in full, each logging "labeled so it stops reappearing" while
+// nothing was being labeled. The same runs prove the intended behaviour
+// works when the label DOES exist: two threads hit the
+// AI-Skipped-AlreadyAnsweredByTeam path in the first run and were simply
+// absent from the second (113 candidate threads down to 111).
+//
+// getOrCreateTrackingLabel_() now makes the missing-label case very
+// unlikely, but "unlikely" is what the old code already assumed. Degrade
+// to the skip cache instead: suppressed for SKIP_CACHE_TTL_HOURS rather
+// than not at all, and loudly logged so the cause is obvious next time.
+function recordPermanentSkip_(thread, label, labelName, skipCache, threadId, messageCount, cacheReason, logReason, subject) {
+  if (label) {
+    thread.addLabel(label);
+    delete skipCache[threadId]; // genuinely excluded via label now -- any earlier cache entry is moot
+    Logger.log('DIAGNOSTIC -- skipped (' + logReason + '), labeled so it stops reappearing: ' + subject);
+    return;
+  }
+
+  skipCache[threadId] = { reason: cacheReason, lastCheckedAt: new Date(), messageCount: messageCount };
+  Logger.log('DIAGNOSTIC -- skipped (' + logReason + '). NOTE: label "' + labelName + '" does not exist in Gmail and could not be created, so this thread could NOT be permanently excluded -- cached for ' + SKIP_CACHE_TTL_HOURS + 'h instead. Run setup() in Code.gs to create the missing tracking labels: ' + subject);
+}
+
 /**
  * ONE-OFF (26 Aug 2026, real incident) -- run this manually once, right
  * after deploying the isSkipCacheFresh_ fix above, to force every
@@ -748,11 +787,15 @@ function runReplyDrafterInner() {
   const labelYesPenciled = getOrWarnLabel(CONFIG.LABEL_YES_PENCILED);
   const labelNo = getOrWarnLabel(CONFIG.LABEL_NO);
   const labelStop = getOrWarnLabel(CONFIG.LABEL_STOP);
-  const labelDrafted = GmailApp.getUserLabelByName(CONFIG.LABEL_AI_DRAFTED);
-  const labelNeedsRouting = GmailApp.getUserLabelByName(CONFIG.LABEL_NEEDS_ROUTING);
-  const labelAlreadyAnsweredByTeam = getOrWarnLabel(CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM);
-  const labelSubjectMismatch = getOrWarnLabel(CONFIG.LABEL_SUBJECT_MISMATCH);
-  const labelAlreadyRepliedOnce = getOrWarnLabel(CONFIG.LABEL_ALREADY_REPLIED_ONCE);
+  // CHANGED (27 Aug 2026, real incident -- see getOrCreateTrackingLabel_):
+  // these five are the script's own AI-* bookkeeping labels, and every
+  // "permanent skip" path below is load-bearing on them actually existing.
+  // Create them on demand instead of silently running without them.
+  const labelDrafted = getOrCreateTrackingLabel_(CONFIG.LABEL_AI_DRAFTED);
+  const labelNeedsRouting = getOrCreateTrackingLabel_(CONFIG.LABEL_NEEDS_ROUTING);
+  const labelAlreadyAnsweredByTeam = getOrCreateTrackingLabel_(CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM);
+  const labelSubjectMismatch = getOrCreateTrackingLabel_(CONFIG.LABEL_SUBJECT_MISMATCH);
+  const labelAlreadyRepliedOnce = getOrCreateTrackingLabel_(CONFIG.LABEL_ALREADY_REPLIED_ONCE);
 
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const skipCache = loadSkipCache(ss);
@@ -954,9 +997,10 @@ function runReplyDrafterInner() {
 
     const lastSenderEmail = extractEmail(lastMsg.getFrom());
     if (isRealTeamReply(lastSenderEmail)) {
-      if (labelAlreadyAnsweredByTeam) thread.addLabel(labelAlreadyAnsweredByTeam);
-      delete skipCache[threadId]; // now permanently excluded via label -- any earlier cache entry is moot
-      Logger.log('DIAGNOSTIC -- skipped (already answered by ' + lastSenderEmail + '), labeled so it stops reappearing: ' + subject);
+      recordPermanentSkip_(thread, labelAlreadyAnsweredByTeam, CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM, skipCache, threadId, messages.length,
+        'already answered by ' + lastSenderEmail,
+        'already answered by ' + lastSenderEmail,
+        subject);
       continue;
     }
 
@@ -1015,9 +1059,10 @@ function runReplyDrafterInner() {
     // reply doesn't reliably land back in the same Gmail thread that carries
     // LABEL_AI_DRAFTED -- see CONFIG.LABEL_ALREADY_REPLIED_ONCE's comment.
     if (hasAlreadySentReplyTo_(leadEmail)) {
-      if (labelAlreadyRepliedOnce) thread.addLabel(labelAlreadyRepliedOnce);
-      delete skipCache[threadId]; // now permanently excluded via label -- any earlier cache entry is moot
-      Logger.log('DIAGNOSTIC -- skipped (already sent a reply to ' + leadEmail + ' before -- this is a follow-up reply, per policy leaving it for the team), labeled so it stops reappearing: ' + subject);
+      recordPermanentSkip_(thread, labelAlreadyRepliedOnce, CONFIG.LABEL_ALREADY_REPLIED_ONCE, skipCache, threadId, messages.length,
+        'already sent a reply to ' + leadEmail + ' before -- follow-up reply, left for the team',
+        'already sent a reply to ' + leadEmail + ' before -- this is a follow-up reply, per policy leaving it for the team',
+        subject);
       continue;
     }
 
@@ -1407,6 +1452,55 @@ function getOrWarnLabel(name) {
   const label = GmailApp.getUserLabelByName(name);
   if (!label) Logger.log('Label not found, skipping auto-apply for: ' + name);
   return label;
+}
+
+// The five AI-* labels this script owns outright -- kept in sync with the
+// list setup() creates. NOT the business labels (1./2./3. Spam YES/NO/STOP,
+// 0. PRIORITY): those are Joana's, already exist in Gmail, and are
+// deliberately only warned about (never auto-created) so a typo in CONFIG
+// surfaces as a warning instead of silently creating a near-duplicate label
+// beside the real one.
+const SELF_OWNED_TRACKING_LABELS = [
+  'AI-Drafted-PendingReview',
+  'AI-NeedsTeammateRouting',
+  'AI-Skipped-AlreadyAnsweredByTeam',
+  'AI-Skipped-NotPodcastOutreach',
+  'AI-Skipped-AlreadyRepliedOnce'
+];
+
+// FIX (27 Aug 2026, real incident): CONFIG.LABEL_ALREADY_REPLIED_ONCE was
+// added 24 Aug 2026, but the label itself only ever got created by setup(),
+// which nobody re-ran afterwards -- so it never existed in Gmail. Every run
+// since has logged "Label not found, skipping auto-apply for:
+// AI-Skipped-AlreadyRepliedOnce" at startup and then failed to exclude a
+// single one of the ~85 threads that hit that path, because both of its
+// suppression mechanisms depend on the label (see the call site). Confirmed
+// live across two runs 15 minutes apart: identical ~85 threads re-fetched
+// and re-searched in full both times.
+//
+// Auto-create rather than just warn: these labels are this script's own
+// bookkeeping, setup() creates them unconditionally anyway, and "someone
+// adds a label to CONFIG and forgets to re-run setup()" is precisely the
+// failure that just cost a week of runs. Creating it here makes the drafter
+// self-healing on the next firing instead of needing a manual step nobody
+// knows to take.
+function getOrCreateTrackingLabel_(name) {
+  const existing = GmailApp.getUserLabelByName(name);
+  if (existing) return existing;
+
+  if (SELF_OWNED_TRACKING_LABELS.indexOf(name) === -1) {
+    Logger.log('Label not found and NOT auto-created (not a self-owned AI-* tracking label): ' + name);
+    return null;
+  }
+
+  try {
+    const created = GmailApp.createLabel(name);
+    Logger.log('Tracking label "' + name + '" did not exist in Gmail -- created it. (setup() in Code.gs creates these too; this run self-healed instead of waiting for someone to re-run it.)');
+    return created;
+  } catch (e) {
+    Logger.log('WARNING: tracking label "' + name + '" does not exist and could not be created: ' + e + '. Threads that would carry it fall back to the skip cache this run, so they are suppressed for ' + SKIP_CACHE_TTL_HOURS + 'h rather than not at all.');
+    return null;
+  }
 }
 
 function extractEmail(fromHeader) {
