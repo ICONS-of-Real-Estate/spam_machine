@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Costs — spam_machine dashboard{% endblock %}
+{% block content %}
+<h1>LLM cost by day</h1>
+<p>From the "LLM Cost Log" tab, including billed-but-unusable calls
+(Outcome/Error columns) -- so this reflects real spend, not just
+successful drafts.</p>
+<table>
+  <tr>
+    <th>Day</th>
+    {% for p in providers %}<th>{{ p }}</th>{% endfor %}
+    <th>Total</th>
+  </tr>
+  {% for row in table %}
+  <tr>
+    <td>{{ row.day }}</td>
+    {% for p in providers %}<td>${{ "%.4f"|format(row.by_provider[p]) }}</td>{% endfor %}
+    <td>${{ "%.4f"|format(row.total) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

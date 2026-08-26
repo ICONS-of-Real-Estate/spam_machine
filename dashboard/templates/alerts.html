@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Ops Alerts — spam_machine dashboard{% endblock %}
+{% block content %}
+<h1>Ops Alerts (most recent 200)</h1>
+<p>From the "Ops Alert Log" tab -- quota warnings, exhaustion events, and
+other ops-only alerts sent to Kris.</p>
+<table>
+  <tr><th>Timestamp</th><th>Pacific Date</th><th>Subject</th><th>Body</th></tr>
+  {% for a in alerts %}
+  <tr>
+    <td>{{ a.timestamp }}</td>
+    <td>{{ a.pacific_date }}</td>
+    <td>{{ a.subject }}</td>
+    <td style="max-width:500px; white-space:pre-wrap;">{{ a.body }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

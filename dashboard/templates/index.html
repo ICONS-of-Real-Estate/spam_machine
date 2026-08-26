@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}spam_machine dashboard{% endblock %}
+{% block content %}
+<h1>spam_machine dashboard</h1>
+<p>Read-only mirror of the spam_machine Sheet, refreshed on a timer. SOP
+suggestion decisions write straight back to the live Sheet. Draft
+approve/edit is not live yet -- see <code>gmail_write.py</code>.</p>
+
+<div class="stat-row">
+  <div class="stat-tile">
+    <div class="n">{{ pending_drafts }}</div>
+    <div class="label">Drafts logged</div>
+  </div>
+  <div class="stat-tile">
+    <div class="n">{{ pending_suggestions }}</div>
+    <div class="label">SOP suggestions pending review</div>
+  </div>
+  <div class="stat-tile">
+    <div class="n">{{ recent_alerts }}</div>
+    <div class="label">Ops alerts logged</div>
+  </div>
+</div>
+{% endblock %}

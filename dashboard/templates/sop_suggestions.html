@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}SOP Suggestions — spam_machine dashboard{% endblock %}
+{% block content %}
+<h1>SOP Suggestions</h1>
+<p>Approve/reject writes straight back to the live Sheet's "SOP
+Suggestions" tab (adding Reviewer Comment / Reviewed By / Reviewed At
+columns the first time they're used). This does <strong>not</strong>
+edit the SOP Google Doc itself -- per the project's rule, that still
+needs a human to apply the change via Find &amp; Replace once approved.</p>
+<table>
+  <tr>
+    <th>Generated At</th><th>Based On N Edits</th><th>Suggested Change</th>
+    <th>Status</th><th>Review</th>
+  </tr>
+  {% for s in suggestions %}
+  <tr>
+    <td>{{ s.generated_at }}</td>
+    <td>{{ s.based_on_n_edits }}</td>
+    <td style="max-width:400px; white-space:pre-wrap;">{{ s.suggested_change }}</td>
+    <td>
+      {% if s.status == 'approved' %}<span class="badge approved">approved</span>
+      {% elif s.status == 'rejected' %}<span class="badge rejected">rejected</span>
+      {% else %}<span class="badge pending">pending</span>{% endif %}
+    </td>
+    <td>
+      {% if not s.status or s.status == 'pending' %}
+      <form class="inline" method="post" action="/sop-suggestions/{{ s._row_num }}/review">
+        <input type="hidden" name="decision" value="approved">
+        <input type="text" name="comment" placeholder="optional comment" size="16">
+        <button type="submit">Approve</button>
+      </form>
+      <form class="inline" method="post" action="/sop-suggestions/{{ s._row_num }}/review">
+        <input type="hidden" name="decision" value="rejected">
+        <input type="text" name="comment" placeholder="optional comment" size="16">
+        <button type="submit">Reject</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

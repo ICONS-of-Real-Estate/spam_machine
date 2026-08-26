@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Drafts — spam_machine dashboard{% endblock %}
+{% block content %}
+<h1>Drafts (most recent 200)</h1>
+<p>Read-only view of the "AI Drafts Log" tab. Opening a draft goes to
+Gmail directly for now -- in-dashboard edit/approve needs the Gmail-write
+credential described in <code>gmail_write.py</code>.</p>
+<table>
+  <tr>
+    <th>Timestamp</th><th>Subject</th><th>Prospect Email</th><th>Category</th>
+    <th>SOP Mode</th><th>LLM Provider</th><th>Est. Cost</th><th></th>
+  </tr>
+  {% for d in drafts %}
+  <tr>
+    <td>{{ d.timestamp }}</td>
+    <td>{{ d.subject }}</td>
+    <td>{{ d.prospect_email }}</td>
+    <td>{{ d.category }}{% if d.needs_teammate_routing == 'true' or d.needs_teammate_routing == 'TRUE' %} <span class="badge pending">routing</span>{% endif %}</td>
+    <td>{{ d.sop_mode }}</td>
+    <td>{{ d.llm_provider }}</td>
+    <td>${{ d.estimated_cost_usd }}</td>
+    <td>{% if d.draft_link %}<a class="link" href="{{ d.draft_link }}" target="_blank">Open in Gmail</a>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

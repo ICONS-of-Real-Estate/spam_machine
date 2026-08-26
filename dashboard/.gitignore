@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+dashboard.db
+dashboard.db-journal
+.env
+.env.local
+service_account.json
+service_account_write.json
