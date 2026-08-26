@@ -140,8 +140,22 @@ function runMissedLeadsAudit(daysBack) {
     // anything network@ never touched at all.
     if (!isCcdToNetworkGroupAnywhereInThread(messages)) return;
 
-    const lastSender = extractEmail(last.getFrom());
+    let lastSender = extractEmail(last.getFrom());
     if (isInternal(lastSender)) return;
+
+    // FIX (27 Aug 2026, same incident as Code.gs's FORWARDING_ALIAS_DOMAINS):
+    // on a Maildoso-forwarded thread the last message's From is the sending
+    // alias, not the lead. This audit was reporting the alias as the
+    // "Prospect Email" -- an address nobody can act on, and one that already
+    // caused a real bounce when a teammate replied to it. Resolve the real
+    // lead out of the forwarded body instead. A thread we can't resolve is
+    // still a genuine miss (a lead replied and nobody answered), so it is
+    // reported rather than dropped -- just flagged so the row is actionable.
+    if (isForwardingAlias(lastSender)) {
+      const forwardInfo = extractForwardedLeadInfo(last);
+      lastSender = (forwardInfo && forwardInfo.email) ? forwardInfo.email : lastSender + ' (UNRESOLVED -- forwarding alias, real lead is inside the thread)';
+    }
+
     if (isNonHumanSender(lastSender)) return;
 
     const body = last.getPlainBody();

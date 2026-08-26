@@ -85,6 +85,45 @@ const CONFIG = {
 
   INTERNAL_DOMAINS: ['iconsofrealestate.com', 'ardorseo.com'],
 
+  // ADDED (27 Aug 2026, real incident -- confirmed lead loss, header
+  // screenshots from Kris). The Maildoso cold-outreach sequences send FROM
+  // rotating alias mailboxes on their own throwaway domains, not from
+  // INTERNAL_DOMAINS. A lead replies to whichever alias mailed them, and that
+  // alias then forwards the whole exchange into network@ (Gmail shows it as
+  // "<alias> via ardorseo.com"). So on those threads the last message's From
+  // header is the ALIAS, never the lead.
+  //
+  // That broke the 13 Aug shortcut in runReplyDrafterInner, which reads: if
+  // the last sender is neither internal nor the network address itself, it
+  // must be the lead replying directly -- so take the From header and skip
+  // the forward parser entirely. An alias satisfies "neither", so the alias
+  // itself got used as the lead email.
+  //
+  // Confirmed consequence, not theoretical: a draft on Jennifer's thread was
+  // addressed to a.palmer@topaustinseo.site, a human reviewed and sent it,
+  // and it bounced ("Delivery incomplete ... a.palmer@topaustinseo.site").
+  // The real lead on that thread -- officerjenny77@gmail.com, sitting in the
+  // forwarded To: line -- never received anything.
+  //
+  // These are deliberately NOT added to INTERNAL_DOMAINS: isRealTeamReply()
+  // treats an internal sender as "a human already answered this" and applies
+  // LABEL_ALREADY_ANSWERED_BY_TEAM, which permanently excludes the thread
+  // from the search. That would bury these threads instead of fixing them --
+  // and they contain live, unanswered leads (e.g. katie@beamanrealty.com
+  // asking "I'm actually in Arkansas now. Do you have room for an Arkansas
+  // podcast?"). An alias means "parse the body for the real lead", which is
+  // what REQUIRED_CC_ADDRESSES already means -- hence a separate list.
+  //
+  // Match is by domain, since the local part rotates per sending mailbox.
+  // Add new outreach domains here as Maildoso sending accounts are added.
+  FORWARDING_ALIAS_DOMAINS: [
+    'topaustinseo.site',            // a.palmer@ -- confirmed, caused the bounce above
+    'reachpilotteam.com',           // anna.wilson@
+    'iconsrealestatesteam.site',    // j.peixe@
+    'pixingsproduct.com',           // joanap@ -- seen in a forwarded To: line
+    'theiconsofrealestatepodcast.com' // kris.r@ -- retired (outreach ran under Kris's name before Joana)
+  ],
+
   LABEL_YES: '1. Spam YES',
   LABEL_YES_PENCILED: '1. Spam YES/Penciled',
   LABEL_NO: '2. Spam NO',
@@ -1012,7 +1051,14 @@ function runReplyDrafterInner() {
     // that never match the forward-parser's "On ... wrote:" check, causing
     // a false "could not parse" even though the real email was sitting
     // right there in the From header the whole time.
-    const isAliasItself = CONFIG.REQUIRED_CC_ADDRESSES.some(addr => addr.toLowerCase() === lastSenderEmail.toLowerCase());
+    // FIX (27 Aug 2026, real incident): the 13 Aug shortcut below assumes a
+    // last sender who is neither internal nor the network address must BE the
+    // lead. Maildoso's sending aliases break that assumption -- they are
+    // neither, yet they are us. Treat an alias exactly like the network
+    // address: a signal to parse the forwarded body for the real lead, never
+    // a lead in its own right. See CONFIG.FORWARDING_ALIAS_DOMAINS.
+    const isAliasItself = CONFIG.REQUIRED_CC_ADDRESSES.some(addr => addr.toLowerCase() === lastSenderEmail.toLowerCase())
+      || isForwardingAlias(lastSenderEmail);
     let leadEmail, originalSubjectFromForward;
 
     if (!isAliasItself) {
@@ -1041,6 +1087,20 @@ function runReplyDrafterInner() {
     if (isNonHumanSender(leadEmail)) {
       skipCache[threadId] = { reason: 'lead email looks like a bounce/system address (' + leadEmail + '), not a real lead', lastCheckedAt: new Date(), messageCount: messages.length };
       Logger.log('DIAGNOSTIC -- skipped (lead email looks like a bounce/system address: ' + leadEmail + '), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
+      continue;
+    }
+
+    // BACKSTOP (27 Aug 2026, real incident): whatever path produced leadEmail
+    // above, it must be an outside human before it is used as a draft
+    // recipient. A draft addressed to one of our own addresses is never
+    // useful and, when a reviewer sends it, either bounces (the confirmed
+    // a.palmer@topaustinseo.site case) or mails the team itself. Cheap check,
+    // and it fails safe: a genuine lead can never match one of our own
+    // domains. Cached rather than labeled, since a later message on the same
+    // thread may well carry a parseable real lead.
+    if (isUnmailableAsLead_(leadEmail)) {
+      skipCache[threadId] = { reason: 'resolved lead email (' + leadEmail + ') is one of our own addresses, not a real lead', lastCheckedAt: new Date(), messageCount: messages.length };
+      Logger.log('DIAGNOSTIC -- skipped (resolved lead email ' + leadEmail + ' is one of our own addresses -- team, sending alias, or the network list -- not a real lead), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
       continue;
     }
 
@@ -1512,6 +1572,28 @@ function isInternal(email) {
   return CONFIG.INTERNAL_DOMAINS.some(domain => email.endsWith('@' + domain));
 }
 
+// ADDED (27 Aug 2026, real incident): true for the Maildoso sending-alias
+// mailboxes that forward lead replies into network@ -- see
+// CONFIG.FORWARDING_ALIAS_DOMAINS for the full incident. An alias is never
+// the lead and must never be drafted to; its presence as a sender means
+// "the real lead is inside the forwarded body, go parse it".
+function isForwardingAlias(email) {
+  if (!email) return false;
+  const e = String(email).toLowerCase().trim();
+  return CONFIG.FORWARDING_ALIAS_DOMAINS.some(domain => e.endsWith('@' + domain));
+}
+
+// A lead address must be a real outside human: not the team, not a sending
+// alias, not the network list address itself. Used as the last gate before
+// an address is treated as a draft recipient.
+function isUnmailableAsLead_(email) {
+  if (!email) return true;
+  const e = String(email).toLowerCase().trim();
+  if (isInternal(e)) return true;
+  if (isForwardingAlias(e)) return true;
+  return CONFIG.REQUIRED_CC_ADDRESSES.some(addr => addr.toLowerCase() === e);
+}
+
 function emojiToHtmlEntities(text) {
   let result = '';
   for (const char of text) {
@@ -1669,10 +1751,38 @@ function extractForwardedLeadInfo(message) {
   // Primary case: a real Gmail "Forward" with the standard header block.
   const forwardMatch = body.match(/-{3,}\s*Forwarded message\s*-{3,}[\s\S]{0,200}?From:\s*([^\s<>]+@[^\s<>\n]+)[\s\S]{0,400}?Subject:\s*([^\n\r]+)/i);
   if (forwardMatch) {
-    return {
-      email: forwardMatch[1].trim().toLowerCase(),
-      originalSubject: forwardMatch[2].trim()
-    };
+    const fromEmail = forwardMatch[1].trim().toLowerCase();
+    const originalSubject = forwardMatch[2].trim();
+
+    // FIX (27 Aug 2026, real incident): the forwarded block is not always a
+    // lead's INBOUND message. Two real shapes exist on these threads:
+    //
+    //   From: katie@beamanrealty.com          <- lead's reply, lead is the From
+    //   To:   anna.wilson@reachpilotteam.com
+    //
+    //   From: joana@iconsofrealestate.com     <- our OUTBOUND message, forwarded
+    //   To:   officerjenny77@gmail.com           back in; lead is the To
+    //
+    // Reading From unconditionally returned our own address on the second
+    // shape. Combined with the sending-alias bug (see
+    // CONFIG.FORWARDING_ALIAS_DOMAINS), that is how a draft ended up
+    // addressed to a.palmer@topaustinseo.site and bounced, while the real
+    // lead officerjenny77@gmail.com -- right there in the To: line -- got
+    // nothing. When the From is one of ours, the lead is the To.
+    if (isInternal(fromEmail) || isForwardingAlias(fromEmail)) {
+      const toMatch = body.match(/-{3,}\s*Forwarded message\s*-{3,}[\s\S]{0,600}?To:\s*([^\s<>]+@[^\s<>\n]+)/i);
+      if (toMatch) {
+        const toEmail = toMatch[1].trim().toLowerCase();
+        if (!isUnmailableAsLead_(toEmail)) {
+          return { email: toEmail, originalSubject: originalSubject };
+        }
+      }
+      // Both ends are ours -- an internal forward with no outside party in
+      // it. Returning the From here would draft a reply to ourselves.
+      return null;
+    }
+
+    return { email: fromEmail, originalSubject: originalSubject };
   }
 
   // FALLBACK (added 13 Aug 2026): no true forward header exists -- this is a
@@ -1704,7 +1814,10 @@ function extractForwardedLeadInfo(message) {
     if (!emailMatch) continue;
 
     const candidateEmail = emailMatch[1].toLowerCase().trim();
-    if (isInternal(candidateEmail)) continue; // Joana/Sean's own quoted line -- keep looking
+    // Skip our own quoted lines -- Joana/Sean's (isInternal) and, since
+    // 27 Aug 2026, the Maildoso sending aliases, whose "On ... wrote:" lines
+    // match this pattern just as readily and are never the lead.
+    if (isUnmailableAsLead_(candidateEmail)) continue;
 
     return {
       email: candidateEmail,
