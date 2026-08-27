@@ -1248,8 +1248,29 @@ function runReplyDrafterInner() {
           // snippet here means the NEXT run's log already shows the shape that
           // tripped it, no manual thread-opening required. Remove once the
           // parser's false-negative rate is back down and confirmed steady.
-          Logger.log('DIAGNOSTIC -- unparseable body snippet for ' + subject + ': ' +
-            lastMsg.getPlainBody().slice(0, 300).replace(/\n/g, ' | '));
+          //
+          // WIDENED 300 -> 800 chars (27 Aug 2026, same day, per direct
+          // request -- "get more data"): the CRLF fix resolved 3 of 7
+          // failures the FIRST time this ran, but two others (Wendy, Maria)
+          // still failed with the interesting part of the body cut off by
+          // the 300-char window -- for a real lead's reply nested under a
+          // quoted exchange, the relevant line can sit well past that.
+          const plainBody = lastMsg.getPlainBody();
+          if (plainBody.trim() === '') {
+            // DIAGNOSTIC (27 Aug 2026, same request): an empty plain body
+            // (confirmed on Jennifer's thread) gives extractForwardedLeadInfo
+            // nothing to work with no matter what its parsing logic does --
+            // that's a different failure mode than a body it can't read
+            // correctly. Logging the HTML body's length tells us next run
+            // whether this message truly has no content, or has an HTML part
+            // Apps Script isn't deriving plain text from, without guessing at
+            // a fix for either blind.
+            Logger.log('DIAGNOSTIC -- unparseable body EMPTY for ' + subject +
+              ' (plain body blank; HTML body is ' + lastMsg.getBody().length + ' char(s) long)');
+          } else {
+            Logger.log('DIAGNOSTIC -- unparseable body snippet for ' + subject + ': ' +
+              plainBody.slice(0, 800).replace(/\n/g, ' | '));
+          }
           Logger.log('Could not parse forwarded lead info for: ' + subject + ' -- skipping rather than guessing, cached for ' + SKIP_CACHE_TTL_HOURS + 'h.');
           continue;
         }
@@ -2117,9 +2138,14 @@ function extractForwardedLeadInfo(message) {
 
   // Primary case: a real Gmail/Outlook "Forward" with a header block.
   const header = parseForwardHeaderBlock_(body);
+  // Hoisted out of the `if` below (27 Aug 2026, real incident -- Flavia's
+  // thread) so the fallback scan further down can still credit a lead found
+  // there with the real original subject, instead of always reporting null
+  // just because a header block happened to exist but not resolve to a lead.
+  let originalSubjectFromHeader = null;
   if (header && header.from) {
     const fromEmail = extractEmail(header.from).toLowerCase().trim();
-    const originalSubject = header.subject ? header.subject.trim() : null;
+    originalSubjectFromHeader = header.subject ? header.subject.trim() : null;
 
     // FIX (27 Aug 2026, real incident): the forwarded block is not always a
     // lead's INBOUND message. Two real shapes exist on these threads:
@@ -2140,21 +2166,33 @@ function extractForwardedLeadInfo(message) {
       if (header.to) {
         const toEmail = extractEmail(header.to).toLowerCase().trim();
         if (!isUnmailableAsLead_(toEmail)) {
-          return { email: toEmail, originalSubject: originalSubject };
+          return { email: toEmail, originalSubject: originalSubjectFromHeader };
         }
+        // FIX (27 Aug 2026, real incident -- Flavia's thread, found via the
+        // unparseable-body diagnostic): the header's own To: can ALSO be one
+        // of our own alias domains -- confirmed on
+        // anna.wilson@reachpilotteam.com, a listed FORWARDING_ALIAS_DOMAINS
+        // entry -- meaning this isn't Joana's reply going straight to the
+        // lead, it's a Maildoso sending mailbox forwarding what IT received
+        // into network@. Giving up here used to lose the thread entirely,
+        // even though that alias's own exchange with the real lead is very
+        // likely quoted just below this header block. Don't return null --
+        // fall through to the "On ... wrote:" scan below instead, same as
+        // when there's no header at all.
       }
-      // Both ends are ours -- an internal forward with no outside party in
-      // it. Returning the From here would draft a reply to ourselves.
-      return null;
-    }
-
-    if (fromEmail.indexOf('@') !== -1) {
-      return { email: fromEmail, originalSubject: originalSubject };
+      // Both ends of the header are ours (or there was no To: to check) --
+      // don't return the From here, that would draft a reply to ourselves.
+      // Fall through rather than returning null; the real lead may still be
+      // quoted further down in the body, same fallback path as "no header".
+    } else if (fromEmail.indexOf('@') !== -1) {
+      return { email: fromEmail, originalSubject: originalSubjectFromHeader };
     }
   }
 
-  // FALLBACK (added 13 Aug 2026): no true forward header exists -- this is a
-  // pasted/quoted reply chain instead (e.g. "On Mon, Aug 10, 2026 at 9:30 pm
+  // FALLBACK (added 13 Aug 2026): no true forward header exists, OR one
+  // existed but didn't resolve to a real lead (see the alias-to-alias case
+  // just above) -- either way, this is a pasted/quoted reply chain to search
+  // instead (e.g. "On Mon, Aug 10, 2026 at 9:30 pm
   // amy@kwlifestyleproperties.com wrote:"). Diagnosed after a full run found
   // 144/144 genuine unanswered leads failing to parse via the primary regex
   // alone -- meaning this fallback path is not an edge case, it is the
@@ -2189,7 +2227,10 @@ function extractForwardedLeadInfo(message) {
 
     return {
       email: candidateEmail,
-      originalSubject: null // no clean original subject in this format; caller already falls back to `subject` when this is null
+      // Prefer the real original subject if a header block earlier in this
+      // same body gave us one (the alias-to-alias case above) -- otherwise
+      // null, and the caller already falls back to `subject` when this is null.
+      originalSubject: originalSubjectFromHeader
     };
   }
 
