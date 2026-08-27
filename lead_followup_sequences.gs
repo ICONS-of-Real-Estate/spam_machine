@@ -668,17 +668,23 @@ function assertGmailAdvancedServiceEnabled(callerName) {
   throw new Error(message);
 }
 
-// PAUSED (17 Aug 2026, real incident): classifyAndDraft() in Code.gs has
-// been caught mislabeling genuinely-interested replies (e.g. "Sure, I'd
-// like to hear more", "Yes, you can call") as no_decline. This cadence
-// correctly trusts that recorded category and re-derives the email
-// correctly -- the poison is upstream, not here -- but that means it keeps
-// drafting wrong "sorry that's not for you, want to be a guest?" nudges to
-// leads who never declined. Pausing DRAFT CREATION for this cadence only
-// until the upstream classification issue is actually fixed. Registration
-// still runs (harmless bookkeeping, no drafts). Flip back to true once the
-// classification fix is confirmed good.
-const HUB_GUEST_FOLLOWUPS_ENABLED = false;
+// RE-ENABLED (28 Aug 2026, per Tomás's comment on the "Lead Follow-Up
+// Emails" review doc): PAUSED 17 Aug because classifyAndDraft() in Code.gs
+// was caught mislabeling genuinely-interested replies (e.g. "Sure, I'd like
+// to hear more") as no_decline, which meant this cadence kept drafting wrong
+// "sorry that's not for you, want to be a guest?" nudges to leads who never
+// declined. Kris's condition for turning it back on was the classification
+// fix being confirmed good; Tomás's actual answer was narrower and more
+// useful -- even a REAL "no" to hosting should still get the Hub Guest
+// follow-up rather than being cut off, and the doc's own "someone
+// double-checking the unclear ones" option is already live here: see
+// AMBIGUOUS_NO_DECLINE_SIGNALS below, which routes any no_decline reply
+// matching a scheduling-constraint/info-request pattern to
+// NEEDS_CLASSIFICATION_REVIEW_TAB for a human instead of auto-enrolling it.
+// That gate was added the same day as this pause and has been running the
+// whole time regardless of this flag (registration always ran) -- so the
+// double-check this was waiting on already exists. Flipping to true.
+const HUB_GUEST_FOLLOWUPS_ENABLED = true;
 
 function runLeadFollowUpCycle() {
   if (!assertRunningAsJoana('runLeadFollowUpCycle')) return;
