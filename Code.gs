@@ -1343,6 +1343,18 @@ function runReplyDrafterInner() {
             // it rather than acting on it blind.
             Logger.log('DIAGNOSTIC -- unparseable message envelope for ' + subject +
               ': From=' + lastMsg.getFrom() + ' | To=' + lastMsg.getTo() + ' | Cc=' + lastMsg.getCc());
+            // DIAGNOSTIC (27 Aug 2026, same request -- Flavia's thread,
+            // still unresolved after the alias-chase fix): an 800-char
+            // snippet cuts off before whatever second quote-attribution line
+            // the fallback scan needed reaches. Rather than keep guessing a
+            // bigger fixed window, find every line anywhere in the FULL body
+            // containing "wrote" regardless of length -- the fallback regex
+            // requires an EXACT "^On .+wrote:$" match, so a near-miss (a
+            // different wrap point, stray punctuation, whatever it turns out
+            // to be) will show up here even though the parser rejected it.
+            const wroteLines = plainBody.split('\n').map(l => l.trim()).filter(l => /wrote/i.test(l));
+            Logger.log('DIAGNOSTIC -- all "wrote"-containing lines in full body for ' + subject + ' (' +
+              wroteLines.length + ' found): ' + wroteLines.join(' || '));
           }
           Logger.log('Could not parse forwarded lead info for: ' + subject + ' -- skipping rather than guessing, cached for ' + SKIP_CACHE_TTL_HOURS + 'h.');
           continue;
