@@ -2963,7 +2963,18 @@ function looksLikeBlankOrSignatureOnly_(replyBody) {
   if (text.length > 60) return false; // long enough that it's not a bare signature line
   if (/[?!.]/.test(text)) return false; // has real sentence-ending punctuation
 
-  const commonReplyWords = /\b(yes|yeah|yep|sure|no|nope|not|thanks|thank|sounds|interested|maybe|busy|sorry|ok|okay|please|remove|stop|call|text|works|later|soon|available|schedule)\b/i;
+  // FIX (27 Aug 2026, real incident -- Lisa's thread, flagged live by
+  // Goodness: "I've seen a few like this"): a short, unpunctuated REQUEST
+  // ("Send more details", "Tell me more", "Send info", "Share more details")
+  // matched none of the original words below and fell through to the bare
+  // `return true` at the bottom -- the hint told the model the prospect said
+  // nothing, and the model's own improvised response to "dead air" was a
+  // joke about receiving an empty message, drafted as if it were the real
+  // reply. Added the request/imperative verbs this category of reply
+  // actually uses. A genuine signature block (name, title, company, phone)
+  // essentially never contains an imperative verb aimed at us, so this
+  // doesn't risk the opposite mistake (Katie's incident, see below).
+  const commonReplyWords = /\b(yes|yeah|yep|sure|no|nope|not|thanks|thank|sounds|interested|maybe|busy|sorry|ok|okay|please|remove|stop|call|text|works|later|soon|available|schedule|send|share|tell|give|show|explain|details|detail|info|information|more|pricing|price|cost)\b/i;
   if (commonReplyWords.test(text)) return false; // reads like an actual response, not just a signature
 
   // Caught in testing: a real question missing its "?" ("What is this

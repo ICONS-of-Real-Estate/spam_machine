@@ -394,3 +394,21 @@ check('freshReply: stops at a word-wrapped attribution',
     body: 'Yes, interested.\n\nOn Wed, Aug 12, 2026 at 4:00 PM amy@x.com\nwrote:\nolder quoted text',
   })),
   'Yes, interested.');
+
+// ---------------------------------------------------------------------------
+// 8. Blank/signature-only reply detection (feeds the LLM an "empty reply"
+// hint -- a false positive here caused a real incident: Lisa asked "Send
+// more details" and the AI drafted a joke about receiving dead air, because
+// the hint told it the prospect said nothing).
+// ---------------------------------------------------------------------------
+{
+  const looksLikeBlankOrSignatureOnly_ = context.looksLikeBlankOrSignatureOnly_;
+  check('[REAL] Lisa: "Send more details" is a real request, not blank', looksLikeBlankOrSignatureOnly_('Send more details'), false);
+  check('short request: "Tell me more"', looksLikeBlankOrSignatureOnly_('Tell me more'), false);
+  check('short request: "Send info"', looksLikeBlankOrSignatureOnly_('Send info'), false);
+  check('short request: "Share more details"', looksLikeBlankOrSignatureOnly_('Share more details'), false);
+  check('short request: "What is this about" (no question mark)', looksLikeBlankOrSignatureOnly_('What is this about'), false);
+  check('genuinely blank: empty string', looksLikeBlankOrSignatureOnly_(''), true);
+  check('genuinely blank: whitespace only', looksLikeBlankOrSignatureOnly_('   '), true);
+  check('genuinely blank: signature block only', looksLikeBlankOrSignatureOnly_('Best,\nJohn Smith\n555-1234'), true);
+}
