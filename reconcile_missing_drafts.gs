@@ -67,6 +67,13 @@ function reconcileMissingDrafts() {
   // day. If it still cannot get in, that is now said out loud -- the old
   // silent `return` on a lock miss is exactly the pattern that made this
   // class of problem invisible for weeks.
+  // DIAGNOSTIC (27 Aug 2026, per direct request -- "this needs more
+  // logging"): tryLock(120000) blocks SILENTLY for up to 2 full minutes if
+  // another job (usually runReplyDrafter) already holds the lock -- from the
+  // Executions log, a run stuck in that wait looks identical to a run that
+  // has hung or died right after assertRunningAsJoana, with nothing printed
+  // either way until the wait resolves one way or the other.
+  Logger.log('reconcileMissingDrafts -- attempting to acquire the project-wide script lock (will wait up to 2 minutes if another job holds it)...');
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(120000)) {
     Logger.log('reconcileMissingDrafts could not acquire the script lock within 2 minutes -- another job in this project (most likely runReplyDrafter, which holds it for up to 5 minutes) is still running. Skipping this run; the next daily firing will pick it up.');
@@ -76,6 +83,7 @@ function reconcileMissingDrafts() {
     );
     return;
   }
+  Logger.log('reconcileMissingDrafts -- lock acquired, starting.');
 
   try {
   const labelDrafted = GmailApp.getUserLabelByName(CONFIG.LABEL_AI_DRAFTED);
@@ -93,6 +101,12 @@ function reconcileMissingDrafts() {
   ].filter(l => l !== null);
 
   const threads = labelDrafted.getThreads(0, 500);
+  // DIAGNOSTIC (27 Aug 2026, same request): the ONLY other log line between
+  // here and the final summary was the "could not find AI-Drafted-..." early
+  // exit -- a real run over hundreds of threads (each forcing a full
+  // thread.getMessages() body fetch, not just cheap metadata) printed nothing
+  // at all for however long that took. Same blind spot as the lock wait above.
+  Logger.log('reconcileMissingDrafts -- found ' + threads.length + ' thread(s) labeled AI-Drafted-PendingReview to check.');
 
   // FIX (27 Aug 2026, real risk found in review): draftAlreadyExistsFor's own
   // header comment claimed this call site checks "one lead in isolation, not
@@ -110,7 +124,16 @@ function reconcileMissingDrafts() {
   let couldNotParse = 0;
   let alreadyAnswered = 0;
 
-  threads.forEach(thread => {
+  threads.forEach((thread, i) => {
+    // DIAGNOSTIC (27 Aug 2026, same request): progress every 25 threads --
+    // the loop had no output at all between the "found N threads" line above
+    // and the final summary, regardless of N. On a full 500-thread run that
+    // silence could span several minutes with genuinely nothing to look at.
+    if (i > 0 && i % 25 === 0) {
+      Logger.log('reconcileMissingDrafts -- progress: ' + i + '/' + threads.length + ' checked so far (' +
+        reconciled + ' reconciled, ' + leftAlone + ' left alone, ' + alreadyAnswered + ' already answered, ' + couldNotParse + ' could not parse).');
+    }
+
     const isOptOut = thread.getLabels().some(l => l.getName() === CONFIG.LABEL_STOP);
     if (isOptOut) {
       leftAlone++;
@@ -160,6 +183,13 @@ function reconcileMissingDrafts() {
       }
     });
     reconciled++;
+    // DIAGNOSTIC (27 Aug 2026, same request): this is the one outcome here
+    // that actually changes something (strips labels, re-opens the thread to
+    // runReplyDrafter) -- naming it per-thread, not just in the final tally,
+    // means a phantom you're specifically checking for shows up by name
+    // instead of only as a number that went up somewhere in the run.
+    Logger.log('reconcileMissingDrafts -- RECONCILED (phantom label cleared, will be reprocessed): ' +
+      forwardInfo.email + ' -- ' + thread.getFirstMessageSubject());
   });
 
   Logger.log(
