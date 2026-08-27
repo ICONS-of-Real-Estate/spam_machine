@@ -379,14 +379,6 @@ check('freshReply: stops at a quote marker',
 check('all .gs files load into one shared scope with no global collisions',
   loadAllGsFiles(), null);
 
-// ---------------------------------------------------------------------------
-console.log(`\n  ${passed} passed, ${failures.length} failed\n`);
-if (failures.length) {
-  failures.forEach((f, i) => console.log(`  ${i + 1}. FAIL ${f}\n`));
-  process.exit(1);
-}
-console.log('  All parsing regression tests passed.\n');
-
 // Wrapped-attribution boundary in fresh-reply extraction (regression guard for
 // the continuation-join fix: neither half is an attribution on its own).
 check('freshReply: stops at a word-wrapped attribution',
@@ -394,6 +386,23 @@ check('freshReply: stops at a word-wrapped attribution',
     body: 'Yes, interested.\n\nOn Wed, Aug 12, 2026 at 4:00 PM amy@x.com\nwrote:\nolder quoted text',
   })),
   'Yes, interested.');
+
+// REGRESSION GUARD (28 Aug 2026, real incident -- Lynn/pmlr.com): a bare
+// relay with ZERO added commentary starts immediately at the attribution
+// line, so the main loop breaks on line one and used to return "" -- every
+// caller then read this as "the prospect said nothing," when Lynn's real
+// decline was quoted right there. Falls back to the first quoted block when
+// its attribution names a real outside lead.
+check('freshReply: falls back to the first quoted block for a bare zero-commentary relay',
+  extractProspectFreshReplyText(fakeMessage({
+    body: 'On Sunday, Aug 23, 2026 at 7:49 am lynn@pmlr.com wrote:\n\nNot interested.\n\nThank you…\n\nFrom: Joana Peixe <joanap@iconsofrealestatehq.com>\nSent: Saturday, August 22, 2026 5:04 AM',
+  })),
+  'Not interested.\n\nThank you...'); // NFKC-normalized: U+2026 -> "..."
+check('freshReply: zero-commentary relay of OUR OWN outreach still returns empty (not misattributed)',
+  extractProspectFreshReplyText(fakeMessage({
+    body: 'On Sunday, Aug 23, 2026 at 7:49 am joana@iconsofrealestate.com wrote:\n\nJust checking in!',
+  })),
+  '');
 
 // ---------------------------------------------------------------------------
 // 8. Blank/signature-only reply detection (feeds the LLM an "empty reply"
@@ -412,3 +421,18 @@ check('freshReply: stops at a word-wrapped attribution',
   check('genuinely blank: whitespace only', looksLikeBlankOrSignatureOnly_('   '), true);
   check('genuinely blank: signature block only', looksLikeBlankOrSignatureOnly_('Best,\nJohn Smith\n555-1234'), true);
 }
+
+// ---------------------------------------------------------------------------
+// FIX (28 Aug 2026, real risk found while adding the Lynn fallback tests):
+// this summary used to sit right after section 7 -- every check added after
+// it (the word-wrapped-attribution test, both new fallback tests above, and
+// all of section 8) still ran, but its pass/fail was never counted here and
+// could never trip process.exit(1). A real failure in any of those would
+// have printed nothing and exited 0. Moved to the actual end of the file so
+// every check in this suite is covered by one true summary.
+console.log(`\n  ${passed} passed, ${failures.length} failed\n`);
+if (failures.length) {
+  failures.forEach((f, i) => console.log(`  ${i + 1}. FAIL ${f}\n`));
+  process.exit(1);
+}
+console.log('  All parsing regression tests passed.\n');

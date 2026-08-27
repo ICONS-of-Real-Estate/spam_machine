@@ -2390,19 +2390,57 @@ function extractProspectFreshReplyText(message) {
   const HEADER_START = /^(?:From|Sent|Subject|To|Cc)\s*:\s/i;
 
   const freshLines = [];
+  let boundaryLine = null; // the attribution line itself, if that's what stopped collection
+  let quotedBlockStart = -1;
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
-    if (trimmed.startsWith('>')) break;
-    if (isAttributionLine_(trimmed)) break;
+    if (trimmed.startsWith('>')) { quotedBlockStart = i; break; }
+    if (isAttributionLine_(trimmed)) { boundaryLine = trimmed; quotedBlockStart = i + 1; break; }
     // Word-wrapped attribution: "On <date>" on this line, "wrote:" on the
     // next. Neither half is an attribution alone, so without this lookahead
     // the quoted history below would be collected as the prospect's own words.
-    if (/^On\s/i.test(trimmed) && i + 1 < lines.length && /wrote:\s*$/i.test(lines[i + 1].trim())) break;
-    if (FORWARD_SEPARATOR_RE.test(trimmed)) break;
-    if (HEADER_START.test(trimmed)) break;
+    if (/^On\s/i.test(trimmed) && i + 1 < lines.length && /wrote:\s*$/i.test(lines[i + 1].trim())) {
+      boundaryLine = trimmed + ' ' + lines[i + 1].trim();
+      quotedBlockStart = i + 2;
+      break;
+    }
+    if (FORWARD_SEPARATOR_RE.test(trimmed)) { quotedBlockStart = i; break; }
+    if (HEADER_START.test(trimmed)) { quotedBlockStart = i; break; }
     freshLines.push(lines[i]);
   }
-  return freshLines.join('\n').trim();
+
+  const fresh = freshLines.join('\n').trim();
+  if (fresh) return fresh;
+
+  // FALLBACK (28 Aug 2026, real incident -- Lynn/pmlr.com's thread, flagged
+  // live: "Lynn... Not Empty"): a bare relay with ZERO added commentary
+  // starts immediately at the attribution line ("On ... lynn@pmlr.com wrote:
+  // Not interested. Thank you..."), so the loop above breaks on line one and
+  // freshLines is empty -- every caller (OPT_OUT_PATTERNS, the blank-reply
+  // heuristic, the LLM prompt) then reads this as "the prospect said
+  // nothing," when Lynn's real decline is sitting one quote-level down. This
+  // is a DIFFERENT failure from the "Send more details" fix earlier the same
+  // day (that one was a short imperative reply misread as blank; this one
+  // loses real words entirely because they were never "fresh" to begin with).
+  //
+  // Only trust this fallback when the boundary line's own attribution names
+  // a real outside lead (firstMailableLeadIn_ rejects our own addresses) --
+  // otherwise the "quoted block" could just as easily be our own outreach
+  // copy, and guessing wrong here would feed the LLM (and OPT_OUT_PATTERNS)
+  // text the prospect never wrote, the exact opposite failure.
+  if (boundaryLine === null) return '';
+  const author = firstMailableLeadIn_(extractAllEmailsFrom_(boundaryLine));
+  if (!author) return '';
+
+  const quotedLines = [];
+  for (let i = quotedBlockStart; i < lines.length; i++) {
+    const trimmed = stripQuoteMarkers_(lines[i]);
+    if (isAttributionLine_(trimmed)) break;
+    if (FORWARD_SEPARATOR_RE.test(trimmed)) break;
+    if (HEADER_START.test(trimmed)) break;
+    quotedLines.push(trimmed);
+  }
+  return quotedLines.join('\n').trim();
 }
 
 // FIX (27 Aug 2026, real incident -- verified by execution, not just reading):
