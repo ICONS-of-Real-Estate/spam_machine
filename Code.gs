@@ -1239,6 +1239,17 @@ function runReplyDrafterInner() {
         const forwardInfo = extractForwardedLeadInfo(lastMsg);
         if (!forwardInfo) {
           skipCache[threadId] = { reason: 'could not parse forwarded lead info', lastCheckedAt: new Date(), messageCount: messages.length };
+          // DIAGNOSTIC (27 Aug 2026, added per direct request after a run came
+          // back 7-of-14 unparseable in one morning): "could not parse" alone
+          // gives no way to tell a genuinely bad thread from yet another format
+          // extractForwardedLeadInfo doesn't handle -- which is exactly how the
+          // 13 Aug (nested ">>" quotes) and 27 Aug (word-wrapped "wrote:") bugs
+          // both hid until someone manually opened a thread. Dumping a body
+          // snippet here means the NEXT run's log already shows the shape that
+          // tripped it, no manual thread-opening required. Remove once the
+          // parser's false-negative rate is back down and confirmed steady.
+          Logger.log('DIAGNOSTIC -- unparseable body snippet for ' + subject + ': ' +
+            lastMsg.getPlainBody().slice(0, 300).replace(/\n/g, ' | '));
           Logger.log('Could not parse forwarded lead info for: ' + subject + ' -- skipping rather than guessing, cached for ' + SKIP_CACHE_TTL_HOURS + 'h.');
           continue;
         }
