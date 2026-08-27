@@ -61,6 +61,16 @@
 const RECONCILE_BATCH_SIZE = 500; // Gmail label listing fetched per run
 const RECONCILE_RUNTIME_BUDGET_MS = 5 * 60 * 1000; // 5 min, leaving a 1-min buffer before the 6-min hard limit
 const RECONCILE_OFFSET_PROPERTY = 'RECONCILE_MISSING_DRAFTS_NEXT_OFFSET';
+// ADDED (27 Aug 2026, per direct request -- "should we run this at the end of
+// each day, or some validation?"): the daily 5 AM trigger already existed
+// before today, yet 134 phantom-labeled threads had silently piled up --
+// most likely this exact job stalling on the same top-500 threads or dying
+// past the 6-minute limit with nothing logged, day after day, completely
+// invisibly. Running it more often wouldn't have caught that; nothing was
+// watching the OUTCOME. A single run clearing more than this many phantoms
+// means backlog had been quietly accumulating and is worth a human's
+// attention now, not buried in a Logger.log line nobody's watching.
+const RECONCILE_ALERT_THRESHOLD = 20;
 
 function reconcileMissingDrafts() {
   // ADDED (22 Aug 2026, per direct request -- "shouldn't this be on a
@@ -274,6 +284,26 @@ function reconcileMissingDrafts() {
       ? 'Reached the end of the label -- next run starts a fresh pass from offset 0.'
       : 'Next run resumes from offset ' + nextOffset + '.')
   );
+
+  // VALIDATION (27 Aug 2026, per direct request -- see RECONCILE_ALERT_THRESHOLD
+  // above): a normal, healthy day should reconcile close to zero -- phantoms
+  // only happen from an accidental bulk draft deletion or a job failing
+  // partway through. Crossing the threshold in ONE run means either that just
+  // happened, or (as this morning) a backlog had been building silently for a
+  // while. Rate-limited to once per Pacific day by sendOpsAlert() itself, so
+  // this can't spam even if several runs in a row are still working through
+  // the same large backlog.
+  if (reconciled > RECONCILE_ALERT_THRESHOLD) {
+    sendOpsAlert(
+      'reconcileMissingDrafts cleared ' + reconciled + ' phantom-labeled threads in one run',
+      'This run reconciled ' + reconciled + ' threads that were labeled "AI-Drafted-PendingReview" with no real ' +
+      'draft behind them -- well above the normal-day threshold of ' + RECONCILE_ALERT_THRESHOLD + '. That usually ' +
+      'means either a bulk draft deletion just happened, or this job has been stalling/failing silently for a ' +
+      'while and a backlog built up unnoticed (the exact incident this alert was added after, 27 Aug 2026). All ' +
+      reconciled + ' threads are now reopened and will be picked up by the next runReplyDrafter pass -- ' +
+      'worth a quick look at today\'s Executions log for this job\'s recent history if this keeps recurring.'
+    );
+  }
   } catch (e) {
     // FIX (27 Aug 2026, real risk found in review): no path here could ever
     // trip the Gmail quota circuit breaker -- see handleGmailJobError_.
