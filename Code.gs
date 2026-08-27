@@ -1264,17 +1264,30 @@ function runReplyDrafterInner() {
         leadEmail = lastSenderEmail;
         originalSubjectFromForward = null;
       } else if (isNetworkListRelay) {
-        // Walk backward past any stacked relay copies (rare, but the list
-        // could in principle echo more than once) to the nearest message
-        // that is an actual send, not another echo of it.
         leadEmail = null;
         originalSubjectFromForward = null;
+
+        // TRY THE MESSAGE'S OWN BODY FIRST (27 Aug 2026, real incident --
+        // Maria's thread): a network-list-relay message's ENVELOPE never has
+        // the real recipient (that's the whole reason this branch exists),
+        // but its BODY can still be a genuinely parseable quote chain, same
+        // as any other message -- confirmed on Maria's single-message thread,
+        // where extractForwardedLeadInfo() finds her real "wrote:" line just
+        // fine once given the chance. The backward-walk below is only for
+        // when this comes back empty (Wendy's thread: nothing here but
+        // Joana's own quoted reply, no deeper lead-authored line at all).
+        const forwardInfo = extractForwardedLeadInfo(lastMsg);
+        if (forwardInfo) {
+          leadEmail = forwardInfo.email;
+          originalSubjectFromForward = forwardInfo.originalSubject;
+        }
+
         let examinedPriorMsg = null; // DIAGNOSTIC: the message the walk actually stopped at, if any
         // Walk back from lastMsg's OWN position, not the array's end --
         // lastNonDraftMessage_ can return an earlier message than the last
         // array element when the true last message is a draft, and starting
         // from the array end in that case would skip right past it.
-        for (let i = messages.indexOf(lastMsg) - 1; i >= 0; i--) {
+        for (let i = messages.indexOf(lastMsg) - 1; !leadEmail && i >= 0; i--) {
           const priorSenderEmail = extractEmail(messages[i].getFrom());
           if (CONFIG.REQUIRED_CC_ADDRESSES.some(addr => addr.toLowerCase() === priorSenderEmail.toLowerCase())) continue;
 
