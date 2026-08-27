@@ -1,25 +1,24 @@
 """
-Maildoso sending-account analytics -- NOT WIRED UP. Per
-research/2026-08-26_growth-features-research.md, Maildoso does have a
-real public API (developers.maildoso.com), but that research could only
-confirm domain/mailbox PROVISIONING endpoints from search-result
-summaries -- whether it exposes per-campaign performance data (opens,
-replies, bounces) is still unconfirmed and needs a real logged-in look
-at the docs, not another web search.
+Maildoso sending-account analytics -- NOT WIRED UP.
 
-This module is a placeholder for that -- not yet meaningful to build
-against, since the actual question (does the analytics data even exist
-via API) isn't answered yet. Kept as its own file, in the mock/live
-pattern used everywhere else in this repo, so whichever answer comes
-back has an obvious place to land:
-  - If real analytics endpoints exist: implement get_campaign_stats()
-    for real here, same as sourcing.py's future live path.
-  - If they don't: this becomes a stub for scraping/automating the web
-    interface instead, per the original ask's fallback ("API if one
-    exists, otherwise the web interface").
+CONFIRMED (27 Aug 2026, per Kris's own account access -- see
+research/2026-08-26_growth-features-research.md for the earlier,
+web-search-only research pass this supersedes): the Maildoso API does
+NOT expose campaign performance data, because Maildoso is not the
+sending/campaign platform -- it only provisions domains and mailboxes.
+Whatever actually runs "campaigns" (decides what to send, to whom, on
+what schedule, and tracks opens/replies/bounces) is a separate tool that
+sends its mail THROUGH Maildoso-provisioned mailboxes. get_campaign_stats()
+below can never be implemented against Maildoso's API, at all, no matter
+how much deeper anyone reads the docs -- this is not a "not yet found"
+gap, it's a "does not exist here" answer.
 
-No UI page reads from this yet -- deliberately not building an analytics
-view against an unconfirmed data source.
+This module is kept as a stub, not deleted, because Maildoso-side data
+(mailbox health, sending reputation, domain status) may still be useful
+later even though campaign analytics never will be. Whoever owns the
+actual campaign tool needs to be identified so ITS API/export gets
+wired up instead -- that unblocks the real ask ("review and optimize
+campaigns"), this file does not and cannot.
 """
 import os
 
