@@ -269,12 +269,45 @@ function emailMissedLeadsAlert(missed) {
     '\n\nThese are logged in the "Missed Leads Audit" tab in the "Icons Podcast Reply Drafter -- Logs" spreadsheet.\n\n' +
     'Worth a manual look -- these are old enough or unusual enough that they fell outside the automatic drafting flow.';
 
+  // ADDED (27 Aug 2026, per direct request -- "fix all emails"): same
+  // treatment as bounce_audit.gs's htmlBody -- a bordered card per lead
+  // instead of a plain dash-list, the thread link made actually clickable,
+  // and days-unanswered color-coded so the oldest, most overdue ones stand
+  // out at a glance instead of requiring reading every line to find them.
+  const severityColor = days => days >= 7 ? '#c0392b' : (days >= 3 ? '#e08e0b' : '#555555');
+  const htmlCards = missed.map(m =>
+    '<div style="margin:0 0 12px 0; padding:12px 16px; border:1px solid #e0e0e0; border-left:4px solid ' + severityColor(m.daysUnanswered) + '; border-radius:6px;">' +
+      '<div style="font-weight:bold; margin-bottom:6px;">' + escapeHtml(m.subject) + '</div>' +
+      '<div style="line-height:1.8;">' +
+        '<b>Lead:</b> <a href="mailto:' + escapeHtml(m.prospectEmail) + '">' + escapeHtml(m.prospectEmail) + '</a><br>' +
+        '<b>Unanswered:</b> <span style="color:' + severityColor(m.daysUnanswered) + '; font-weight:bold;">' + m.daysUnanswered + ' day' + (m.daysUnanswered === 1 ? '' : 's') + '</span><br>' +
+        '<b>Thread:</b> <a href="' + m.link + '" style="color:#2E74B5;">Open thread</a>' +
+      '</div>' +
+    '</div>'
+  ).join('');
+
+  const htmlBody =
+    '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' +
+      '<p>This email was written by Claude.</p>' +
+      '<h2 style="margin:0 0 10px 0; font-size:18px; color:#1a2b4c;">' +
+        missed.length + ' podcast outreach ' + (missed.length === 1 ? 'reply' : 'replies') + ' with no response yet' +
+      '</h2>' +
+      '<p>Found ' + missed.length + ' thread(s) where a prospect replied to the podcast outreach and nobody on the team has responded to yet:</p>' +
+      '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
+      htmlCards +
+      '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
+      '<p style="color:#555555; font-size:13px;">These are logged in the &ldquo;Missed Leads Audit&rdquo; tab in the ' +
+        '<a href="https://docs.google.com/spreadsheets/d/' + CONFIG.SPREADSHEET_ID + '/edit">Icons Podcast Reply Drafter &mdash; Logs</a> spreadsheet.</p>' +
+      '<p style="color:#555555; font-size:13px;">Worth a manual look &mdash; these are old enough or unusual enough that they fell outside the automatic drafting flow.</p>' +
+    '</div>';
+
   // CHANGED (23 Aug 2026, per direct request -- "all emails need to be CC
   // kris & Tomas"): added Tomas to cc.
   MailApp.sendEmail({
     to: 'kris@iconsofrealestate.com',
     cc: 'joana@iconsofrealestate.com,tomas@iconsofrealestate.com',
     subject: subject,
-    body: body
+    body: body,
+    htmlBody: htmlBody
   });
 }

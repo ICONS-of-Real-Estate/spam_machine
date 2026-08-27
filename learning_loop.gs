@@ -757,6 +757,19 @@ function runSopSuggestionsCatchup() {
   }
 }
 
+// ADDED (27 Aug 2026, per direct request -- "fix all emails"): all three SOP
+// suggestions emails below shared the same defect -- the actual thing to act
+// on (the Doc) was a bare pasted URL on its own line, not a clickable link.
+// One shared card for all three so the visual language stays identical and
+// a future wording tweak to one doesn't quietly drift from the other two.
+function docLinkCardHtml_(url, label) {
+  return (
+    '<div style="margin:14px 0; padding:14px 18px; border:1px solid #e0e0e0; border-left:4px solid #1a2b4c; border-radius:6px;">' +
+      '<a href="' + url + '" style="color:#1a2b4c; font-weight:bold; font-size:15px; text-decoration:none;">&#128196; ' + escapeHtml(label) + '</a>' +
+    '</div>'
+  );
+}
+
 function finalizeSopSuggestionsCatchup() {
   const props = PropertiesService.getScriptProperties();
   const startIso = props.getProperty(SOP_CATCHUP_START_PROP);
@@ -824,7 +837,17 @@ function finalizeSopSuggestionsCatchup() {
       ' remain after merging duplicates (from ' + newSuggestionRows.length + ' raw finding' +
       (newSuggestionRows.length === 1 ? '' : 's') + ' across the whole catch-up run):\n\n' +
       file.getUrl() + '\n\n' +
-      'Please review and decide whether to add any of these to the live SOP -- nothing here has been applied automatically.'
+      'Please review and decide whether to add any of these to the live SOP -- nothing here has been applied automatically.',
+    htmlBody:
+      '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' +
+        '<p>This email was written by Claude.</p>' +
+        '<p>The Learning Log backlog has been fully processed. <b>' + finalSuggestions.length +
+          '</b> distinct potential SOP update' + (finalSuggestions.length === 1 ? '' : 's') +
+          ' remain after merging duplicates (from ' + newSuggestionRows.length + ' raw finding' +
+          (newSuggestionRows.length === 1 ? '' : 's') + ' across the whole catch-up run):</p>' +
+        docLinkCardHtml_(file.getUrl(), 'SOP Suggestions -- Backlog Catch-up -- ' + dateStr) +
+        '<p style="color:#555555; font-size:13px;">Please review and decide whether to add any of these to the live SOP &mdash; nothing here has been applied automatically.</p>' +
+      '</div>'
   });
 
   props.deleteProperty(SOP_CATCHUP_START_PROP);
@@ -903,7 +926,17 @@ function mergeAndResendTodaysSopSuggestions() {
       'batches. Same findings, merged down to ' + finalSuggestions.length + ' distinct, reviewable ' +
       'suggestion' + (finalSuggestions.length === 1 ? '' : 's') + ':\n\n' +
       file.getUrl() + '\n\n' +
-      'This supersedes the earlier email today -- please review this one instead.'
+      'This supersedes the earlier email today -- please review this one instead.',
+    htmlBody:
+      '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' +
+        '<p>This email was written by Claude.</p>' +
+        '<p><b>This supersedes the earlier email today</b> &mdash; please review this one instead.</p>' +
+        '<p>The earlier &ldquo;backlog fully processed&rdquo; email sent today listed ' + rawLines.length +
+          ' raw findings &mdash; most were the same real pattern rediscovered independently by different batches. ' +
+          'Same findings, merged down to <b>' + finalSuggestions.length + '</b> distinct, reviewable ' +
+          'suggestion' + (finalSuggestions.length === 1 ? '' : 's') + ':</p>' +
+        docLinkCardHtml_(file.getUrl(), 'SOP Suggestions -- Backlog Catch-up (Deduplicated) -- ' + dateStr) +
+      '</div>'
   });
 
   Logger.log('mergeAndResendTodaysSopSuggestions -- done. ' + rawLines.length + ' raw -> ' + finalSuggestions.length + ' merged. Emailed: ' + file.getUrl());
@@ -980,11 +1013,21 @@ function emailSopSuggestionsDoc(docFile, suggestionsCount) {
   // are on CC too"): Kris moved from `to` into `cc`, Tomás added to `cc`.
   // Joana/Goodness are the actual reviewers who'd act on this; Kris/Tomás
   // are kept in the loop but not the primary "please review" audience.
+  const htmlBody =
+    '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' +
+      '<p>This email was written by Claude.</p>' +
+      '<p>Today\'s automated review of edited replies found <b>' + suggestionsCount + '</b> potential SOP update' +
+        (suggestionsCount === 1 ? '' : 's') + ', based on real differences between what the AI drafted and what Joana actually sent:</p>' +
+      docLinkCardHtml_(docFile.getUrl(), 'SOP Suggestions -- ' + dateStr) +
+      '<p style="color:#555555; font-size:13px;">Please review and decide whether to add any of these to the live SOP &mdash; nothing here has been applied automatically.</p>' +
+    '</div>';
+
   MailApp.sendEmail({
     to: 'goodness@iconsofrealestate.com,joana@iconsofrealestate.com',
     cc: 'kris@iconsofrealestate.com,tomas@iconsofrealestate.com',
     subject: '[Written by Claude] Daily SOP Suggestions -- ' + dateStr,
-    body: body
+    body: body,
+    htmlBody: htmlBody
   });
 
   Logger.log('SOP suggestions doc emailed to Goodness and Joana, CC Kris and Tomas: ' + docFile.getUrl());

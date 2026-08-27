@@ -706,6 +706,38 @@ function ensureOpsAlertLogTabExists_(ss) {
   return tab;
 }
 
+// ADDED (27 Aug 2026, per direct request -- "fix all emails"): every caller
+// of sendOpsAlert() only ever hands it a plain string (dozens of call sites
+// across this project -- lock failures, trigger drift, quota exhaustion, the
+// reconcile-backlog threshold), so there was no per-caller htmlBody to wire
+// up the way bounce_audit.gs and daily_report.gs got fixed individually.
+// Auto-formatting it once here fixes all of them without touching a single
+// call site: escapes the text, turns a bare pasted URL (a Gmail thread link,
+// a spreadsheet link -- every alert in this file has at least one) into a
+// real clickable link, and preserves the paragraph breaks callers already
+// write their bodies with.
+function linkifyPlainText_(text) {
+  const escaped = escapeHtml(text);
+  // escapeHtml already turned "&" into "&amp;" -- match that encoded form in
+  // URLs too, or a query-string URL (?a=1&b=2) would only ever linkify up to
+  // its first parameter.
+  return escaped.replace(/https?:\/\/[^\s<>"]+/g, url => {
+    // Trailing punctuation off a sentence ("...see the log: https://x.y.")
+    // is common in these bodies and would otherwise become part of the link.
+    const trailingMatch = url.match(/[.,;:)\]]+$/);
+    const trailing = trailingMatch ? trailingMatch[0] : '';
+    const cleanUrl = trailing ? url.slice(0, -trailing.length) : url;
+    return '<a href="' + cleanUrl + '" style="color:#2E74B5;">' + cleanUrl + '</a>' + trailing;
+  });
+}
+
+function autoFormatOpsAlertBody_(plainBody) {
+  const paragraphs = plainBody.split(/\n\n+/).map(para =>
+    '<p style="margin:0 0 12px 0;">' + linkifyPlainText_(para).replace(/\n/g, '<br>') + '</p>'
+  ).join('');
+  return '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' + paragraphs + '</div>';
+}
+
 /**
  * Sends an alert via MailApp (NOT GmailApp) -- a separate quota, so
  * this keeps working even when Gmail access itself is dead. Rate
@@ -764,10 +796,21 @@ function sendOpsAlert(subject, body) {
     // anything with. This does NOT change cc on the other outbound emails
     // (daily_report.gs, missed_leads_audit.gs, stalled_bookings_audit.gs,
     // learning_loop.gs) -- those stay CC'd to both per the 23 Aug policy.
+    const fullBody = body + '\n\n(This alert was sent automatically by the Apps Script ops monitoring. Written with Claude\'s help.)';
     MailApp.sendEmail({
       to: 'kris@iconsofrealestate.com',
       subject: '[Icons Ops Alert] ' + subject,
-      body: body + '\n\n(This alert was sent automatically by the Apps Script ops monitoring. Written with Claude\'s help.)'
+      body: fullBody,
+      htmlBody:
+        '<div style="font-family:Arial,sans-serif;">' +
+          '<div style="padding:10px 16px; background:#c0392b; color:#ffffff; font-weight:bold; font-size:15px; border-radius:6px 6px 0 0;">' +
+            '&#9888; Ops Alert &mdash; ' + escapeHtml(subject) +
+          '</div>' +
+          '<div style="padding:16px; border:1px solid #e0e0e0; border-top:none; border-radius:0 0 6px 6px;">' +
+            autoFormatOpsAlertBody_(body) +
+            '<p style="margin:12px 0 0 0; color:#888888; font-size:12px;">Sent automatically by the Apps Script ops monitoring. Written with Claude\'s help.</p>' +
+          '</div>' +
+        '</div>'
     });
     Logger.log('Ops alert sent: ' + subject);
   } catch (e) {
