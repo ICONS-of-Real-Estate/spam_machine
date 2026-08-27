@@ -1228,13 +1228,59 @@ function runReplyDrafterInner() {
       // neither, yet they are us. Treat an alias exactly like the network
       // address: a signal to parse the forwarded body for the real lead, never
       // a lead in its own right. See CONFIG.FORWARDING_ALIAS_DOMAINS.
-      const isAliasItself = CONFIG.REQUIRED_CC_ADDRESSES.some(addr => addr.toLowerCase() === lastSenderEmail.toLowerCase())
-        || isForwardedFromSendingAlias_(lastMsg, lastSenderEmail);
+      // FIX (27 Aug 2026, real incident -- confirmed on Wendy's and Maria's
+      // threads via the envelope diagnostic below): a message literally FROM
+      // the network list address itself (Gmail shows it as "'Joana Peixe' via
+      // Network" <network@ardorseo.com>) is the mailing-list mechanism
+      // relaying Joana's own post back to its own subscribers -- its OWN To:
+      // is just the list address again, and its body is only ever a plain
+      // quote of what Joana wrote. The real recipient is never in either,
+      // because it was never Joana's message to begin with -- it's a copy.
+      // That's a different problem than the Maildoso sending-alias case
+      // (isForwardedFromSendingAlias_): there, the real lead genuinely is in
+      // THIS message's body; here, it never was, and belongs to the message
+      // right before this one -- Joana's actual send. Named separately so the
+      // two get resolved differently below instead of both funneling into
+      // extractForwardedLeadInfo(lastMsg), which can never find a recipient
+      // this message's own envelope and body never carried.
+      const isNetworkListRelay = CONFIG.REQUIRED_CC_ADDRESSES.some(addr => addr.toLowerCase() === lastSenderEmail.toLowerCase());
+      const isAliasItself = isNetworkListRelay || isForwardedFromSendingAlias_(lastMsg, lastSenderEmail);
       let leadEmail, originalSubjectFromForward;
 
       if (!isAliasItself) {
         leadEmail = lastSenderEmail;
         originalSubjectFromForward = null;
+      } else if (isNetworkListRelay) {
+        // Walk backward past any stacked relay copies (rare, but the list
+        // could in principle echo more than once) to the nearest message
+        // that is an actual send, not another echo of it.
+        leadEmail = null;
+        originalSubjectFromForward = null;
+        // Walk back from lastMsg's OWN position, not the array's end --
+        // lastNonDraftMessage_ can return an earlier message than the last
+        // array element when the true last message is a draft, and starting
+        // from the array end in that case would skip right past it.
+        for (let i = messages.indexOf(lastMsg) - 1; i >= 0; i--) {
+          const priorSenderEmail = extractEmail(messages[i].getFrom());
+          if (CONFIG.REQUIRED_CC_ADDRESSES.some(addr => addr.toLowerCase() === priorSenderEmail.toLowerCase())) continue;
+
+          if (isInternal(priorSenderEmail)) {
+            // Joana's own genuine send -- the real lead is whoever she
+            // actually sent it to, read straight from the envelope. No
+            // forward-header parsing needed; there's nothing forwarded here.
+            leadEmail = extractExternalLeadFromRecipientList_(messages[i].getTo());
+          } else if (!isForwardedFromSendingAlias_(messages[i], priorSenderEmail)) {
+            // The lead replying directly, one message further back -- same
+            // 13 Aug shortcut as above, just applied one step earlier.
+            leadEmail = priorSenderEmail;
+          }
+          break;
+        }
+        if (!leadEmail) {
+          skipCache[threadId] = { reason: 'network-list-relay message with no resolvable prior sender/recipient', lastCheckedAt: new Date(), messageCount: messages.length };
+          Logger.log('DIAGNOSTIC -- skipped (network-list-relay message -- Joana\'s own post echoed back by the list -- with no resolvable prior sender/recipient), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
+          continue;
+        }
       } else {
         const forwardInfo = extractForwardedLeadInfo(lastMsg);
         if (!forwardInfo) {
@@ -1912,6 +1958,21 @@ function isUnmailableAsLead_(email) {
   if (isInternal(e)) return true;
   if (isForwardingAlias(e)) return true;
   return CONFIG.REQUIRED_CC_ADDRESSES.some(addr => addr.toLowerCase() === e);
+}
+
+// ADDED (27 Aug 2026, real incident -- the network-list-relay case in
+// runReplyDrafterInner): extractEmail() only ever unwraps a single "<...>"
+// address -- fine for a From: header, but a To:/Cc: value can hold several
+// comma-joined recipients (e.g. "Wendy Smith <wendy@x.com>,
+// network@ardorseo.com" when Joana replied to both the lead and the list),
+// and extractEmail() on that whole string returns it unparsed, matching
+// nothing. Splits on comma, extracts each, and returns the first one that's
+// a real outside human -- i.e. skips the network list address / our own
+// domains the same way isUnmailableAsLead_ already does everywhere else.
+function extractExternalLeadFromRecipientList_(rawRecipients) {
+  if (!rawRecipients) return null;
+  const candidates = String(rawRecipients).split(',').map(r => extractEmail(r.trim()));
+  return candidates.find(email => email.indexOf('@') !== -1 && !isUnmailableAsLead_(email)) || null;
 }
 
 function emojiToHtmlEntities(text) {
