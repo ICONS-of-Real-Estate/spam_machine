@@ -2100,7 +2100,20 @@ function parseForwardHeaderBlock_(body) {
 }
 
 function extractForwardedLeadInfo(message) {
-  const body = message.getPlainBody();
+  // NORMALIZE (27 Aug 2026, real incident -- found via the new unparseable-
+  // body diagnostic in runReplyDrafterInner): parseForwardHeaderBlock_'s
+  // per-line field regex ends in `(.*)$`, and JS regex `.` never matches a
+  // bare CR -- so on a body using CRLF line endings, every header field line
+  // fails to match, the loop breaks on line 1, and parseForwardHeaderBlock_
+  // returns `{}` (truthy, but no usable `from`). Confirmed on four real
+  // threads (Flavia/Spencer/Roberta/Doug) that all have a clean, well-formed
+  // "From: joana@... / To: <real lead>" header -- exactly the shape the
+  // 27 Aug "lead is in the To: line" fix below exists to handle -- which
+  // then silently fell through to the "On ... wrote:" fallback and found
+  // nothing better than Joana's own quoted line. Normalizing once here,
+  // before either parser sees the body, is a no-op for the (more common)
+  // LF-only case and fixes both call paths at once.
+  const body = message.getPlainBody().replace(/\r\n?/g, '\n');
 
   // Primary case: a real Gmail/Outlook "Forward" with a header block.
   const header = parseForwardHeaderBlock_(body);
