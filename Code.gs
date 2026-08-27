@@ -148,7 +148,20 @@ const CONFIG = {
     'iconsrealestate.com',            // joana@          -- note: NOT iconsofrealestate.com
     'pixingsproduct.com',             // joanap@
     'battletowardssafetymail.info',   // tevin@
-    'theiconsofrealestatepodcast.com' // kris.r@         -- retired (outreach ran under Kris's name before Joana)
+    'theiconsofrealestatepodcast.com', // kris.r@        -- retired (outreach ran under Kris's name before Joana)
+    // ADDED (27 Aug 2026, real incident -- found via the network-list-relay
+    // fix on Wendy's thread): resolving that thread's real recipient off
+    // Joana's own prior send landed on joanap@iconsofrealestateteam.com --
+    // same "joanap@" local part already seen rotating across pixingsproduct.com
+    // above, and a near-miss of our real domain in exactly the same style as
+    // iconsrealestate.com (note above: NOT iconsofrealestate.com). Not a
+    // confirmed bounce like the others in this list, but the naming pattern
+    // matches every genuine rotating alias here closely enough that treating
+    // it as a real lead's own domain risked exactly the kind of bounce this
+    // list exists to prevent. If this turns out to be wrong, removing it
+    // just means that thread goes back to "could not resolve" instead of
+    // silently drafting to the wrong address.
+    'iconsofrealestateteam.com'      // joanap@
   ],
 
   LABEL_YES: '1. Spam YES',
