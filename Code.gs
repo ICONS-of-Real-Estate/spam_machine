@@ -75,6 +75,25 @@
 // ---------- CONFIG ----------
 
 const CONFIG = {
+  // ADDED (27 Aug 2026, real incident): OPT_OUT_PATTERNS-based suppression
+  // (see below) has existed in this file since well before 27 Aug, but 5
+  // live drafts pitching a guest invite to leads who explicitly said "please
+  // remove me" / "stop sending" were found sitting in Joana's Drafts folder
+  // TODAY -- proof the code actually running in the Apps Script project was
+  // stale, not that the suppression logic was wrong. Per HANDOFF.md, a
+  // code change here only takes effect once a human manually pastes this
+  // file into the Apps Script editor (unlike the SOP Doc, which is live
+  // immediately) -- and that step has been silently skipped at least twice
+  // now (this incident and the earlier blank_or_signature_only fix), with
+  // no way for anyone to tell short of stumbling on bad drafts by hand.
+  // CODE_VERSION makes staleness checkable instead of invisible: bump this
+  // to the git commit hash + date every time you edit this file, and it
+  // gets logged on every run and surfaced in the daily report. If the
+  // version in a live Executions log or daily report doesn't match this
+  // repo's HEAD, the Apps Script editor has NOT been updated with the
+  // latest code -- go paste it in before trusting any fix here is live.
+  CODE_VERSION: '7d2a2d7 (27 Aug 2026)',
+
   // FIXED (25 Jul 2026): only matched subjects containing the literal word
   // "podcast" -- but many real subjects say "show" instead ("up for hosting
   // your own show in Georgia?"). Those were silently failing this check on
@@ -970,6 +989,10 @@ function runReplyDrafter() {
 }
 
 function runReplyDrafterInner() {
+  // ADDED (27 Aug 2026): see CONFIG.CODE_VERSION's comment -- logged here so
+  // a stale live deployment shows up in the Executions log instead of only
+  // being discoverable by finding a bad draft after the fact.
+  Logger.log('runReplyDrafterInner -- running CODE_VERSION: ' + CONFIG.CODE_VERSION);
   const labelYes = getOrWarnLabel(CONFIG.LABEL_YES);
   const labelYesPenciled = getOrWarnLabel(CONFIG.LABEL_YES_PENCILED);
   const labelNo = getOrWarnLabel(CONFIG.LABEL_NO);
