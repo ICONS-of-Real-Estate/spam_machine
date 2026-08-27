@@ -30,7 +30,37 @@
  * GOING FORWARD: the actual fix is procedural, not just this script --
  * don't bulk-delete drafts without also running this reconciliation
  * afterward, or the same gap reopens every time.
+ *
+ * BATCHED + RESUMABLE (27 Aug 2026, real incident -- a live run on the actual
+ * backlog took 5m16s to examine exactly RECONCILE_BATCH_SIZE threads, uncomfortably
+ * close to Apps Script's ~6-minute hard limit for a single execution). Two
+ * separate problems, both fixed here:
+ *   1. A run that gets killed mid-batch by the platform (not this script's own
+ *      time-budget check) never reaches the final Logger.log summary and never
+ *      saves progress -- the next run starts from the same offset and repeats
+ *      the same work, making no forward progress on a large backlog.
+ *   2. Even a run that finishes cleanly only ever looked at getThreads(0, 500)
+ *      -- always the SAME top 500 threads by Gmail's ordering for a label,
+ *      since a thread only leaves that list once its label is actually
+ *      removed. Any thread left alone (real draft still exists, or already
+ *      answered) keeps the label and reappears at the same position on every
+ *      future run, permanently blocking anything sitting further back if the
+ *      true backlog is larger than one batch.
+ * Fix for both: a persisted offset (RECONCILE_OFFSET_PROPERTY, in
+ * PropertiesService -- survives across runs the same way
+ * NO_DECLINE_VARIATION_INDEX already does elsewhere in this project) plus a
+ * RUNTIME_BUDGET_MS check inside the loop, same pattern runReplyDrafter
+ * already uses for the same reason. The offset advances by however many
+ * threads were ACTUALLY examined this run (not the full batch size, if the
+ * time budget cut it short), and wraps back to 0 once a batch comes back
+ * shorter than requested -- that's the signal there was nothing left after
+ * it, so the next run starts a fresh pass over the label (picking up
+ * anything newly created since, too).
  */
+
+const RECONCILE_BATCH_SIZE = 500; // Gmail label listing fetched per run
+const RECONCILE_RUNTIME_BUDGET_MS = 5 * 60 * 1000; // 5 min, leaving a 1-min buffer before the 6-min hard limit
+const RECONCILE_OFFSET_PROPERTY = 'RECONCILE_MISSING_DRAFTS_NEXT_OFFSET';
 
 function reconcileMissingDrafts() {
   // ADDED (22 Aug 2026, per direct request -- "shouldn't this be on a
@@ -100,13 +130,18 @@ function reconcileMissingDrafts() {
     GmailApp.getUserLabelByName(CONFIG.LABEL_NEEDS_ROUTING)
   ].filter(l => l !== null);
 
-  const threads = labelDrafted.getThreads(0, 500);
+  // RESUMABLE (27 Aug 2026, real incident -- see header comment): start where
+  // the previous run left off, not always at 0, so a backlog bigger than one
+  // batch actually gets covered across multiple runs instead of the same top
+  // 500 threads being re-examined forever.
+  const startOffset = Number(PropertiesService.getScriptProperties().getProperty(RECONCILE_OFFSET_PROPERTY)) || 0;
+  const threads = labelDrafted.getThreads(startOffset, RECONCILE_BATCH_SIZE);
   // DIAGNOSTIC (27 Aug 2026, same request): the ONLY other log line between
   // here and the final summary was the "could not find AI-Drafted-..." early
   // exit -- a real run over hundreds of threads (each forcing a full
   // thread.getMessages() body fetch, not just cheap metadata) printed nothing
   // at all for however long that took. Same blind spot as the lock wait above.
-  Logger.log('reconcileMissingDrafts -- found ' + threads.length + ' thread(s) labeled AI-Drafted-PendingReview to check.');
+  Logger.log('reconcileMissingDrafts -- found ' + threads.length + ' thread(s) labeled AI-Drafted-PendingReview to check, starting at offset ' + startOffset + '.');
 
   // FIX (27 Aug 2026, real risk found in review): draftAlreadyExistsFor's own
   // header comment claimed this call site checks "one lead in isolation, not
@@ -123,8 +158,35 @@ function reconcileMissingDrafts() {
   let leftAlone = 0;
   let couldNotParse = 0;
   let alreadyAnswered = 0;
+  let examined = 0; // BATCHED (27 Aug 2026): threads actually looked at this run -- may be less than threads.length if the time budget below cuts the run short
+  const runStartTime = Date.now();
+  let stoppedEarly = false;
 
-  threads.forEach((thread, i) => {
+  for (let i = 0; i < threads.length; i++) {
+    // TIME BUDGET (27 Aug 2026, real incident -- see header comment): stop
+    // cleanly BEFORE Apps Script's own ~6-minute limit kills the execution
+    // outright. A platform kill never reaches the summary log or saves
+    // progress; stopping here does both, and the offset save below picks up
+    // exactly where this run left off instead of repeating it.
+    if (Date.now() - runStartTime > RECONCILE_RUNTIME_BUDGET_MS) {
+      Logger.log('reconcileMissingDrafts -- approaching the execution time limit, stopping cleanly at ' +
+        examined + '/' + threads.length + ' examined this run. The next run will resume from offset ' + (startOffset + examined) + '.');
+      stoppedEarly = true;
+      break;
+    }
+    // Same reasoning as runReplyDrafter's mid-run check: recordGmailQuotaUsage_
+    // below can flip this to true partway through a long batch, and every
+    // remaining iteration still costs a real Gmail read otherwise.
+    if (isGmailQuotaExhausted()) {
+      Logger.log('reconcileMissingDrafts -- Gmail quota marked exhausted mid-run, stopping cleanly at ' +
+        examined + '/' + threads.length + ' examined this run. The next run will resume from offset ' + (startOffset + examined) + '.');
+      stoppedEarly = true;
+      break;
+    }
+
+    const thread = threads[i];
+    examined++;
+
     // DIAGNOSTIC (27 Aug 2026, same request): progress every 25 threads --
     // the loop had no output at all between the "found N threads" line above
     // and the final summary, regardless of N. On a full 500-thread run that
@@ -137,7 +199,7 @@ function reconcileMissingDrafts() {
     const isOptOut = thread.getLabels().some(l => l.getName() === CONFIG.LABEL_STOP);
     if (isOptOut) {
       leftAlone++;
-      return;
+      continue;
     }
 
     // SELF-TRACKED QUOTA COUNTER (22 Aug 2026, per direct request): see the
@@ -149,14 +211,14 @@ function reconcileMissingDrafts() {
 
     if (!forwardInfo) {
       couldNotParse++;
-      return;
+      continue;
     }
 
     const hasLiveDraft = draftAlreadyExistsFor(forwardInfo.email, existingDrafts);
 
     if (hasLiveDraft) {
       leftAlone++;
-      return;
+      continue;
     }
 
     // FIX (20 Aug 2026, real incident -- Tomás/Joana flagged live: AI
@@ -173,7 +235,7 @@ function reconcileMissingDrafts() {
     // reply to the lead before assuming "phantom label."
     if (hasSentReplyToLead_(thread, forwardInfo.email)) {
       alreadyAnswered++;
-      return;
+      continue;
     }
 
     thread.removeLabel(labelDrafted);
@@ -190,14 +252,27 @@ function reconcileMissingDrafts() {
     // instead of only as a number that went up somewhere in the run.
     Logger.log('reconcileMissingDrafts -- RECONCILED (phantom label cleared, will be reprocessed): ' +
       forwardInfo.email + ' -- ' + thread.getFirstMessageSubject());
-  });
+  }
+
+  // BATCHED + RESUMABLE (27 Aug 2026, see header comment): a batch shorter
+  // than requested (and not cut short by the time/quota checks above) means
+  // there was nothing left after it -- wrap back to 0 so the next run starts
+  // a fresh pass over the label instead of an offset that no longer points
+  // anywhere useful. Otherwise, advance by exactly how many were actually
+  // examined (which can be less than the full batch if this run stopped early).
+  const reachedEndOfLabel = !stoppedEarly && threads.length < RECONCILE_BATCH_SIZE;
+  const nextOffset = reachedEndOfLabel ? 0 : startOffset + examined;
+  PropertiesService.getScriptProperties().setProperty(RECONCILE_OFFSET_PROPERTY, String(nextOffset));
 
   Logger.log(
-    'Reconciliation complete. ' +
+    'Reconciliation complete (examined ' + examined + ' of ' + threads.length + ' fetched, starting at offset ' + startOffset + '). ' +
     reconciled + ' phantom-labeled threads cleared (will be reprocessed next run). ' +
     leftAlone + ' threads left alone (real draft confirmed to still exist). ' +
     alreadyAnswered + ' threads left alone (already genuinely answered, not phantom). ' +
-    couldNotParse + ' threads skipped (could not parse lead email, left untouched).'
+    couldNotParse + ' threads skipped (could not parse lead email, left untouched). ' +
+    (reachedEndOfLabel
+      ? 'Reached the end of the label -- next run starts a fresh pass from offset 0.'
+      : 'Next run resumes from offset ' + nextOffset + '.')
   );
   } catch (e) {
     // FIX (27 Aug 2026, real risk found in review): no path here could ever
