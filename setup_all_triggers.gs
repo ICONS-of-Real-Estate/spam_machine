@@ -5,10 +5,11 @@
  * ---------------------------------------------------------------------------
  * Deletes any existing trigger for these same functions first (so running
  * this twice doesn't create duplicates), then creates:
- *   - runReplyDrafter          -- TEMPORARILY every 5 minutes weekdays as of
- *     27 Aug 2026 (back down from 15, per direct request, while chasing the
- *     unparseable-forward-info rate -- revert to 15 once fixed), effectively
- *     ~3x/hour on weekends. The weekend throttle is a code-level check in
+ *   - runReplyDrafter          -- every 15 minutes weekdays, effectively
+ *     hourly on weekends (dropped to 5 min for a few hours on 27 Aug 2026
+ *     while chasing the unparseable-forward-info rate, reverted back to 15
+ *     the same day once the parser fix was confirmed live -- see the note
+ *     at the trigger below). The weekend throttle is a code-level check in
  *     runReplyDrafter() itself, not a second trigger; see the note there
  *     and at the trigger below for why.
  *   - runLearningLoop          -- weekly (Saturday -- moved off daily 22 Aug 2026,
@@ -93,28 +94,22 @@ function setupAllTriggers() {
   // get drafted, trivial next to how long a human takes to review a batch
   // anyway. 15 is one of Apps Script's supported interval steps (1/5/10/15/30).
   //
-  // BACK DOWN to 5 minutes -- TEMPORARY (27 Aug 2026, per direct request):
-  // chasing the 7-of-14 "could not parse forwarded lead info" rate seen this
-  // morning (see the new DIAGNOSTIC body-snippet log added the same day in
-  // Code.gs's runReplyDrafterInner). Faster firing means faster turnaround on
-  // seeing what those unparseable bodies actually look like, not a change in
-  // drafting behavior. REVERT to everyMinutes(15) once the parser fix lands
-  // and the false-negative rate is confirmed back down -- the 23 Aug
-  // reasoning above (wasted calls on a capped-out folder) still applies once
-  // this is no longer actively being debugged.
-  //
-  // WEEKEND THROTTLE (23 Aug 2026, same request as the original 15-min slow-
-  // down): runReplyDrafter() itself checks the day and, on Sat/Sun, keeps
-  // only the firing landing in each hour's first 15-minute window (minute <
-  // 15), no-oping the rest. At a 5-minute interval that now lets 3 firings
-  // through per hour instead of 1 -- still throttled well below the weekday
-  // rate, just less so than at 15 minutes. Left as-is rather than tightened
-  // further, since this whole interval change is temporary.
+  // TEMPORARILY dropped to 5 minutes on 27 Aug 2026 while chasing the
+  // 7-of-14 "could not parse forwarded lead info" rate that morning (see the
+  // DIAGNOSTIC body-snippet logging added the same day in Code.gs's
+  // runReplyDrafterInner, and the CRLF/NFKC/nested-quote/network-list-relay
+  // fixes and the gs_tests/ regression suite that came out of it). REVERTED
+  // back to 15 the same day once the parser fix was confirmed live (Flavia,
+  // Spencer, Roberta, Doug, Maria all drafting successfully) -- the 23 Aug
+  // reasoning above (wasted calls on a capped-out folder) applies again now
+  // that this isn't actively being debugged. Only Jennifer's thread remains
+  // unresolved, and that's a genuinely empty message body, not a parser gap
+  // -- see gs_tests/run_tests.js, which pins that case to null on purpose.
   ScriptApp.newTrigger('runReplyDrafter')
     .timeBased()
-    .everyMinutes(5)
+    .everyMinutes(15)
     .create();
-  Logger.log('Created: runReplyDrafter, every 5 minutes (TEMPORARY, interval, no fixed clock time) -- revert to 15 once the unparseable-forward-info issue is fixed.');
+  Logger.log('Created: runReplyDrafter, every 15 minutes (interval, no fixed clock time).');
 
   // MOVED off daily to weekly (22 Aug 2026, per direct request): maildoso
   // outreach only sends on weekdays, so this and runMissedLeadsAudit were
