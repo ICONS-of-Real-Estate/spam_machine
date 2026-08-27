@@ -15,8 +15,9 @@
  *   - runLearningLoop          -- weekly (Saturday -- moved off daily 22 Aug 2026,
  *     see note at the trigger below)
  *   - generateSopSuggestions   -- daily (~6 PM Pacific -- see timezone note below)
- *   - runMissedLeadsAudit      -- weekly (Sunday -- moved off daily 22 Aug 2026,
- *     see note at the trigger below)
+ *   - runMissedLeadsAudit      -- daily (8 AM -- moved back from weekly 28 Aug
+ *     2026 after a same-day miss sat undetected for hours; see note at the
+ *     trigger below)
  *   - runLeadFollowUpCycle     -- daily (6 AM Europe/Paris -- batch ready before Goodness starts)
  *   - summarizeFollowUpLearning -- daily (8 PM Europe/Paris -- turns the day's edits into SOP suggestions)
  *   - runDailyReport           -- daily (emails Kris, Tomas, Joana)
@@ -150,21 +151,25 @@ function setupAllTriggers() {
     .create();
   Logger.log('Created: generateSopSuggestions, daily around 3 AM ' + TZ + ' (~6 PM Pacific the previous day).');
 
-  // MOVED off daily to weekly (22 Aug 2026, per direct request -- same
-  // quota reasoning as runLearningLoop above: maildoso only sends weekdays,
-  // so there's no new-outreach reason to re-check for missed leads every
-  // single day). Its own dedup (alreadyLogged, keyed by Thread ID already in
-  // the "Missed Leads Audit" tab) already makes runs cumulative, and its
-  // 14-day lookback comfortably covers the week between Sundays. Put on
-  // Sunday rather than doubling up with runWeekendDeepMissedLeadsAudit's
-  // Saturday run, so the two heaviest weekly Gmail-quota jobs aren't
-  // competing for the same day's budget.
+  // MOVED BACK to daily (28 Aug 2026, real incident): a genuine first-time
+  // interested lead (Krista) sat unread and undrafted for 7+ hours before
+  // being found by a manual inbox check -- the exact gap this audit exists
+  // to catch, and a weekly Sunday cadence means a same-day miss like that
+  // one could sit undiscovered for up to 6 days. The 22 Aug move to weekly
+  // was a quota optimization based on "no new outreach on weekends," but
+  // that reasoning only ever applied to catching NEW misses over a
+  // weekend -- a miss from Tuesday still shouldn't have to wait until
+  // Sunday to surface. Its own dedup (alreadyLogged, keyed by Thread ID
+  // already in the "Missed Leads Audit" tab) already makes runs cumulative
+  // and idempotent, so daily just means "find out same-day" instead of
+  // "find out up to 6 days later," not any duplicate work. Kept at 8 AM,
+  // same slot as before, ahead of the day's Gmail-quota-heavier jobs.
   ScriptApp.newTrigger('runMissedLeadsAudit')
     .timeBased()
-    .onWeekDay(ScriptApp.WeekDay.SUNDAY)
+    .everyDays(1)
     .atHour(8)
     .create();
-  Logger.log('Created: runMissedLeadsAudit, weekly on Sunday around 8 AM ' + TZ + '.');
+  Logger.log('Created: runMissedLeadsAudit, daily around 8 AM ' + TZ + '.');
 
   // 6 AM so the day's batch of ~100 follow-up drafts is READY before Goodness
   // starts her European workday, rather than drafting right as she sits down.

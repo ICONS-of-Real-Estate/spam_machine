@@ -56,7 +56,7 @@ A **Google Apps Script** project (V8, `Europe/Paris`) running inside **Joana's G
 | `Code.gs` | Core: CONFIG, `runReplyDrafter`, classify/draft, state/show match, labels, draft creation, emoji/HTML, SOP fetch+cache | 15 min |
 | `lead_followup_sequences.gs` | Follow-up engine: two cadences, register/advance, caps, decline detect, wipes, `classifyAndDraftFollowUp`, `summarizeFollowUpLearning`, `runLeadFollowUpCycle` | daily 6 AM |
 | `learning_loop.gs` | `runLearningLoop` (sent-vs-draft → Learning Log), `generateSopSuggestions` | weekly Sat / daily 3 AM |
-| `missed_leads_audit.gs` | `runMissedLeadsAudit`, `runWeekendDeepMissedLeadsAudit` (180d) | weekly Sun + weekly Sat |
+| `missed_leads_audit.gs` | `runMissedLeadsAudit`, `runWeekendDeepMissedLeadsAudit` (180d) | daily 8 AM + weekly Sat |
 | `daily_report.gs` | `runDailyReport` → emails Kris/Tomás/Joana | daily 7 AM |
 | `heartbeat_and_trigger_healthcheck.gs` | `runHeartbeatCheck` (3h-stale alert), `runTriggerHealthCheck` | hourly / daily |
 | `quota_guard_and_alerting.gs` | Quota circuit breaker + `sendOpsAlert` (MailApp, separate quota) | library |
@@ -87,7 +87,7 @@ on four of nine rows. What follows is read off the code, not memory.
 | `runReplyDrafter` | every 15 min (weekends: the function self-throttles to roughly hourly) |
 | `runLearningLoop` | weekly Sat 9 AM |
 | `generateSopSuggestions` | daily 3 AM |
-| `runMissedLeadsAudit` | weekly Sun 8 AM |
+| `runMissedLeadsAudit` | daily 8 AM |
 | `runLeadFollowUpCycle` | daily 6 AM |
 | `summarizeFollowUpLearning` | daily 8 PM |
 | `runDailyReport` | daily 7 AM |
