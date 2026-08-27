@@ -2317,7 +2317,15 @@ function extractForwardedLeadInfo(message) {
   // addresses (since Joana's own quoted lines also match this pattern).
   const lines = body.split('\n');
   for (let i = 0; i < lines.length; i++) {
-    const trimmedLine = lines[i].trim();
+    // STRIP LEADING QUOTE MARKERS (27 Aug 2026, real incident -- Flavia's
+    // thread, found via the full-body "wrote"-line diagnostic): a quote
+    // nested two levels deep -- Joana's reply, quoting the alias's forward,
+    // quoting Flavia's own original message -- prefixes that innermost line
+    // with "> ". trim() alone never removes that, so the real lead's own
+    // attribution line was silently failing the "^On " anchor below every
+    // time, while the alias's OWN (unwanted) attribution line, one level
+    // shallower with no "> " prefix, was the only one ever tested cleanly.
+    const trimmedLine = lines[i].trim().replace(/^(>\s*)+/, '');
 
     // FIX (13 Aug 2026): some clients word-wrap right before "wrote:", pushing
     // it onto its own line -- e.g. "On Wed, Aug 12 ... <email>\nwrote:". A
@@ -2325,14 +2333,37 @@ function extractForwardedLeadInfo(message) {
     // real failures (Martha, Karlie) after the initial fallback still missed
     // them. Merge a lone "wrote:" continuation line back onto the line above
     // before testing, without consuming the next loop iteration.
+    //
+    // WIDENED 27 Aug 2026 (Flavia's thread, same diagnostic): the old merge
+    // only fired when the NEXT line was bare "wrote:" with nothing else on
+    // it. This mail client instead wraps as "On <date>\n[<email>] wrote:" --
+    // the whole attribution, not just the word "wrote:", on the second line.
+    // Merging whenever the (quote-stripped) next line ends in "wrote:",
+    // regardless of what else is on it, covers both shapes with one check.
     let line = trimmedLine;
-    if (!/wrote:\s*$/i.test(line) && i + 1 < lines.length && /^wrote:\s*$/i.test(lines[i + 1].trim())) {
-      line = line + ' ' + lines[i + 1].trim();
+    if (!/wrote:\s*$/i.test(line) && i + 1 < lines.length) {
+      const nextLine = lines[i + 1].trim().replace(/^(>\s*)+/, '');
+      if (/wrote:\s*$/i.test(nextLine)) {
+        line = (line + ' ' + nextLine).trim();
+      }
     }
 
-    if (!/^On .+wrote:\s*$/i.test(line)) continue;
+    // RELAXED (27 Aug 2026, real incident -- Flavia's thread): originally
+    // required the line to also START with "On " -- but once nested deep
+    // enough, this mail client's plain-text quoting drops the "On <date>"
+    // preamble from the innermost attribution line entirely, rendering it
+    // as just "[flavia@vestapreferred.com] wrote:". "wrote:" at the end is
+    // the one signal that has held across every real variant seen so far
+    // (plain, word-wrapped, and this bracketed-nested case) --
+    // isUnmailableAsLead_ below is what actually keeps this safe, same as
+    // it always has, regardless of how loose the line match is.
+    if (!/wrote:\s*$/i.test(line)) continue;
 
-    const emailMatch = line.match(/([^\s<>]+@[^\s<>,]+)/);
+    // EXCLUDE BRACKETS TOO (27 Aug 2026, same incident): this client renders
+    // a quoted address as "[email@domain.com]", not "<email@domain.com>" --
+    // the old character classes only excluded angle brackets, so the closing
+    // "]" was captured as part of the address itself.
+    const emailMatch = line.match(/([^\s<>\[\]]+@[^\s<>,\[\]]+)/);
     if (!emailMatch) continue;
 
     const candidateEmail = emailMatch[1].toLowerCase().trim();
