@@ -1282,27 +1282,55 @@ function runReplyDrafterInner() {
           originalSubjectFromForward = forwardInfo.originalSubject;
         }
 
-        let examinedPriorMsg = null; // DIAGNOSTIC: the message the walk actually stopped at, if any
+        let examinedPriorMsg = null; // DIAGNOSTIC: the newest prior message the walk actually examined
         // Walk back from lastMsg's OWN position, not the array's end --
         // lastNonDraftMessage_ can return an earlier message than the last
         // array element when the true last message is a draft, and starting
         // from the array end in that case would skip right past it.
+        //
+        // FIX (27 Aug 2026 refactor -- "stops prematurely"): this used to
+        // `break` unconditionally after examining the first non-relay
+        // message, so if THAT message happened to yield nothing (a send with
+        // the lead on Cc rather than To, an alias-to-alias hop, a bounce
+        // robot), the whole walk gave up while the real lead sat one message
+        // further back. The loop now keeps walking until a lead is actually
+        // found or the thread runs out. Every branch resolves through the
+        // same gates as everywhere else, so walking further can surface a
+        // real lead but never a bad recipient.
+        // `!leadEmail` in the guard, not just the `break` at the bottom: when
+        // the body parse above already succeeded (Maria's shape), entering
+        // this loop at all would reassign leadEmail from the prior message
+        // -- possibly to null -- and throw away the correct answer before the
+        // break was ever reached.
         for (let i = messages.indexOf(lastMsg) - 1; !leadEmail && i >= 0; i--) {
           const priorSenderEmail = extractEmail(messages[i].getFrom());
           if (CONFIG.REQUIRED_CC_ADDRESSES.some(addr => addr.toLowerCase() === priorSenderEmail.toLowerCase())) continue;
 
-          examinedPriorMsg = messages[i];
+          if (!examinedPriorMsg) examinedPriorMsg = messages[i];
+
           if (isInternal(priorSenderEmail)) {
             // Joana's own genuine send -- the real lead is whoever she
-            // actually sent it to, read straight from the envelope. No
-            // forward-header parsing needed; there's nothing forwarded here.
-            leadEmail = extractExternalLeadFromRecipientList_(messages[i].getTo());
-          } else if (!isForwardedFromSendingAlias_(messages[i], priorSenderEmail)) {
+            // actually sent it to, read straight from the envelope. Cc is
+            // checked as well as To: a lead CC'd rather than To'd used to be
+            // invisible here and ended the walk empty-handed.
+            leadEmail = firstMailableLeadIn_(
+              extractAllEmailsFrom_(messages[i].getTo()).concat(extractAllEmailsFrom_(messages[i].getCc()))
+            );
+          } else if (isForwardedFromSendingAlias_(messages[i], priorSenderEmail)) {
+            // An alias forward sitting behind the relay copy -- its body is
+            // the normal Maildoso shape, so parse it rather than skipping it.
+            const priorInfo = extractForwardedLeadInfo(messages[i]);
+            if (priorInfo) {
+              leadEmail = priorInfo.email;
+              if (!originalSubjectFromForward) originalSubjectFromForward = priorInfo.originalSubject;
+            }
+          } else {
             // The lead replying directly, one message further back -- same
             // 13 Aug shortcut as above, just applied one step earlier.
-            leadEmail = priorSenderEmail;
+            leadEmail = firstMailableLeadIn_([priorSenderEmail]);
           }
-          break;
+
+          if (leadEmail) break;
         }
         if (!leadEmail) {
           skipCache[threadId] = { reason: 'network-list-relay message with no resolvable prior sender/recipient', lastCheckedAt: new Date(), messageCount: messages.length };
@@ -1328,6 +1356,24 @@ function runReplyDrafterInner() {
       } else {
         const forwardInfo = extractForwardedLeadInfo(lastMsg);
         if (!forwardInfo) {
+          // BOUNCE CHECK FIRST (27 Aug 2026 refactor): extractForwardedLeadInfo
+          // now rejects non-human addresses internally (firstMailableLeadIn_),
+          // which is correct -- but it means a delivery-failure thread comes
+          // back as a bare null, indistinguishable from a body we genuinely
+          // cannot read. Before this check, the six live mailer-daemon threads
+          // would have started logging an 800-char body dump every 6 hours and
+          // counting as parse failures, hiding the real unparseable rate behind
+          // six threads that are being handled exactly right. Naming the bounce
+          // explicitly keeps the operator-facing signal the old flow had.
+          const bounceSender = [extractEmail(lastMsg.getFrom())]
+            .concat(extractAllEmailsFrom_((parseForwardHeaderBlock_(normalizeMessageBody_(lastMsg.getPlainBody())) || {}).from))
+            .find(e => e && isNonHumanSender(e));
+          if (bounceSender) {
+            skipCache[threadId] = { reason: 'lead email looks like a bounce/system address (' + bounceSender + '), not a real lead', lastCheckedAt: new Date(), messageCount: messages.length };
+            Logger.log('DIAGNOSTIC -- skipped (bounce/system address ' + bounceSender + ' -- delivery failure, not a real lead), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
+            continue;
+          }
+
           skipCache[threadId] = { reason: 'could not parse forwarded lead info', lastCheckedAt: new Date(), messageCount: messages.length };
           // DIAGNOSTIC (27 Aug 2026, added per direct request after a run came
           // back 7-of-14 unparseable in one morning): "could not parse" alone
@@ -1953,9 +1999,125 @@ function getOrCreateTrackingLabel_(name) {
   }
 }
 
+// ---------- SHARED QUOTE/EMAIL PARSING PRIMITIVES ----------
+// REFACTOR (27 Aug 2026): every parsing bug fixed over the last two days --
+// CRLF line endings, NFKC lookalike characters, nested "> " quote markers,
+// "[email]" bracket rendering, dropped "On <date>" preambles -- was fixed
+// in ONE call path while the same defect stayed live in the others, because
+// each path had its own inline copy of the same string handling. These
+// primitives exist so a fix lands once. Do not re-inline them.
+
+// Any run of ">" with optional surrounding spaces at the start of a line.
+// Gmail/Outlook/Apple Mail all use this for quote depth; depth is arbitrary
+// (">", "> >", ">>", ">> >") and NONE of it survives a plain .trim().
+const QUOTE_MARKER_RE = /^(?:\s*>)+\s?/;
+
+function stripQuoteMarkers_(line) {
+  return String(line == null ? '' : line).replace(QUOTE_MARKER_RE, '').trim();
+}
+
+// Forward / original-message separators, by client. Gmail writes
+// "---------- Forwarded message ---------", Outlook "-----Original
+// Message-----", Apple Mail "Begin forwarded message:". Only Gmail's was
+// ever recognized, so an Outlook- or Apple-forwarded thread fell straight
+// through to the body scan with its header block unread.
+const FORWARD_SEPARATOR_RE = /-{2,}\s*(?:Forwarded message|Original Message)\s*-{2,}|Begin forwarded message:/i;
+
+// A practical address matcher. Character classes are INCLUSIVE rather than
+// exclusive, so every wrapper this project has hit -- <angle>, [square],
+// (paren), "quoted", mailto:, trailing commas/semicolons/colons -- falls
+// outside the match automatically instead of needing its own exclusion.
+const EMAIL_TOKEN_RE = /[A-Za-z0-9._%+\-']+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}/g;
+
+function extractAllEmailsFrom_(text) {
+  if (!text) return [];
+  // Fresh regex per call: EMAIL_TOKEN_RE is /g and carries lastIndex state
+  // between calls, which silently skips matches on every other invocation.
+  const matches = String(text).match(new RegExp(EMAIL_TOKEN_RE.source, 'g'));
+  return matches ? matches.map(e => e.toLowerCase().trim()) : [];
+}
+
+// CHANGED (27 Aug 2026 refactor): was `fromHeader.match(/<(.+?)>/)` with the
+// whole raw string as its fallback. Two failures came out of that: a
+// bracketed "[email]" never matched the angle-bracket capture, and a
+// comma-joined recipient list with no angle brackets returned the ENTIRE
+// list as if it were one address (the bug extractExternalLeadFromRecipientList_
+// was written to work around). Returns the first real address token instead,
+// or '' when there is none -- '' is the safe answer, since isUnmailableAsLead_
+// already treats a falsy address as unmailable, whereas the old garbage-string
+// fallback could flow onward as if it were a real recipient.
+// Contract is otherwise unchanged (lowercased, trimmed) -- 8 other .gs files
+// call this.
 function extractEmail(fromHeader) {
-  const match = fromHeader.match(/<(.+?)>/);
-  return (match ? match[1] : fromHeader).toLowerCase().trim();
+  if (!fromHeader) return '';
+  const raw = String(fromHeader);
+
+  // ANGLE BRACKETS WIN (27 Aug 2026 refactor -- caught in review, not live):
+  // RFC-style "Display Name <addr>" puts the REAL address in the brackets,
+  // and a display name can itself contain an address. Gmail renders every
+  // mailing-list message that way:
+  //   "joana@iconsofrealestate.com via Network" <network@ardorseo.com>
+  // A naive first-token scan returns joana@... there -- the display text --
+  // instead of network@..., which would have broken isNetworkListRelay and
+  // silently undone the relay handling this refactor exists to support.
+  // Bracketed form first, then any address anywhere.
+  const angled = raw.match(/<([^<>]*)>/);
+  if (angled) {
+    const inside = extractAllEmailsFrom_(angled[1]);
+    if (inside.length > 0) return inside[0];
+  }
+
+  const found = extractAllEmailsFrom_(raw);
+  return found.length > 0 ? found[0] : '';
+}
+
+// Normalization applied once, at every point a raw message body enters the
+// parsing pipeline. NFKC folds the Mathematical-Alphanumeric / fullwidth
+// lookalike characters some signature generators emit (confirmed on Maria's
+// signaturehound.com signature, where a styled "O" made "On ... wrote:"
+// unmatchable); the CR handling stops a CRLF body from defeating every
+// per-line `$`-anchored regex (confirmed on Flavia/Spencer/Roberta/Doug).
+function normalizeMessageBody_(rawBody) {
+  return String(rawBody == null ? '' : rawBody).normalize('NFKC').replace(/\r\n?/g, '\n');
+}
+
+// True for a quote-attribution line, across clients. The one signal that has
+// held across every real variant seen in this mailbox is a trailing "wrote:":
+//   Gmail   "On Mon, Aug 10, 2026 at 9:30 pm amy@x.com wrote:"
+//   Apple   "On Aug 10, 2026, at 9:30 AM, Amy <amy@x.com> wrote:"
+//   Yahoo   "On Monday, August 10, 2026, 09:30 AM EDT, Amy <amy@x.com> wrote:"
+//   nested  "[flavia@vestapreferred.com] wrote:"   <- no "On <date>" at all
+// Deliberately NOT anchored on a leading "On ": once nested deep enough this
+// client drops the date preamble entirely, and anchoring there is exactly
+// what hid Flavia's real lead line while matching the alias's line above it.
+//
+// But NOT a bare /wrote:$/ either (caught in review of this refactor, before
+// it shipped): extractProspectFreshReplyText uses this as the boundary where
+// the prospect's own words stop and quoted history begins. A lead who writes
+// "Here's the post I wrote:" ends a line in "wrote:" like any attribution
+// line, and a bare test would truncate their message right there and hand the
+// LLM a half-sentence to reply to. Requiring EITHER an "On " opener OR an
+// address on the line separates the two: every real attribution format has
+// one or the other, ordinary prose has neither.
+function isAttributionLine_(line) {
+  if (!/wrote:\s*$/i.test(line)) return false;
+  return /^On\s/i.test(line) || /@/.test(line);
+}
+
+// The one place "which of these addresses may we draft to" is decided.
+// Both gates matter and neither is optional: isUnmailableAsLead_ rejects our
+// own team/alias/list addresses (drafting there bounced a real send to
+// a.palmer@topaustinseo.site), isNonHumanSender rejects mailer-daemon and
+// friends (drafting there replies to Google's bounce robot).
+function firstMailableLeadIn_(candidates) {
+  for (let i = 0; i < candidates.length; i++) {
+    const e = String(candidates[i] || '').toLowerCase().trim();
+    if (!e || e.indexOf('@') === -1) continue;
+    if (isUnmailableAsLead_(e)) continue;
+    if (isNonHumanSender(e)) continue;
+    return e;
+  }
+  return null;
 }
 
 // See CONFIG.HOSTING_PHRASE_PATTERN / CONFIG.PODCAST_OR_SHOW_PATTERN for why
@@ -2002,7 +2164,14 @@ function isForwardedFromSendingAlias_(message, senderEmail) {
   const addressedToNetwork = CONFIG.REQUIRED_CC_ADDRESSES.some(addr => to.indexOf(addr.toLowerCase()) !== -1);
   if (!addressedToNetwork) return false;
 
-  return /-{3,}\s*Forwarded message\s*-{3,}/i.test(message.getPlainBody());
+  // FIX (27 Aug 2026 refactor): this carried its own inline copy of the
+  // Gmail-only separator regex, so an Outlook/Apple-forwarded alias message
+  // was not recognized as a forward at all and fell through to the 13 Aug
+  // "sender must be the lead" shortcut -- i.e. it would have been drafted TO
+  // the sending alias, the exact bounce this function exists to prevent.
+  // Shares FORWARD_SEPARATOR_RE now, and normalizes first so a CRLF body
+  // cannot defeat the match either.
+  return FORWARD_SEPARATOR_RE.test(normalizeMessageBody_(message.getPlainBody()));
 }
 
 // A lead address must be a real outside human: not the team, not a sending
@@ -2181,17 +2350,33 @@ function isRealTeamReply(email) {
 // where a lead's fresh words actually live, and recognizes the Outlook
 // "From:/Sent:/Subject:" quote-header shape as a boundary too, not just
 // Gmail's "On ... wrote:" and ">" prefixes.
+// FIX (27 Aug 2026 refactor): this had its own third copy of the quote-start
+// detection, and it carried the same blind spots the lead extractor just shed
+// -- it only recognized Gmail's "On ... wrote:" (anchored on a leading "On ")
+// and Gmail's forward separator. A "[email] wrote:" attribution or an
+// Outlook/Apple forward banner matched neither test, so the quoted history
+// below it was collected as if it were the prospect's own fresh words and
+// handed to the LLM as the message to reply to. Now shares
+// isAttributionLine_ / FORWARD_SEPARATOR_RE with every other path, and
+// normalizes the body first so CRLF/lookalike characters cannot defeat the
+// boundary detection here either.
 function extractProspectFreshReplyText(message) {
-  const body = message.getPlainBody();
+  const body = normalizeMessageBody_(message.getPlainBody());
   const lines = body.split('\n');
 
-  const QUOTE_START = /^(On .+wrote:\s*$|-{3,}\s*Forwarded message\s*-{3,}|From\s*:\s|Sent\s*:\s|Subject\s*:\s)/i;
+  const HEADER_START = /^(?:From|Sent|Subject|To|Cc)\s*:\s/i;
 
   const freshLines = [];
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
     if (trimmed.startsWith('>')) break;
-    if (QUOTE_START.test(trimmed)) break;
+    if (isAttributionLine_(trimmed)) break;
+    // Word-wrapped attribution: "On <date>" on this line, "wrote:" on the
+    // next. Neither half is an attribution alone, so without this lookahead
+    // the quoted history below would be collected as the prospect's own words.
+    if (/^On\s/i.test(trimmed) && i + 1 < lines.length && /wrote:\s*$/i.test(lines[i + 1].trim())) break;
+    if (FORWARD_SEPARATOR_RE.test(trimmed)) break;
+    if (HEADER_START.test(trimmed)) break;
     freshLines.push(lines[i]);
   }
   return freshLines.join('\n').trim();
@@ -2217,199 +2402,153 @@ function extractProspectFreshReplyText(message) {
 // assumptions the old regex carried (a long recipient list or an inserted
 // Cc/Reply-To line could push a real field past the old {0,200}/{0,400}
 // windows or past the old From/Date/Subject/To ordering).
+// REFACTORED (27 Aug 2026): three defects fixed together, all of which made
+// this return a truthy-but-useless {} that callers read as "header exists,
+// no From" and gave up on:
+//   1. Only Gmail's separator was recognized (see FORWARD_SEPARATOR_RE).
+//   2. Quote markers were never stripped, so a forward header nested inside
+//      a reply -- the normal shape on these threads, since the alias forward
+//      gets quoted again by the next reply -- failed every field match.
+//   3. The end-of-block test was `line.trim() === ''`, but inside a quoted
+//      block the blank separator line is "> ", never empty, so the loop ran
+//      past the header into body text instead of stopping at the boundary.
+// Returns null (not {}) when nothing usable parses, so callers can tell
+// "no header here" from "header with fields" without a truthiness trap.
 function parseForwardHeaderBlock_(body) {
-  const sepMatch = body.match(/-{3,}\s*Forwarded message\s*-{3,}/i);
+  const sepMatch = body.match(FORWARD_SEPARATOR_RE);
   if (!sepMatch) return null;
 
-  // The separator's own trailing newline becomes an empty first element
-  // when split below -- strip it first so the "blank line ends the header
-  // block" check further down doesn't fire immediately on that artifact
-  // instead of on a genuine blank line after the real header fields.
-  const afterSep = body.slice(sepMatch.index + sepMatch[0].length).replace(/^\r?\n+/, '').split('\n');
+  const afterSep = body.slice(sepMatch.index + sepMatch[0].length).replace(/^\n+/, '').split('\n');
   const header = {};
   let lastKey = null;
-  const MAX_HEADER_LINES = 20; // safety cap -- a real forward header block is a handful of lines
+  const MAX_HEADER_LINES = 25; // safety cap -- a real header block is a handful of lines
 
   for (let i = 0; i < afterSep.length && i < MAX_HEADER_LINES; i++) {
-    const line = afterSep[i];
-    if (line.trim() === '') break; // blank line -- end of header block, quoted body follows
+    const rawLine = afterSep[i];
+    const line = stripQuoteMarkers_(rawLine);
+    if (line === '') break; // end of header block (quote-marker-only lines included)
 
-    const m = line.match(/^\s*(From|Date|Subject|To|Cc|Reply-To)\s*:\s*(.*)$/i);
+    const m = line.match(/^(From|Date|Sent|Subject|To|Cc|Bcc|Reply-To)\s*:\s*(.*)$/i);
     if (m) {
-      const key = m[1].toLowerCase().replace('-', '');
+      // "Sent" is Outlook's spelling of "Date" -- normalized so downstream
+      // code has one field name to read regardless of which client forwarded.
+      const key = m[1].toLowerCase().replace('-', '') === 'sent' ? 'date' : m[1].toLowerCase().replace('-', '');
       if (!(key in header)) header[key] = m[2].trim();
       lastKey = key;
-    } else if (lastKey && /^\s+\S/.test(line)) {
+    } else if (lastKey && /^\s+\S/.test(rawLine.replace(QUOTE_MARKER_RE, ''))) {
       // a wrapped continuation of the previous header value (e.g. a long
       // recipient list), not a new field
-      header[lastKey] = (header[lastKey] + ' ' + line.trim()).trim();
+      header[lastKey] = (header[lastKey] + ' ' + line).trim();
     } else {
       break; // not a header line and not a continuation -- header block is over
     }
   }
 
-  return header;
+  return Object.keys(header).length > 0 ? header : null;
 }
 
+// REFACTORED (27 Aug 2026). Resolution order, most trustworthy signal first:
+//   1. A forward header block ("From:/To:") -- an explicit statement of who
+//      sent what to whom, so it beats anything inferred from body text.
+//   2. Quote-attribution lines ("... wrote:") innermost-last, filtered to a
+//      real outside human.
+// Deliberately NOT a third "any address anywhere in the body" pass: a
+// signature block or a quoted third party would match it, and drafting to a
+// plausible-but-wrong address is the exact failure this project has spent
+// two days undoing (a.palmer@topaustinseo.site bounced that way). Returning
+// null puts the thread in front of a human instead of guessing.
+//
+// Contract unchanged -- {email, originalSubject}|null -- 8 other .gs files
+// call this.
 function extractForwardedLeadInfo(message) {
-  // NORMALIZE (27 Aug 2026, real incident -- found via the new unparseable-
-  // body diagnostic in runReplyDrafterInner): parseForwardHeaderBlock_'s
-  // per-line field regex ends in `(.*)$`, and JS regex `.` never matches a
-  // bare CR -- so on a body using CRLF line endings, every header field line
-  // fails to match, the loop breaks on line 1, and parseForwardHeaderBlock_
-  // returns `{}` (truthy, but no usable `from`). Confirmed on four real
-  // threads (Flavia/Spencer/Roberta/Doug) that all have a clean, well-formed
-  // "From: joana@... / To: <real lead>" header -- exactly the shape the
-  // 27 Aug "lead is in the To: line" fix below exists to handle -- which
-  // then silently fell through to the "On ... wrote:" fallback and found
-  // nothing better than Joana's own quoted line. Normalizing once here,
-  // before either parser sees the body, is a no-op for the (more common)
-  // LF-only case and fixes both call paths at once.
-  //
-  // ALSO NORMALIZED (27 Aug 2026, same day, real incident -- Maria's thread):
-  // her quoted "wrote:" line failed `/^On .+wrote:\s*$/i` even though it
-  // reads correctly to a human. Confirmed cause: some external signature/bio
-  // tools (this lead's plain-text signature was generated by
-  // signaturehound.com, visible a few lines later in the same body) fake
-  // bold/styled text in plain-text output using Unicode's Mathematical
-  // Alphanumeric Symbols block or fullwidth-Latin lookalikes instead of
-  // plain ASCII -- e.g. a stylized "O" that is a different codepoint
-  // entirely, not the letter our regex is looking for, and renders as a
-  // near-invisible glyph in most log viewers/fonts, which is exactly the
-  // "missing O" seen in this diagnostic's own log output. NFKC normalization
-  // maps those compatibility variants back to plain ASCII and is a
-  // confirmed no-op on the emoji/curly-quotes/em-dashes these bodies
-  // otherwise legitimately contain -- same "normalize once, safely, at the
-  // one entry point" approach as the CRLF fix just above.
-  const body = message.getPlainBody().normalize('NFKC').replace(/\r\n?/g, '\n');
+  const body = normalizeMessageBody_(message.getPlainBody());
 
-  // Primary case: a real Gmail/Outlook "Forward" with a header block.
+  // ---- 1. Forward header block ----
   const header = parseForwardHeaderBlock_(body);
-  // Hoisted out of the `if` below (27 Aug 2026, real incident -- Flavia's
-  // thread) so the fallback scan further down can still credit a lead found
-  // there with the real original subject, instead of always reporting null
-  // just because a header block happened to exist but not resolve to a lead.
+  // Hoisted so the body scan below can still report the real original
+  // subject when a header block existed but named no usable lead.
   let originalSubjectFromHeader = null;
-  if (header && header.from) {
-    const fromEmail = extractEmail(header.from).toLowerCase().trim();
-    originalSubjectFromHeader = header.subject ? header.subject.trim() : null;
 
-    // FIX (27 Aug 2026, real incident): the forwarded block is not always a
-    // lead's INBOUND message. Two real shapes exist on these threads:
+  if (header) {
+    originalSubjectFromHeader = header.subject ? header.subject.trim() : null;
+    const fromEmail = extractEmail(header.from || '');
+
+    // The forwarded block is not always the lead's INBOUND message. Both
+    // shapes are real and routine on these threads:
     //
-    //   From: katie@beamanrealty.com          <- lead's reply, lead is the From
+    //   From: katie@beamanrealty.com        <- lead's reply; lead is the From
     //   To:   anna.wilson@reachpilotteam.com
     //
-    //   From: joana@iconsofrealestate.com     <- our OUTBOUND message, forwarded
-    //   To:   officerjenny77@gmail.com           back in; lead is the To
+    //   From: joana@iconsofrealestate.com   <- our OUTBOUND mail, forwarded
+    //   To:   officerjenny77@gmail.com         back in; lead is the To
     //
-    // Reading From unconditionally returned our own address on the second
-    // shape. Combined with the sending-alias bug (see
-    // CONFIG.FORWARDING_ALIAS_DOMAINS), that is how a draft ended up
-    // addressed to a.palmer@topaustinseo.site and bounced, while the real
-    // lead officerjenny77@gmail.com -- right there in the To: line -- got
-    // nothing. When the From is one of ours, the lead is the To.
-    if (isInternal(fromEmail) || isForwardingAlias(fromEmail)) {
-      if (header.to) {
-        const toEmail = extractEmail(header.to).toLowerCase().trim();
-        if (!isUnmailableAsLead_(toEmail)) {
-          return { email: toEmail, originalSubject: originalSubjectFromHeader };
-        }
-        // FIX (27 Aug 2026, real incident -- Flavia's thread, found via the
-        // unparseable-body diagnostic): the header's own To: can ALSO be one
-        // of our own alias domains -- confirmed on
-        // anna.wilson@reachpilotteam.com, a listed FORWARDING_ALIAS_DOMAINS
-        // entry -- meaning this isn't Joana's reply going straight to the
-        // lead, it's a Maildoso sending mailbox forwarding what IT received
-        // into network@. Giving up here used to lose the thread entirely,
-        // even though that alias's own exchange with the real lead is very
-        // likely quoted just below this header block. Don't return null --
-        // fall through to the "On ... wrote:" scan below instead, same as
-        // when there's no header at all.
+    // Reading From unconditionally returned OUR address on the second shape,
+    // which is how a draft went to a.palmer@topaustinseo.site and bounced
+    // while the real lead sat unanswered in the To: line.
+    const isOursSending = fromEmail && (isInternal(fromEmail) || isForwardingAlias(fromEmail));
+
+    if (isOursSending) {
+      // Lead should be the recipient. Check To: then Cc: -- Cc was never
+      // checked before, so a lead CC'd rather than To'd was invisible here.
+      const recipientLead = firstMailableLeadIn_(
+        extractAllEmailsFrom_(header.to).concat(extractAllEmailsFrom_(header.cc))
+      );
+      if (recipientLead) {
+        return { email: recipientLead, originalSubject: originalSubjectFromHeader };
       }
-      // Both ends of the header are ours (or there was no To: to check) --
-      // don't return the From here, that would draft a reply to ourselves.
-      // Fall through rather than returning null; the real lead may still be
-      // quoted further down in the body, same fallback path as "no header".
-    } else if (fromEmail.indexOf('@') !== -1) {
-      return { email: fromEmail, originalSubject: originalSubjectFromHeader };
+      // Both ends are ours -- an alias forwarding to another alias (Flavia's
+      // shape), or a purely internal forward. The real lead may still be
+      // quoted below, so fall through rather than returning null.
+    } else {
+      const senderLead = firstMailableLeadIn_([fromEmail]);
+      if (senderLead) {
+        return { email: senderLead, originalSubject: originalSubjectFromHeader };
+      }
+      // From: is present but unusable (a bounce robot, or an address that
+      // failed the mailable gate). Fall through to the body scan.
     }
   }
 
-  // FALLBACK (added 13 Aug 2026): no true forward header exists, OR one
-  // existed but didn't resolve to a real lead (see the alias-to-alias case
-  // just above) -- either way, this is a pasted/quoted reply chain to search
-  // instead (e.g. "On Mon, Aug 10, 2026 at 9:30 pm
-  // amy@kwlifestyleproperties.com wrote:"). Diagnosed after a full run found
-  // 144/144 genuine unanswered leads failing to parse via the primary regex
-  // alone -- meaning this fallback path is not an edge case, it is the
-  // dominant real-world format. Pull the email off the most recent
-  // "On ... wrote:" line, skipping any that belong to internal team
-  // addresses (since Joana's own quoted lines also match this pattern).
+  // ---- 2. Quote-attribution scan ----
+  // Not an edge case: a 13 Aug sweep found 144/144 genuine unanswered leads
+  // arriving with no parseable forward header at all, so this path carries
+  // most real traffic.
+  //
+  // Walked TOP-DOWN, i.e. newest quoted message first. A quote chain reads
+  // outermost-newest at the top, so the first line that names a real outside
+  // human is the most recent external correspondent -- the person actually
+  // writing to us, which is who a reply belongs to. (Verified by mutation
+  // test: reversing this direction changes no current result, because
+  // firstMailableLeadIn_ rejects our own addresses wherever they sit in the
+  // chain. It only matters when TWO different outsiders appear at different
+  // depths -- a referral or a forwarded colleague -- and there the newest is
+  // the right answer, so the direction is pinned by test rather than left to
+  // chance.)
   const lines = body.split('\n');
   for (let i = 0; i < lines.length; i++) {
-    // STRIP LEADING QUOTE MARKERS (27 Aug 2026, real incident -- Flavia's
-    // thread, found via the full-body "wrote"-line diagnostic): a quote
-    // nested two levels deep -- Joana's reply, quoting the alias's forward,
-    // quoting Flavia's own original message -- prefixes that innermost line
-    // with "> ". trim() alone never removes that, so the real lead's own
-    // attribution line was silently failing the "^On " anchor below every
-    // time, while the alias's OWN (unwanted) attribution line, one level
-    // shallower with no "> " prefix, was the only one ever tested cleanly.
-    const trimmedLine = lines[i].trim().replace(/^(>\s*)+/, '');
+    let line = stripQuoteMarkers_(lines[i]);
+    if (!line) continue;
 
-    // FIX (13 Aug 2026): some clients word-wrap right before "wrote:", pushing
-    // it onto its own line -- e.g. "On Wed, Aug 12 ... <email>\nwrote:". A
-    // per-line-only regex never matches either line alone. Confirmed on two
-    // real failures (Martha, Karlie) after the initial fallback still missed
-    // them. Merge a lone "wrote:" continuation line back onto the line above
-    // before testing, without consuming the next loop iteration.
-    //
-    // WIDENED 27 Aug 2026 (Flavia's thread, same diagnostic): the old merge
-    // only fired when the NEXT line was bare "wrote:" with nothing else on
-    // it. This mail client instead wraps as "On <date>\n[<email>] wrote:" --
-    // the whole attribution, not just the word "wrote:", on the second line.
-    // Merging whenever the (quote-stripped) next line ends in "wrote:",
-    // regardless of what else is on it, covers both shapes with one check.
-    let line = trimmedLine;
-    if (!/wrote:\s*$/i.test(line) && i + 1 < lines.length) {
-      const nextLine = lines[i + 1].trim().replace(/^(>\s*)+/, '');
-      if (/wrote:\s*$/i.test(nextLine)) {
-        line = (line + ' ' + nextLine).trim();
-      }
+    // Some clients wrap immediately before "wrote:", leaving the attribution
+    // split across two lines -- either as a bare "wrote:" continuation, or
+    // as "On <date>" / "[<email>] wrote:". Join with the NEXT line (still
+    // quote-stripped) so both shapes are tested whole. Scanning bottom-up,
+    // the continuation has already been passed, so this looks forward.
+    if (!isAttributionLine_(line) && i + 1 < lines.length) {
+      const next = stripQuoteMarkers_(lines[i + 1]);
+      // Continuation test is the LOOSE one (does the next line merely END the
+      // attribution?) -- a bare "wrote:" continuation has neither an "On "
+      // opener nor an address, so testing it with the strict isAttributionLine_
+      // would refuse to join and lose the address sitting on the line above.
+      // The JOINED result is then validated strictly, below.
+      if (next && /wrote:\s*$/i.test(next)) line = (line + ' ' + next).trim();
     }
+    if (!isAttributionLine_(line)) continue;
 
-    // RELAXED (27 Aug 2026, real incident -- Flavia's thread): originally
-    // required the line to also START with "On " -- but once nested deep
-    // enough, this mail client's plain-text quoting drops the "On <date>"
-    // preamble from the innermost attribution line entirely, rendering it
-    // as just "[flavia@vestapreferred.com] wrote:". "wrote:" at the end is
-    // the one signal that has held across every real variant seen so far
-    // (plain, word-wrapped, and this bracketed-nested case) --
-    // isUnmailableAsLead_ below is what actually keeps this safe, same as
-    // it always has, regardless of how loose the line match is.
-    if (!/wrote:\s*$/i.test(line)) continue;
-
-    // EXCLUDE BRACKETS TOO (27 Aug 2026, same incident): this client renders
-    // a quoted address as "[email@domain.com]", not "<email@domain.com>" --
-    // the old character classes only excluded angle brackets, so the closing
-    // "]" was captured as part of the address itself.
-    const emailMatch = line.match(/([^\s<>\[\]]+@[^\s<>,\[\]]+)/);
-    if (!emailMatch) continue;
-
-    const candidateEmail = emailMatch[1].toLowerCase().trim();
-    // Skip our own quoted lines -- Joana/Sean's (isInternal) and, since
-    // 27 Aug 2026, the Maildoso sending aliases, whose "On ... wrote:" lines
-    // match this pattern just as readily and are never the lead.
-    if (isUnmailableAsLead_(candidateEmail)) continue;
-
-    return {
-      email: candidateEmail,
-      // Prefer the real original subject if a header block earlier in this
-      // same body gave us one (the alias-to-alias case above) -- otherwise
-      // null, and the caller already falls back to `subject` when this is null.
-      originalSubject: originalSubjectFromHeader
-    };
+    const lead = firstMailableLeadIn_(extractAllEmailsFrom_(line));
+    if (lead) {
+      return { email: lead, originalSubject: originalSubjectFromHeader };
+    }
   }
 
   return null;
