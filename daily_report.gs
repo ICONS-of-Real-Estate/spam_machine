@@ -22,6 +22,80 @@
  * whatever time you want the report to land each morning.
  */
 
+// ---------- TINY HTML BAR-CHART HELPERS (27 Aug 2026, per direct request --
+// "add graphs, it's very hard to read") ----------
+//
+// MailApp has no chart-image support without hosting an image externally --
+// nothing here calls out to a chart-image API or a Drive-hosted image, since
+// that would be one more thing that can silently 404 inside an email nobody
+// re-checks. These are plain HTML/CSS bar charts instead: a <table> of
+// colored <div>s sized by width. Renders identically for every recipient of
+// this report, since all three (Kris, Tomas, Joana) read it in Gmail, and
+// degrades gracefully -- the real value is always ALSO printed as text, so
+// even a client that strips inline CSS still shows the actual numbers.
+function barRowHtml_(label, rawValue, maxValue, color, barWidthPx, displayText) {
+  const width = maxValue > 0 ? Math.max(2, Math.round((rawValue / maxValue) * barWidthPx)) : 0;
+  const text = displayText !== undefined ? displayText : rawValue;
+  return (
+    '<tr>' +
+      '<td style="padding:2px 8px 2px 0; color:#555555; white-space:nowrap; font-size:12px;">' + escapeHtml(String(label)) + '</td>' +
+      '<td style="padding:2px 0;">' +
+        '<div style="background:#eeeeee; border-radius:3px; width:' + barWidthPx + 'px; height:10px;">' +
+          '<div style="background:' + color + '; border-radius:3px; width:' + width + 'px; height:10px;"></div>' +
+        '</div>' +
+      '</td>' +
+      '<td style="padding:2px 0 2px 8px; text-align:right; font-weight:bold; font-size:12px; white-space:nowrap;">' + text + '</td>' +
+    '</tr>'
+  );
+}
+
+// Buckets a category name by its "yes_"/"no_" prefix (matching the label
+// conventions already used throughout this project -- LABEL_YES/LABEL_NO in
+// Code.gs) so a reader can tell interested-vs-declined apart at a glance
+// instead of reading every word. Neutral categories (info_request, *_error,
+// unknown) stay gray rather than guessing a color that isn't there.
+function categoryColor_(cat) {
+  const c = String(cat).toLowerCase();
+  if (c.indexOf('yes') === 0) return '#1a7f37';
+  if (c.indexOf('no') === 0 || c.indexOf('scam') !== -1 || c.indexOf('stop') !== -1) return '#c0392b';
+  return '#555555';
+}
+
+function categoryBarsHtml_(cats) {
+  const keys = Object.keys(cats);
+  if (keys.length === 0) return '<div style="color:#888; font-size:12px;">no drafts in this window</div>';
+  const maxCount = Math.max.apply(null, keys.map(k => cats[k]));
+  const rows = keys.map(k => barRowHtml_(k, cats[k], maxCount, categoryColor_(k), 160)).join('');
+  return '<table style="border-collapse:collapse; margin:4px 0 0 0;">' + rows + '</table>';
+}
+
+// A single two-segment bar (edited vs. sent-as-is) rather than a per-category
+// list -- this is a proportion of ONE whole, not a set of independent counts,
+// so one bar reads faster than a bar-per-value table would.
+function editedStackedBarHtml_(edited, sentAsIs) {
+  const total = edited + sentAsIs;
+  const widthPx = 160;
+  if (total === 0) return '<div style="color:#888; font-size:12px;">no reviewed drafts yet</div>';
+  const editedPx = Math.round((edited / total) * widthPx);
+  const sentPx = widthPx - editedPx;
+  return (
+    '<div style="width:' + widthPx + 'px; height:10px; border-radius:3px; overflow:hidden; white-space:nowrap;">' +
+      (editedPx > 0 ? '<div style="background:#e08e0b; width:' + editedPx + 'px; height:10px; display:inline-block;"></div>' : '') +
+      (sentPx > 0 ? '<div style="background:#1a7f37; width:' + sentPx + 'px; height:10px; display:inline-block;"></div>' : '') +
+    '</div>' +
+    '<div style="font-size:11px; color:#888888; margin-top:2px;">' +
+      '<span style="color:#e08e0b;">&#9632;</span> edited &nbsp; ' +
+      '<span style="color:#1a7f37;">&#9632;</span> sent as-is' +
+    '</div>'
+  );
+}
+
+// KIMI vs ANTHROPIC get a fixed, distinct color each so the split-test bars
+// below are scannable without reading the row label every time.
+function providerColor_(provider) {
+  return provider === 'kimi' ? '#6c3fc5' : '#d35400';
+}
+
 function runDailyReport() {
   // ADDED (17 Aug 2026, real incident): confirmed live that a different
   // account than Joana's has its own trigger firing this function -- see
@@ -148,16 +222,16 @@ function runDailyReport() {
   function formatSectionHtml(label, rows, editStatsArg) {
     const cats = categoryBreakdown(rows);
     const booked = bookedCount(rows);
-    const catLines = Object.keys(cats).map(c => '<li>' + escapeHtml(String(c)) + ': ' + cats[c] + '</li>').join('');
     const editPct = editStatsArg.total > 0 ? Math.round((editStatsArg.edited / editStatsArg.total) * 100) : 0;
     return (
-      '<div style="margin:0 0 14px 0; padding:10px 14px; border:1px solid #e0e0e0; border-radius:6px;">' +
-        '<div style="font-weight:bold; margin-bottom:6px;">' + escapeHtml(label) + '</div>' +
+      '<div style="margin:0 0 14px 0; padding:10px 14px; border:1px solid #e0e0e0; border-left:4px solid #1a2b4c; border-radius:6px;">' +
+        '<div style="font-weight:bold; color:#1a2b4c; font-size:15px; margin-bottom:6px;">' + escapeHtml(label) + '</div>' +
         '<div style="line-height:1.7;">' +
-          '<b>Drafted by Claude:</b> ' + rows.length + '<br>' +
-          '<b>Booked to a call</b> (penciled time or handed to Sean/Bens): ' + booked + '<br>' +
+          '<b>Drafted by Claude:</b> <span style="color:#1a2b4c; font-weight:bold;">' + rows.length + '</span><br>' +
+          '<b>Booked to a call</b> (penciled time or handed to Sean/Bens): <span style="color:#1a7f37; font-weight:bold;">' + booked + '</span><br>' +
           '<b>Edited by Joana before sending:</b> ' + editStatsArg.edited + ' of ' + editStatsArg.total + ' sent (' + editPct + '%)<br>' +
-          '<b>By category:</b><ul style="margin:4px 0 0 0;">' + catLines + '</ul>' +
+          editedStackedBarHtml_(editStatsArg.edited, editStatsArg.sentAsIs) +
+          '<b>By category:</b>' + categoryBarsHtml_(cats) +
         '</div>' +
       '</div>'
     );
@@ -194,7 +268,7 @@ function runDailyReport() {
   const htmlBody =
     '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' +
       '<p>This email was written by Claude.</p>' +
-      '<h2 style="margin:0 0 4px 0; font-size:17px;">Daily Report &mdash; ' + escapeHtml(now.toDateString()) + '</h2>' +
+      '<h2 style="margin:0 0 4px 0; font-size:17px; color:#1a2b4c;">Daily Report &mdash; ' + escapeHtml(now.toDateString()) + '</h2>' +
       '<p><b>New leads received today</b> (raw inbound count): ' + leadsReceivedToday + '</p>' +
       '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
       formatSectionHtml('YESTERDAY', draftsYesterday, editYesterday) +
@@ -207,7 +281,7 @@ function runDailyReport() {
         'Per day (last 30 days): ' + (drafts30d.length / 30).toFixed(1) + ' drafted</p>' +
       '<p><b>Gmail quota usage today</b> (self-tracked, approximate): ' + getGmailQuotaUsageToday_() + ' / ' + GMAIL_CALL_REAL_LIMIT_ESTIMATE + ' estimated daily limit</p>' +
       '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
-      '<h2 style="margin:0 0 8px 0; font-size:17px;">Kimi vs Anthropic split test</h2>' +
+      '<h2 style="margin:0 0 8px 0; font-size:17px; color:#1a2b4c;">Kimi vs Anthropic split test</h2>' +
       '<p style="color:#555;">(price and quality; ' +
         (LLM_COST_TEST_MODE ? 'test ACTIVE -- providers alternate 50/50 by call' : 'test OFF -- Kimi first always') + ')</p>' +
       buildSplitTestSectionHtml_(ss, draftsData, learningData, rowsSince, yesterdayStart, 'YESTERDAY', todayStart) +
@@ -224,7 +298,10 @@ function runDailyReport() {
   MailApp.sendEmail({
     to: 'kris@iconsofrealestate.com',
     cc: 'tomas@iconsofrealestate.com,joana@iconsofrealestate.com',
-    subject: '[Written by Claude] Daily Podcast Reply Report -- ' + now.toDateString(),
+    // RENAMED (27 Aug 2026, per direct request): matches the "SPAM DRAFT --"
+    // prefix convention Joana wants on this project's automated mail so it's
+    // recognizable in the inbox list without opening it.
+    subject: 'SPAM DRAFT - Daily Report -- ' + now.toDateString(),
     body: body,
     htmlBody: htmlBody
   });
@@ -370,17 +447,45 @@ function buildSplitTestSection_(ss, draftsData, learningData, rowsSince, sinceDa
   return label + ':\n' + lines.join('\n');
 }
 
+// Three side-by-side bar rows (spend, cost/draft, quality) so the two
+// providers can be compared at a glance before reading the detailed cards
+// below. Bar width is relative to the larger of the two providers' values
+// for that metric, not to any fixed scale -- these are a head-to-head
+// comparison, not an absolute measurement.
+function splitTestBarsHtml_(stats) {
+  const spendMax = Math.max(stats[0].spend, stats[1].spend);
+  const costVals = stats.map(s => s.costPerDraft || 0);
+  const costMax = Math.max(costVals[0], costVals[1]);
+  const qualityVals = stats.map(s => s.avgSimilarity || 0);
+  const qualityMax = Math.max(qualityVals[0], qualityVals[1], 100);
+
+  const barGroup = (metricLabel, values, maxValue, formatter) => (
+    '<div style="margin:0 0 8px 0;">' +
+      '<div style="font-size:12px; color:#555555; font-weight:bold; margin-bottom:2px;">' + escapeHtml(metricLabel) + '</div>' +
+      '<table style="border-collapse:collapse;">' +
+        stats.map((s, i) => barRowHtml_(s.provider.toUpperCase(), values[i], maxValue, providerColor_(s.provider), 140, formatter(values[i], s))).join('') +
+      '</table>' +
+    '</div>'
+  );
+
+  return (
+    barGroup('Spend', stats.map(s => s.spend), spendMax, v => '$' + v.toFixed(4)) +
+    barGroup('Cost per draft', costVals, costMax, (v, s) => s.costPerDraft !== null ? '$' + v.toFixed(4) : 'n/a') +
+    barGroup('Draft survival into sent', qualityVals, qualityMax, (v, s) => s.avgSimilarity !== null ? v + '%' : 'n/a')
+  );
+}
+
 // HTML twin of buildSplitTestSection_ -- same computeSplitTestStats_ data,
 // bold labels + a bordered card per provider instead of an indented text
 // block. Used only by runDailyReport's htmlBody; logSplitTestSummary() still
 // uses the plain-text version above since Logger.log has no HTML rendering.
 function buildSplitTestSectionHtml_(ss, draftsData, learningData, rowsSince, sinceDate, label, untilDate) {
   const stats = computeSplitTestStats_(ss, draftsData, learningData, rowsSince, sinceDate, untilDate);
-  if (!stats) return '<h4 style="margin:18px 0 8px 0; font-size:14px;">' + escapeHtml(label) + '</h4><p>(no "LLM Cost Log" tab yet -- nothing recorded)</p>';
+  if (!stats) return '<h4 style="margin:18px 0 8px 0; font-size:14px; color:#1a2b4c;">' + escapeHtml(label) + '</h4><p>(no "LLM Cost Log" tab yet -- nothing recorded)</p>';
 
   const cards = stats.map(s => (
-    '<div style="margin:0 0 14px 0; padding:10px 14px; border:1px solid #e0e0e0; border-radius:6px;">' +
-      '<div style="font-weight:bold; margin-bottom:6px;">' + escapeHtml(s.provider.toUpperCase()) + '</div>' +
+    '<div style="margin:0 0 14px 0; padding:10px 14px; border:1px solid #e0e0e0; border-left:4px solid ' + providerColor_(s.provider) + '; border-radius:6px;">' +
+      '<div style="font-weight:bold; color:' + providerColor_(s.provider) + '; margin-bottom:6px;">' + escapeHtml(s.provider.toUpperCase()) + '</div>' +
       '<div style="line-height:1.7;">' +
         '<b>Spend:</b> $' + s.spend.toFixed(4) + ' across ' + s.callCount + ' call(s)<br>' +
         '<b>Avg tokens/call:</b> ' + s.avgInput + ' input, ' + s.avgCacheRead + ' cache-read, ' +
@@ -399,7 +504,7 @@ function buildSplitTestSectionHtml_(ss, draftsData, learningData, rowsSince, sin
     '</div>'
   )).join('');
 
-  return '<h4 style="margin:18px 0 8px 0; font-size:14px;">' + escapeHtml(label) + '</h4>' + cards;
+  return '<h4 style="margin:18px 0 8px 0; font-size:14px; color:#1a2b4c;">' + escapeHtml(label) + '</h4>' + splitTestBarsHtml_(stats) + cards;
 }
 
 // ADDED (24 Aug 2026, per direct request -- "we can see if Kimi did good
