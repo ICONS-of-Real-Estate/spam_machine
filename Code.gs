@@ -1269,6 +1269,7 @@ function runReplyDrafterInner() {
         // that is an actual send, not another echo of it.
         leadEmail = null;
         originalSubjectFromForward = null;
+        let examinedPriorMsg = null; // DIAGNOSTIC: the message the walk actually stopped at, if any
         // Walk back from lastMsg's OWN position, not the array's end --
         // lastNonDraftMessage_ can return an earlier message than the last
         // array element when the true last message is a draft, and starting
@@ -1277,6 +1278,7 @@ function runReplyDrafterInner() {
           const priorSenderEmail = extractEmail(messages[i].getFrom());
           if (CONFIG.REQUIRED_CC_ADDRESSES.some(addr => addr.toLowerCase() === priorSenderEmail.toLowerCase())) continue;
 
+          examinedPriorMsg = messages[i];
           if (isInternal(priorSenderEmail)) {
             // Joana's own genuine send -- the real lead is whoever she
             // actually sent it to, read straight from the envelope. No
@@ -1291,6 +1293,22 @@ function runReplyDrafterInner() {
         }
         if (!leadEmail) {
           skipCache[threadId] = { reason: 'network-list-relay message with no resolvable prior sender/recipient', lastCheckedAt: new Date(), messageCount: messages.length };
+          // DIAGNOSTIC (27 Aug 2026, per direct request -- "get more data"):
+          // Jennifer's and Maria's threads both hit this exact branch, but
+          // for reasons that could be completely different (nothing at all
+          // to walk back to, vs. a prior message the walk DID examine but
+          // couldn't resolve a lead from) -- logging examinedPriorMsg's own
+          // envelope (the message the walk actually stopped at, skipping
+          // past any stacked relay copies first, not just messages.length-2)
+          // instead of guessing which case this is.
+          if (!examinedPriorMsg) {
+            Logger.log('DIAGNOSTIC -- network-list-relay dead end for ' + subject +
+              ': no prior message at all (this is message #' + (messages.indexOf(lastMsg) + 1) + ' of ' + messages.length + ' in the thread, and every message before it, if any, was itself a network-list-relay copy).');
+          } else {
+            Logger.log('DIAGNOSTIC -- network-list-relay dead end for ' + subject +
+              ': examined prior message envelope: From=' + examinedPriorMsg.getFrom() +
+              ' | To=' + examinedPriorMsg.getTo() + ' | Cc=' + examinedPriorMsg.getCc());
+          }
           Logger.log('DIAGNOSTIC -- skipped (network-list-relay message -- Joana\'s own post echoed back by the list -- with no resolvable prior sender/recipient), cached for ' + SKIP_CACHE_TTL_HOURS + 'h: ' + subject);
           continue;
         }
