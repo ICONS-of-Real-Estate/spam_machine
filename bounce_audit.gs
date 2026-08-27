@@ -279,6 +279,53 @@ function emailMisdirectedBounceAlert_(misdirected) {
     'incident, no email sent for those), is logged in the "' + BOUNCE_AUDIT_TAB + '" tab of the ' +
     '"Icons Podcast Reply Drafter -- Logs" spreadsheet.';
 
+  // ADDED (27 Aug 2026, per direct request -- "you learnt nothing about
+  // formatting emails nicely? hyperlink the links, use bold, use colour, use
+  // better spacing"): this alert only ever had a plain-text body, unlike
+  // daily_report.gs's htmlBody twin added the same day. The Thread link
+  // rendered as a bare URL nobody could click without copy-pasting, and the
+  // one actionable fact per bounce -- the real lead's address -- had no
+  // visual weight to separate it from the wrong address right next to it.
+  const htmlCards = misdirected.map(m => {
+    const realLeadHtml = m.realLead
+      ? '<a href="mailto:' + escapeHtml(m.realLead) + '" style="color:#1a7f37; font-weight:bold; text-decoration:none;">' + escapeHtml(m.realLead) + '</a>'
+      : '<span style="color:#c0392b; font-weight:bold;">could not be determined -- open the thread and check</span>';
+    return (
+      '<div style="margin:0 0 14px 0; padding:12px 16px; border:1px solid #e0e0e0; border-left:4px solid #c0392b; border-radius:6px;">' +
+        '<div style="font-weight:bold; margin-bottom:8px;">' + escapeHtml(m.subject) + '</div>' +
+        '<div style="line-height:1.9;">' +
+          '<b>Sent to:</b> <span style="color:#c0392b; font-weight:bold;">' + escapeHtml(m.bouncedTo) + '</span> ' +
+            '<span style="color:#888888; font-size:12px;">(one of OUR addresses, not the lead)</span><br>' +
+          '<b>Real lead (reply here to fix it):</b> ' + realLeadHtml + '<br>' +
+          '<b>Bounced:</b> ' + escapeHtml(m.bounceDate) + '<br>' +
+          '<b>Thread:</b> <a href="' + m.link + '" style="color:#2E74B5;">Open thread</a>' +
+        '</div>' +
+      '</div>'
+    );
+  }).join('');
+
+  const htmlBody =
+    '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' +
+      '<p>This email was written by Claude.</p>' +
+      '<h2 style="margin:0 0 10px 0; font-size:18px; color:#c0392b;">' +
+        misdirected.length + ' repl' + (misdirected.length === 1 ? 'y was' : 'ies were') + ' sent to the wrong address and bounced' +
+      '</h2>' +
+      '<p>A delivery failure came back for ' + misdirected.length + ' repl' + (misdirected.length === 1 ? 'y' : 'ies') +
+        ' addressed to one of our own addresses &mdash; a Maildoso sending alias, a team address, or the network list &mdash; instead of to the lead.</p>' +
+      '<p><b>That means the lead below received NOTHING</b> and is most likely sitting there thinking we ignored them. ' +
+        'Each one can be fixed by replying directly to the real lead address shown below.</p>' +
+      '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
+      htmlCards +
+      '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
+      '<p style="color:#555555; font-size:13px;">Why this check exists: on 27 Aug 2026 a sweep found five of these going back to May, ' +
+        'none of which anyone had noticed. The drafter bug that caused them is fixed (see <b>FORWARDING_ALIAS_DOMAINS</b> and ' +
+        '<b>isForwardedFromSendingAlias_</b> in Code.gs); this audit is the safety net that catches it if it ever comes back ' +
+        'through a new sending domain or a hand-typed address.</p>' +
+      '<p style="color:#555555; font-size:13px;">Everything found, including outside addresses that are simply dead (not an incident, ' +
+        'no email sent for those), is logged in the &ldquo;' + escapeHtml(BOUNCE_AUDIT_TAB) + '&rdquo; tab of the ' +
+        '<a href="https://docs.google.com/spreadsheets/d/' + CONFIG.SPREADSHEET_ID + '/edit">Icons Podcast Reply Drafter &mdash; Logs</a> spreadsheet.</p>' +
+    '</div>';
+
   // Addressed to Joana, cc Kris, per the 27 Aug request ("alert Joana and CC
   // me"). Tomas is included to stay consistent with the standing 23 Aug rule
   // that team alerts cc Kris and Tomas -- drop him here if that is not wanted
@@ -287,7 +334,8 @@ function emailMisdirectedBounceAlert_(misdirected) {
     to: 'joana@iconsofrealestate.com',
     cc: 'kris@iconsofrealestate.com,tomas@iconsofrealestate.com',
     subject: subject,
-    body: body
+    body: body,
+    htmlBody: htmlBody
   });
 
   Logger.log('Sent misdirected-bounce alert to Joana (cc Kris, Tomas) covering ' + misdirected.length + ' bounce(s).');
