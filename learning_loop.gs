@@ -527,7 +527,15 @@ function generateSopSuggestionsInner(opts) {
   // the rest of the backlog for the next run(s) via the existing
   // deferredCount mechanism -- same "smaller, more frequent batches" fix
   // shape as SOP_SUGGESTIONS_BATCH_SIZE itself.
-  const SOP_SUGGESTIONS_MAX_RAW_PER_RUN = 10;
+  //
+  // THIS IS NOW LOAD-BEARING (28 Aug 2026, second incident the same day):
+  // consolidation is a single LLM call with no chunking and no recursion
+  // (see mergeDuplicateSuggestions_). Keeping the raw list small enough to
+  // consolidate in ONE call is what makes that safe -- it is the upstream
+  // half of that fix, not just a readability nicety. Must stay comfortably
+  // under SOP_MERGE_MAX_ITEMS_PER_CALL, including the overshoot bounded
+  // below.
+  const SOP_SUGGESTIONS_MAX_RAW_PER_RUN = 15;
 
   const allBatchEdits = [];
   const allSuggestions = [];
@@ -658,9 +666,25 @@ function generateSopSuggestionsInner(opts) {
     // Merge before building the doc/email that goes to the team -- the
     // "SOP Suggestions" sheet tab above still keeps every raw finding,
     // unmerged, as the permanent audit trail.
-    const suggestionLines = allSuggestions.map(s => '[' + s.confidence + '] ' + s.pattern_observed + ' -> ' + s.suggested_change);
+    // The loop's cap is checked BEFORE each batch, so the last batch can
+    // push the total past SOP_SUGGESTIONS_MAX_RAW_PER_RUN by however many
+    // suggestions that one batch produced. Bound it hard here so the list
+    // handed to the single-pass consolidation is genuinely bounded, not
+    // just usually-bounded. Nothing is lost: every raw suggestion, included
+    // or not, is already appended to the "SOP Suggestions" sheet tab above
+    // as the permanent audit trail.
+    let rawForMerge = allSuggestions;
+    if (rawForMerge.length > SOP_SUGGESTIONS_MAX_RAW_PER_RUN) {
+      Logger.log('generateSopSuggestions -- ' + rawForMerge.length + ' raw suggestion(s) exceeds the ' +
+        SOP_SUGGESTIONS_MAX_RAW_PER_RUN + '-per-run cap (last batch overshot); taking the first ' +
+        SOP_SUGGESTIONS_MAX_RAW_PER_RUN + ' for this doc. All ' + rawForMerge.length +
+        ' remain logged in the "SOP Suggestions" tab.');
+      rawForMerge = rawForMerge.slice(0, SOP_SUGGESTIONS_MAX_RAW_PER_RUN);
+    }
+
+    const suggestionLines = rawForMerge.map(s => '[' + s.confidence + '] ' + s.pattern_observed + ' -> ' + s.suggested_change);
     const merged = mergeDuplicateSuggestions_(suggestionLines, 'generateSopSuggestions');
-    const finalSuggestions = merged || allSuggestions;
+    const finalSuggestions = merged || rawForMerge;
     const docFile = createSopSuggestionsDoc(allBatchEdits, finalSuggestions, deferredCount);
     emailSopSuggestionsDoc(docFile, finalSuggestions.length);
   }
@@ -679,105 +703,90 @@ function generateSopSuggestionsInner(opts) {
 // fall back to sending the unmerged list rather than losing the run's
 // findings entirely over a merge-step hiccup.
 //
-// CHUNKED (28 Aug 2026, real incident -- 27 Aug's run generated 52 raw
-// suggestions from 35 edits and the doc/email that reached the team still
-// had all 52, un-consolidated: "suggesting 52 SOP changes is still too
-// much"). ROOT CAUSE: this was a single LLM call handed the ENTIRE list at
-// once. At 52 verbose entries (each a multi-sentence pattern_observed +
-// suggested_change, per the real doc), a full-fidelity merged response can
-// easily need more output than a single call comfortably produces, and the
-// same silent-failure path documented above -- no text block, unparseable
-// JSON, empty array -- falls all the way back to "send everything
-// unmerged." A truncated/failed merge and a merge that's simply too large
-// to reason well about both land on the same result: the raw dump. FIX:
-// merge in bounded chunks first (each well within one call's comfortable
-// output size), then merge the merged results together in a second pass --
-// same map-reduce shape as SOP_SUGGESTIONS_BATCH_SIZE already uses for
-// generation, applied to consolidation too. A list at or under one chunk
-// still does exactly what this function always did: one call, no
-// recursion.
-const SOP_MERGE_CHUNK_SIZE = 15;
-// SAFETY NET (28 Aug 2026, real incident -- confirmed live: a real run sat
-// at exactly 21 items for 7+ straight recursive passes, each one splitting
-// into a 15-chunk that merged 15->15 (no duplicates left to find) and a
-// 6-chunk that merged 6->6, recombining back to the same 21 every time --
-// an infinite loop with no base case for "this pass made no progress,"
-// burning an LLM call roughly every 20-40 seconds for over 20 minutes
-// before a human caught it and had to stop the execution by hand. Two
-// independent guards below, either one alone would have stopped it:
-// (1) a hard depth cap, (2) a no-progress check that accepts the current
-// list rather than recursing again once a pass stops shrinking it.
-const SOP_MERGE_MAX_DEPTH = 5;
+// REFACTORED TO A SINGLE PASS (28 Aug 2026, per direct request, after two
+// live incidents in one day). HISTORY, because the failure mode here was
+// non-obvious and must not be reintroduced:
+//
+//   1. Originally ONE LLM call over the whole list. At 52 verbose entries
+//      that call could exceed its output budget, fail to parse, and fall
+//      back to "send everything unmerged" -- the 27 Aug doc reached the
+//      team with all 52 raw suggestions.
+//   2. That was "fixed" by chunking + a recursive combining pass (a
+//      map-reduce shape). This was WRONG. Recursion over a list whose size
+//      is decided by an LLM has no guaranteed decreasing measure: once the
+//      model finds no more duplicates, a pass returns exactly what it was
+//      given, and the next pass re-splits the identical list into the
+//      identical chunks forever. Confirmed live -- a run sat at exactly 21
+//      items for 7+ passes (a 15-chunk merging 15->15 and a 6-chunk merging
+//      6->6, recombining to 21 every time), burning an LLM call every
+//      20-40 seconds for 20+ minutes until a human killed the execution by
+//      hand. Guards bolted on afterward (a depth cap and a no-progress
+//      check) stopped the bleeding but kept an architecture whose worst
+//      case is still "many sequential LLM calls against Apps Script's
+//      6-minute hard limit."
+//
+// The real fix is upstream: cap how many raw suggestions a run can produce
+// (SOP_SUGGESTIONS_MAX_RAW_PER_RUN, in generateSopSuggestionsInner) so the
+// list handed to this function always fits comfortably in ONE call. Then
+// this function is exactly what its name says -- one call, one pass, no
+// chunking, no recursion, no possibility of a loop. If a run somehow still
+// produces more than one call can consolidate, it sends the list unmerged
+// (the pre-existing, well-understood fallback) rather than spending
+// unbounded time trying to do better. Deferred edits roll to the next run,
+// which is a normal, already-supported outcome -- not a failure.
+//
+// MAX_CONSOLIDATION_PASSES is deliberately a named constant set to 1: it
+// documents the invariant and makes any future attempt to reintroduce
+// multi-pass merging an explicit, reviewable change rather than an
+// incremental "just one more pass" edit.
+const MAX_CONSOLIDATION_PASSES = 1;
+// Hard wall-clock ceiling for the consolidation step specifically. The
+// generation loop has its own budget (SOP_SUGGESTIONS_RUN_TIME_BUDGET_MS);
+// this guarantees the merge can never be what pushes a run into Apps
+// Script's 6-minute kill, no matter how slow the provider is on the day.
+const SOP_MERGE_TIME_BUDGET_MS = 90 * 1000;
+// The most items one consolidation call is expected to handle well. The
+// normal path never approaches this (SOP_SUGGESTIONS_MAX_RAW_PER_RUN bounds
+// it upstream); this exists for the legacy catch-up/resend callers below,
+// which can hand over hundreds of accumulated rows. Above this, a single
+// call would blow its output budget and fail to parse anyway -- so say that
+// plainly and send unmerged, rather than spending the call to fail, or
+// (never again) recursing to try to force it.
+const SOP_MERGE_MAX_ITEMS_PER_CALL = 25;
 
-function mergeDuplicateSuggestions_(suggestionLines, callerLabel, depth) {
-  depth = depth || 0;
+function mergeDuplicateSuggestions_(suggestionLines, callerLabel) {
   if (!suggestionLines || suggestionLines.length <= 1) return null;
 
-  if (depth >= SOP_MERGE_MAX_DEPTH) {
-    Logger.log(callerLabel + ' -- hit the ' + SOP_MERGE_MAX_DEPTH + '-pass merge depth cap with ' +
-      suggestionLines.length + ' item(s) still remaining -- accepting the current list rather than recursing further.');
-    return suggestionLines.map(parseSuggestionLine_);
+  if (suggestionLines.length > SOP_MERGE_MAX_ITEMS_PER_CALL) {
+    Logger.log(callerLabel + ' -- ' + suggestionLines.length + ' raw suggestion(s) exceeds the ' +
+      SOP_MERGE_MAX_ITEMS_PER_CALL + '-item single-pass consolidation limit. Sending unmerged rather than ' +
+      'attempting a call that would truncate (and NOT splitting into multiple passes -- see the comment above). ' +
+      'If this fires on the normal daily path, lower SOP_SUGGESTIONS_MAX_RAW_PER_RUN instead of raising this.');
+    return null;
   }
 
-  if (suggestionLines.length > SOP_MERGE_CHUNK_SIZE) {
-    const chunks = [];
-    for (let i = 0; i < suggestionLines.length; i += SOP_MERGE_CHUNK_SIZE) {
-      chunks.push(suggestionLines.slice(i, i + SOP_MERGE_CHUNK_SIZE));
-    }
-    Logger.log(callerLabel + ' -- ' + suggestionLines.length + ' suggestion(s) exceeds the ' + SOP_MERGE_CHUNK_SIZE +
-      '-item merge chunk size, splitting into ' + chunks.length + ' chunk(s) before a final combining pass.');
+  const startedAt = new Date().getTime();
+  Logger.log(callerLabel + ' -- consolidating ' + suggestionLines.length + ' raw suggestion(s) in ' +
+    MAX_CONSOLIDATION_PASSES + ' pass (single call, no recursion)...');
 
-    const chunkResults = [];
-    chunks.forEach((chunk, idx) => {
-      // DIAGNOSTIC (28 Aug 2026, per direct request -- "look how slow the
-      // logging is"): each chunk's merge call can take 15-20+ seconds, and
-      // the only log line was AFTER it finished -- same silent-stretch
-      // problem as the generation loop above.
-      Logger.log(callerLabel + ' -- merging chunk ' + (idx + 1) + '/' + chunks.length + ' (' + chunk.length + ' item(s))...');
-      const mergedChunk = mergeSuggestionChunk_(chunk, callerLabel + ':chunk' + (idx + 1));
-      // A chunk that fails to merge still contributes its raw entries to the
-      // final pass rather than being dropped -- losing real findings to a
-      // one-chunk hiccup would be worse than asking the final pass to work
-      // a little harder.
-      if (mergedChunk) {
-        chunkResults.push(...mergedChunk.map(s => '[' + s.confidence + '] ' + s.pattern_observed + ' -> ' + s.suggested_change));
-      } else {
-        chunkResults.push(...chunk);
-      }
-    });
+  const merged = mergeSuggestionsOnce_(suggestionLines, callerLabel, startedAt);
 
-    // NO-PROGRESS CHECK (28 Aug 2026, real incident -- see SOP_MERGE_MAX_DEPTH
-    // comment above): if this pass didn't actually shrink the list -- every
-    // chunk came back the same size it went in, meaning the LLM found no
-    // more duplicates to collapse -- recursing again would just repeat the
-    // exact same chunking and get the exact same non-answer forever. That
-    // is precisely what happened live. Stop and accept the current list
-    // once a pass stops making progress, rather than assuming a smaller
-    // pass always follows a chunked one.
-    if (chunkResults.length >= suggestionLines.length) {
-      Logger.log(callerLabel + ' -- combining pass made no further progress (' + suggestionLines.length + ' in, ' +
-        chunkResults.length + ' out) -- accepting the current list instead of recursing again.');
-      return chunkResults.map(parseSuggestionLine_);
-    }
-
-    // Final combining pass over the (now smaller) per-chunk results.
-    // Recurses only if the chunked results are STILL over the chunk size
-    // AND this pass actually made progress (checked above) -- bounded by
-    // SOP_MERGE_MAX_DEPTH regardless.
-    Logger.log(callerLabel + ' -- all ' + chunks.length + ' chunk(s) merged (' + chunkResults.length +
-      ' item(s) total), starting final combining pass...');
-    return mergeDuplicateSuggestions_(chunkResults, callerLabel + ':final', depth + 1) || chunkResults.map(parseSuggestionLine_);
+  const elapsedMs = new Date().getTime() - startedAt;
+  if (!merged) {
+    Logger.log(callerLabel + ' -- consolidation did not return a usable list after ' + Math.round(elapsedMs / 1000) +
+      's; sending the ' + suggestionLines.length + ' raw suggestion(s) unmerged.');
+    return null;
   }
 
-  return mergeSuggestionChunk_(suggestionLines, callerLabel);
+  Logger.log(callerLabel + ' -- consolidation complete in ' + Math.round(elapsedMs / 1000) + 's: ' +
+    suggestionLines.length + ' raw suggestion(s) -> ' + merged.length + ' final. Done, no further passes.');
+  return merged;
 }
 
 // Parses a "[confidence] pattern -> change" line back into the structured
-// shape, for the rare fallback path where a chunk's raw lines end up in the
-// final output untouched (chunk merge failed AND the final pass over the
-// combined list also failed) -- keeps the return shape consistent
-// ({pattern_observed, suggested_change, confidence}) regardless of which
-// path produced it.
+// shape. Kept for callers that need to render raw lines in the same
+// {pattern_observed, suggested_change, confidence} shape the merged path
+// returns.
 function parseSuggestionLine_(line) {
   const m = String(line).match(/^\[(\w+)\]\s*(.*?)\s*->\s*(.*)$/);
   return m
@@ -785,12 +794,12 @@ function parseSuggestionLine_(line) {
     : { confidence: 'low', pattern_observed: String(line), suggested_change: '' };
 }
 
-// The actual single-call merge, unchanged from the original implementation
-// except the caller-supplied label and a higher max_tokens (see below) --
-// operates on one chunk (<= SOP_MERGE_CHUNK_SIZE items) at a time.
-function mergeSuggestionChunk_(suggestionLines, callerLabel) {
+// The one and only consolidation call. Returns the merged array, or null on
+// any failure -- callers fall back to the unmerged list. Never calls itself,
+// never chunks, never loops.
+function mergeSuggestionsOnce_(suggestionLines, callerLabel, startedAt) {
   if (!suggestionLines || suggestionLines.length <= 1) return null;
-  // ':merge' suffix preserved from the pre-chunking version -- keeps merge
+  // ':merge' suffix preserved from the original version -- keeps merge
   // calls distinguishable from the main generation calls in the LLM Cost
   // Log under the same top-level caller name.
   const llmCallerLabel = callerLabel + ':merge';
@@ -800,30 +809,39 @@ function mergeSuggestionChunk_(suggestionLines, callerLabel) {
   const listText = suggestionLines.map((t, i) => (i + 1) + '. ' + t).join('\n');
   const userPrompt = `Here are ${suggestionLines.length} proposed SOP changes, which may contain duplicates or near-duplicates describing the same underlying pattern:\n\n${listText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble -- the consolidated, deduplicated list. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}.`;
 
+  // TIME GUARD (28 Aug 2026): checked BEFORE spending the call, so a run
+  // that has already burned its budget in the generation loop doesn't start
+  // a merge it can't afford to finish. The call itself is a single
+  // UrlFetchApp request -- Apps Script gives no way to abort one mid-flight,
+  // so this bounds when we START, and SOP_MERGE_TIME_BUDGET_MS is set well
+  // under the remaining headroom for that reason.
+  if (startedAt && (new Date().getTime() - startedAt) > SOP_MERGE_TIME_BUDGET_MS) {
+    Logger.log(callerLabel + ' -- merge time budget (' + Math.round(SOP_MERGE_TIME_BUDGET_MS / 1000) +
+      's) already exhausted before the consolidation call; sending unmerged (' + suggestionLines.length + ' items).');
+    return null;
+  }
+
   try {
-    // RAISED 8000 -> 12000 (28 Aug 2026, same incident as above): a
-    // full-fidelity echo of a near-max-size chunk (15 verbose entries) can
-    // approach 8000 output tokens on its own with little room left for
-    // actual consolidation text -- the same truncation shape as the 23 Aug
-    // generation-side incident this function's max_tokens was never
-    // revisited for. Chunking keeps each call's input bounded; this keeps
-    // its output budget from being the next silent-failure trigger.
+    // 12000 max_tokens: enough for a full-fidelity consolidated echo of the
+    // ~15-20 raw suggestions a single run can now produce (bounded upstream
+    // by SOP_SUGGESTIONS_MAX_RAW_PER_RUN). The 23 Aug incident on the
+    // generation side was a truncation at 2000; this leaves real headroom
+    // rather than rediscovering that failure here.
     const data = callLlmWithFallback(systemPrompt, userPrompt, 12000, llmCallerLabel);
     const textBlock = data.content.find(c => c.type === 'text');
     if (!textBlock) {
-      Logger.log(callerLabel + ' -- merge step got no text block back, sending unmerged (' + suggestionLines.length + ' items).');
+      Logger.log(callerLabel + ' -- consolidation returned no text block.');
       return null;
     }
     const cleaned = textBlock.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     const merged = JSON.parse(cleaned);
     if (!Array.isArray(merged) || merged.length === 0) {
-      Logger.log(callerLabel + ' -- merge step returned no usable list, sending unmerged (' + suggestionLines.length + ' items).');
+      Logger.log(callerLabel + ' -- consolidation returned no usable list.');
       return null;
     }
-    Logger.log(callerLabel + ' -- merged ' + suggestionLines.length + ' suggestion(s) down to ' + merged.length + '.');
     return merged;
   } catch (e) {
-    Logger.log(callerLabel + ' -- merge step failed, sending unmerged (' + suggestionLines.length + ' items): ' + e);
+    Logger.log(callerLabel + ' -- consolidation call failed: ' + e);
     return null;
   }
 }

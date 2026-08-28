@@ -506,6 +506,69 @@ check('[REAL] Krista: lead resolves correctly once the attachment fallback suppl
 }
 
 // ---------------------------------------------------------------------------
+// 9. SOP-suggestion consolidation is SINGLE-PASS (28 Aug 2026, real incident).
+//
+// A recursive chunk-merge architecture shipped earlier today and hung a live
+// execution for 20+ minutes: once the LLM stopped finding duplicates, each
+// pass returned exactly what it was handed and the next pass re-split the
+// identical list forever, burning an LLM call every 20-40 seconds until a
+// human killed it by hand. These tests exist so that architecture cannot come
+// back silently -- they assert the invariant structurally (exactly one LLM
+// call, no matter what the model returns), not just that today's code happens
+// to work.
+// ---------------------------------------------------------------------------
+{
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'learning_loop.gs'), 'utf8');
+
+  check('merge: MAX_CONSOLIDATION_PASSES is exactly 1',
+    /const MAX_CONSOLIDATION_PASSES = 1;/.test(src), true);
+  check('merge: the recursive chunk helpers are gone',
+    /mergeSuggestionChunk_|SOP_MERGE_CHUNK_SIZE|SOP_MERGE_MAX_DEPTH/.test(src), false);
+
+  // Structural: mergeDuplicateSuggestions_ must not call itself.
+  const mergeFnBody = (src.match(/function mergeDuplicateSuggestions_[\s\S]*?\n}/) || [''])[0];
+  check('merge: mergeDuplicateSuggestions_ does not call itself (no recursion)',
+    /mergeDuplicateSuggestions_\s*\(/.test(mergeFnBody.replace(/^function mergeDuplicateSuggestions_/, '')), false);
+
+  // Functional: build an isolated context, stub the LLM, and count calls.
+  // The plateau case is the exact one that hung production -- the model
+  // returns the SAME number of items it was given, forever, if asked again.
+  function runMergeWithStub(itemCount, stubReturnsCount) {
+    const { context: ctx } = buildContext(['learning_loop.gs']);
+    let calls = 0;
+    ctx.callLlmWithFallback = () => {
+      calls++;
+      const out = [];
+      for (let i = 0; i < stubReturnsCount; i++) {
+        out.push({ pattern_observed: 'p' + i, suggested_change: 'c' + i, confidence: 'high' });
+      }
+      return { content: [{ type: 'text', text: JSON.stringify(out) }] };
+    };
+    const lines = [];
+    for (let i = 0; i < itemCount; i++) lines.push('[high] pattern ' + i + ' -> change ' + i);
+    const result = ctx.mergeDuplicateSuggestions_(lines, 'test');
+    return { calls, result };
+  }
+
+  const plateau = runMergeWithStub(21, 21); // the exact production hang shape
+  check('merge: a plateau (21 in, 21 out) makes exactly ONE call, not a loop', plateau.calls, 1);
+  check('merge: a plateau still returns a usable list', Array.isArray(plateau.result) && plateau.result.length, 21);
+
+  const shrinks = runMergeWithStub(15, 8);
+  check('merge: a normal consolidation makes exactly ONE call', shrinks.calls, 1);
+  check('merge: a normal consolidation returns the merged list', shrinks.result.length, 8);
+
+  const oversized = runMergeWithStub(200, 200);
+  check('merge: an oversized list is refused without spending a call', oversized.calls, 0);
+  check('merge: an oversized list returns null so the caller sends unmerged', oversized.result, null);
+
+  const single = runMergeWithStub(1, 1);
+  check('merge: a single-item list makes no call', single.calls, 0);
+}
+
+// ---------------------------------------------------------------------------
 // FIX (28 Aug 2026, real risk found while adding the Lynn fallback tests):
 // this summary used to sit right after section 7 -- every check added after
 // it (the word-wrapped-attribution test, both new fallback tests above, and

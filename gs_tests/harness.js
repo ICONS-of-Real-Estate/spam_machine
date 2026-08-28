@@ -39,7 +39,12 @@ const GS_FILES = process.env.GS_LOAD_ALL
   ? fs.readdirSync(path.join(__dirname, '..')).filter(f => f.endsWith('.gs')).sort()
   : ['Code.gs', 'missed_leads_audit.gs'];
 
-function buildContext() {
+// `extraFiles`: optional array of additional .gs filenames to load into the
+// same shared context, on top of GS_FILES. Added 28 Aug 2026 so a test can
+// exercise a specific companion file (e.g. learning_loop.gs's consolidation
+// logic) without paying for GS_LOAD_ALL, and without changing what the
+// default suite loads.
+function buildContext(extraFiles) {
   const logs = [];
   const sandbox = {
     console,
@@ -79,7 +84,10 @@ function buildContext() {
   sandbox.globalThis = sandbox;
   const context = vm.createContext(sandbox);
 
-  for (const file of GS_FILES) {
+  const filesToLoad = GS_FILES.concat(
+    (extraFiles || []).filter(f => GS_FILES.indexOf(f) === -1)
+  );
+  for (const file of filesToLoad) {
     const src = fs.readFileSync(path.join(REPO, file), 'utf8');
     try {
       vm.runInContext(src, context, { filename: file });
