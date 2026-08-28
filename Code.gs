@@ -860,11 +860,30 @@ function saveSkipCache(ss, cacheMap) {
 // unlikely, but "unlikely" is what the old code already assumed. Degrade
 // to the skip cache instead: suppressed for SKIP_CACHE_TTL_HOURS rather
 // than not at all, and loudly logged so the cause is obvious next time.
-function recordPermanentSkip_(thread, label, labelName, skipCache, threadId, messageCount, cacheReason, logReason, subject) {
+// ADDED markRead param (28 Aug 2026, per direct request -- "can't the
+// system just mark it as read?"): opt-outs and auto-reply/OOO threads
+// (CONFIG.LABEL_SUPPRESSED_NO_DRAFT) are genuinely finished business -- no
+// draft is ever coming, and nothing about them needs a human's attention --
+// but they kept showing up unread, requiring a manual sweep to clear (see
+// the ~28 Aug session where several dozen had to be unlabeled-UNREAD by
+// hand). Every OTHER caller of this function (already-answered-by-team,
+// subject-mismatch, already-replied-once) is deliberately left alone: those
+// are cases where a human is meant to see and act on the thread, and
+// marking them read would hide exactly the threads this system exists to
+// surface. Only pass markRead: true from the two LABEL_SUPPRESSED_NO_DRAFT
+// call sites below.
+function recordPermanentSkip_(thread, label, labelName, skipCache, threadId, messageCount, cacheReason, logReason, subject, markRead) {
   if (label) {
     thread.addLabel(label);
+    if (markRead) {
+      try {
+        thread.markRead();
+      } catch (e) {
+        Logger.log('recordPermanentSkip_ -- markRead() failed (non-fatal, continuing): ' + e);
+      }
+    }
     delete skipCache[threadId]; // genuinely excluded via label now -- any earlier cache entry is moot
-    Logger.log('DIAGNOSTIC -- skipped (' + logReason + '), labeled so it stops reappearing: ' + subject);
+    Logger.log('DIAGNOSTIC -- skipped (' + logReason + '), labeled so it stops reappearing' + (markRead ? ' and marked read' : '') + ': ' + subject);
     return;
   }
 
@@ -1524,7 +1543,7 @@ function runReplyDrafterInner() {
         recordPermanentSkip_(thread, labelSuppressedNoDraft, CONFIG.LABEL_SUPPRESSED_NO_DRAFT, skipCache, threadId, messages.length,
           'opt-out -- suppressed, no draft made',
           'suppressed (opt-out): ' + leadEmail,
-          subject);
+          subject, true);
         processed++;
         continue;
       }
@@ -1553,7 +1572,7 @@ function runReplyDrafterInner() {
         recordPermanentSkip_(thread, labelSuppressedNoDraft, CONFIG.LABEL_SUPPRESSED_NO_DRAFT, skipCache, threadId, messages.length,
           'auto-reply/OOO -- suppressed, no draft made',
           'suppressed (auto-reply/OOO, not a real reply): ' + leadEmail,
-          subject);
+          subject, true);
         processed++;
         continue;
       }
