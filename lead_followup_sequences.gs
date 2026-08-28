@@ -1566,8 +1566,27 @@ function advancePodcastSalesFollowUps() {
   let stopped = 0;
   let capSkipped = 0;
   let declineStopped = 0;
+  let seanHeld = 0;
   let currentDraftCount = countActiveApprovalDrafts(); // live running count, checked before every new draft
   let dailyCreated = getFollowUpDraftsCreatedToday(); // per-Pacific-day creation counter, checked alongside the total cap
+
+  // ADDED (28 Aug 2026, per direct request -- "Sean gets 2-3 days, then
+  // falls back into the cycle"): loaded ONCE per run, not per row -- see
+  // sean_contact_tracker.gs for why this fails closed (skips drafting
+  // entirely for THIS run, not "assume no contact") when the tracker can't
+  // be read, rather than risking a redundant follow-up on top of a call
+  // Sean already made. A read failure is loud (ops alert), not silent.
+  const seanTracker = loadSeanContactTracker_();
+  if (!seanTracker.ok) {
+    sendOpsAlert(
+      'advancePodcastSalesFollowUps could not read Sean\'s call tracker',
+      'Sean\'s call tracker (spreadsheet ' + SEAN_TRACKER_SPREADSHEET_ID + ') could not be read this run -- ' +
+      'see the Executions log for the exact error (permissions, or the tracker\'s columns changed). Since a ' +
+      'read failure means we have no information about whether Sean already contacted a lead, NO automated ' +
+      'follow-up drafts were created this run for any row that would otherwise be due -- safer than guessing. ' +
+      'Fix the tracker access/structure, then this will pick back up on the next run automatically.'
+    );
+  }
 
   for (let r = 1; r < data.length; r++) {
     const row = data[r];
@@ -1616,6 +1635,35 @@ function advancePodcastSalesFollowUps() {
         continue;
       }
       if (new Date() < nextDueDate) continue;
+
+      // ADDED (28 Aug 2026, per direct request -- "Sean gets 2-3 days, then
+      // falls back into the cycle"): the wait ABOVE (nextDueDate, driven by
+      // FOLLOWUP_WORKING_DAYS_GAP) is that window. This is the missing
+      // piece: now that the window has elapsed, check whether Sean already
+      // reached this lead by phone before drafting an automated follow-up
+      // on top of a call he already made. See sean_contact_tracker.gs for
+      // "reached" vs. "attempted" and the fail-closed behavior on a tracker
+      // read failure (handled once, above the loop -- seanTracker.ok stays
+      // false for every row this run if the read failed).
+      if (seanTracker.ok) {
+        const seanContact = hasSeanMadeRealContact_(seanTracker.map, email);
+        if (seanContact.contacted) {
+          queueTab.getRange(r + 1, 7).setValue('HELD');
+          Logger.log('advancePodcastSalesFollowUps -- HELD (Sean already made contact): ' + threadId + ' (' +
+            name + ', ' + email + ') -- ' + seanContact.reason + '. Not drafting an automated follow-up.');
+          seanHeld++;
+          continue;
+        }
+      } else {
+        // Tracker read failed for the whole run (already alerted once,
+        // above the loop) -- skip drafting for this row too rather than
+        // silently assuming "no contact." Left at _SCHEDULE, same as a
+        // cap-skipped row, so it's picked up automatically once the
+        // tracker is readable again.
+        Logger.log('advancePodcastSalesFollowUps -- SKIPPED (Sean tracker unreadable this run): ' + threadId +
+          ' (' + name + '), left at _SCHEDULE, will check again next run.');
+        continue;
+      }
 
       if (currentDraftCount >= FOLLOWUP_DRAFT_CAP) {
         Logger.log('advancePodcastSalesFollowUps -- CAP REACHED (' + FOLLOWUP_DRAFT_CAP + ' active drafts) -- skipping draft for ' + threadId + ' (' + name + '), left at _SCHEDULE, will draft on a future run once room opens.');
@@ -1707,7 +1755,7 @@ function advancePodcastSalesFollowUps() {
     }
   }
 
-  Logger.log('advancePodcastSalesFollowUps complete. Advanced ' + advanced + ', completed ' + completed + ', stopped ' + stopped + ', STOPPED FOR DECLINE ' + declineStopped + ', skipped due to cap ' + capSkipped + '. Live draft count now ~' + currentDraftCount + '/' + FOLLOWUP_DRAFT_CAP + '.');
+  Logger.log('advancePodcastSalesFollowUps complete. Advanced ' + advanced + ', completed ' + completed + ', stopped ' + stopped + ', STOPPED FOR DECLINE ' + declineStopped + ', HELD (Sean already contacted) ' + seanHeld + ', skipped due to cap ' + capSkipped + '. Live draft count now ~' + currentDraftCount + '/' + FOLLOWUP_DRAFT_CAP + '.');
 }
 
 function advanceHubGuestFollowUps() {

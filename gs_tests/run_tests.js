@@ -611,6 +611,37 @@ check('escapeHtml: null does not throw', (() => { try { escapeHtml(null); return
 check('escapeHtml: a number does not throw', (() => { try { escapeHtml(42); return 'ok'; } catch (e) { return 'THREW: ' + e; } })(), 'ok');
 
 // ---------------------------------------------------------------------------
+// 12. hasSeanMadeRealContact_ -- "reached" vs. "attempted" (28 Aug 2026, per
+// direct request: closing "Sean gets 2-3 days, then falls back into the
+// cycle"). Real Call Output values sampled from Sean's actual tracker.
+// ---------------------------------------------------------------------------
+{
+  const { context: ctx } = buildContext(['sean_contact_tracker.gs']);
+  const trackerMap = {
+    'maggie@pnwartelor.com': { callOutput: "Can't Reach", comment: 'VM sent SMS' },
+    'annmarie@endlesssummerrealty.com': { callOutput: 'QC Booked', comment: 'BOOKED QC 2nd call' },
+    'gregs@iconicht.com': { callOutput: 'Callback', comment: "said he'd call back" },
+    'jodie@athomeintx.com': { callOutput: 'Not Interested', comment: 'replied w/a DND' },
+    'blank@example.com': { callOutput: '', comment: '' },
+  };
+
+  check('hasSeanMadeRealContact_: "Can\'t Reach" is NOT contact (attempted, not reached)',
+    ctx.hasSeanMadeRealContact_(trackerMap, 'maggie@pnwartelor.com').contacted, false);
+  check('hasSeanMadeRealContact_: "QC Booked" IS contact',
+    ctx.hasSeanMadeRealContact_(trackerMap, 'annmarie@endlesssummerrealty.com').contacted, true);
+  check('hasSeanMadeRealContact_: "Callback" IS contact',
+    ctx.hasSeanMadeRealContact_(trackerMap, 'gregs@iconicht.com').contacted, true);
+  check('hasSeanMadeRealContact_: "Not Interested" IS contact',
+    ctx.hasSeanMadeRealContact_(trackerMap, 'jodie@athomeintx.com').contacted, true);
+  check('hasSeanMadeRealContact_: blank Call Output is NOT contact',
+    ctx.hasSeanMadeRealContact_(trackerMap, 'blank@example.com').contacted, false);
+  check('hasSeanMadeRealContact_: lead not in tracker at all is NOT contact (falls back on schedule)',
+    ctx.hasSeanMadeRealContact_(trackerMap, 'never.seen@example.com').contacted, false);
+  check('hasSeanMadeRealContact_: email matching is case-insensitive',
+    ctx.hasSeanMadeRealContact_(trackerMap, 'ANNMARIE@endlesssummerrealty.COM').contacted, true);
+}
+
+// ---------------------------------------------------------------------------
 // FIX (28 Aug 2026, real risk found while adding the Lynn fallback tests):
 // this summary used to sit right after section 7 -- every check added after
 // it (the word-wrapped-attribution test, both new fallback tests above, and
