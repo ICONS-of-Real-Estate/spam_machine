@@ -642,8 +642,86 @@ function generateSopSuggestionsInner(opts) {
 // suggested_change, confidence}), or null on any failure -- callers should
 // fall back to sending the unmerged list rather than losing the run's
 // findings entirely over a merge-step hiccup.
+//
+// CHUNKED (28 Aug 2026, real incident -- 27 Aug's run generated 52 raw
+// suggestions from 35 edits and the doc/email that reached the team still
+// had all 52, un-consolidated: "suggesting 52 SOP changes is still too
+// much"). ROOT CAUSE: this was a single LLM call handed the ENTIRE list at
+// once. At 52 verbose entries (each a multi-sentence pattern_observed +
+// suggested_change, per the real doc), a full-fidelity merged response can
+// easily need more output than a single call comfortably produces, and the
+// same silent-failure path documented above -- no text block, unparseable
+// JSON, empty array -- falls all the way back to "send everything
+// unmerged." A truncated/failed merge and a merge that's simply too large
+// to reason well about both land on the same result: the raw dump. FIX:
+// merge in bounded chunks first (each well within one call's comfortable
+// output size), then merge the merged results together in a second pass --
+// same map-reduce shape as SOP_SUGGESTIONS_BATCH_SIZE already uses for
+// generation, applied to consolidation too. A list at or under one chunk
+// still does exactly what this function always did: one call, no
+// recursion.
+const SOP_MERGE_CHUNK_SIZE = 15;
+
 function mergeDuplicateSuggestions_(suggestionLines, callerLabel) {
   if (!suggestionLines || suggestionLines.length <= 1) return null;
+
+  if (suggestionLines.length > SOP_MERGE_CHUNK_SIZE) {
+    const chunks = [];
+    for (let i = 0; i < suggestionLines.length; i += SOP_MERGE_CHUNK_SIZE) {
+      chunks.push(suggestionLines.slice(i, i + SOP_MERGE_CHUNK_SIZE));
+    }
+    Logger.log(callerLabel + ' -- ' + suggestionLines.length + ' suggestion(s) exceeds the ' + SOP_MERGE_CHUNK_SIZE +
+      '-item merge chunk size, splitting into ' + chunks.length + ' chunk(s) before a final combining pass.');
+
+    const chunkResults = [];
+    chunks.forEach((chunk, idx) => {
+      const mergedChunk = mergeSuggestionChunk_(chunk, callerLabel + ':chunk' + (idx + 1));
+      // A chunk that fails to merge still contributes its raw entries to the
+      // final pass rather than being dropped -- losing real findings to a
+      // one-chunk hiccup would be worse than asking the final pass to work
+      // a little harder.
+      if (mergedChunk) {
+        chunkResults.push(...mergedChunk.map(s => '[' + s.confidence + '] ' + s.pattern_observed + ' -> ' + s.suggested_change));
+      } else {
+        chunkResults.push(...chunk);
+      }
+    });
+
+    // Final combining pass over the (now much smaller) per-chunk results.
+    // Recurses only if the chunked results are STILL over the chunk size --
+    // won't happen at realistic volumes (chunks / SOP_MERGE_CHUNK_SIZE
+    // chunk-results is always <= SOP_MERGE_CHUNK_SIZE for any list size that
+    // matters here), but staying recursive rather than assuming it costs
+    // nothing and keeps the guarantee true regardless of how large a future
+    // backlog gets.
+    return mergeDuplicateSuggestions_(chunkResults, callerLabel + ':final') || chunkResults.map(parseSuggestionLine_);
+  }
+
+  return mergeSuggestionChunk_(suggestionLines, callerLabel);
+}
+
+// Parses a "[confidence] pattern -> change" line back into the structured
+// shape, for the rare fallback path where a chunk's raw lines end up in the
+// final output untouched (chunk merge failed AND the final pass over the
+// combined list also failed) -- keeps the return shape consistent
+// ({pattern_observed, suggested_change, confidence}) regardless of which
+// path produced it.
+function parseSuggestionLine_(line) {
+  const m = String(line).match(/^\[(\w+)\]\s*(.*?)\s*->\s*(.*)$/);
+  return m
+    ? { confidence: m[1], pattern_observed: m[2], suggested_change: m[3] }
+    : { confidence: 'low', pattern_observed: String(line), suggested_change: '' };
+}
+
+// The actual single-call merge, unchanged from the original implementation
+// except the caller-supplied label and a higher max_tokens (see below) --
+// operates on one chunk (<= SOP_MERGE_CHUNK_SIZE items) at a time.
+function mergeSuggestionChunk_(suggestionLines, callerLabel) {
+  if (!suggestionLines || suggestionLines.length <= 1) return null;
+  // ':merge' suffix preserved from the pre-chunking version -- keeps merge
+  // calls distinguishable from the main generation calls in the LLM Cost
+  // Log under the same top-level caller name.
+  const llmCallerLabel = callerLabel + ':merge';
 
   const systemPrompt = `You consolidate a list of proposed SOP changes that may contain duplicate or near-duplicate entries -- the same underlying behavioral pattern independently discovered multiple times and worded slightly differently. Merge duplicates/near-duplicates into a single clear entry each. Keep genuinely distinct suggestions separate. When merging, keep the clearest wording and the highest confidence level seen among the merged entries. Do not invent new suggestions -- only consolidate what is given.`;
 
@@ -651,13 +729,21 @@ function mergeDuplicateSuggestions_(suggestionLines, callerLabel) {
   const userPrompt = `Here are ${suggestionLines.length} proposed SOP changes, which may contain duplicates or near-duplicates describing the same underlying pattern:\n\n${listText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble -- the consolidated, deduplicated list. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}.`;
 
   try {
-    const data = callLlmWithFallback(systemPrompt, userPrompt, 8000, callerLabel + ':merge');
+    // RAISED 8000 -> 12000 (28 Aug 2026, same incident as above): a
+    // full-fidelity echo of a near-max-size chunk (15 verbose entries) can
+    // approach 8000 output tokens on its own with little room left for
+    // actual consolidation text -- the same truncation shape as the 23 Aug
+    // generation-side incident this function's max_tokens was never
+    // revisited for. Chunking keeps each call's input bounded; this keeps
+    // its output budget from being the next silent-failure trigger.
+    const data = callLlmWithFallback(systemPrompt, userPrompt, 12000, llmCallerLabel);
     const textBlock = data.content.find(c => c.type === 'text');
     if (!textBlock) {
       Logger.log(callerLabel + ' -- merge step got no text block back, sending unmerged (' + suggestionLines.length + ' items).');
       return null;
     }
-    const merged = JSON.parse(textBlock.text.trim());
+    const cleaned = textBlock.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+    const merged = JSON.parse(cleaned);
     if (!Array.isArray(merged) || merged.length === 0) {
       Logger.log(callerLabel + ' -- merge step returned no usable list, sending unmerged (' + suggestionLines.length + ' items).');
       return null;
@@ -961,10 +1047,33 @@ function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount) {
   if (suggestions.length === 0) {
     body.appendParagraph('No clear repeated pattern found in today\'s edits -- nothing to propose.');
   } else {
+    // READABILITY (28 Aug 2026, per direct request -- "blocks of text like
+    // this is very hard to read... bold, highlight, spacing makes it
+    // easier"): every line here used to be one plain, unstyled paragraph --
+    // a heading followed by two dense sentences with no visual separation
+    // from the confidence level, the "Pattern observed"/"Suggested change"
+    // labels, or the next suggestion. Confidence now gets a colored heading
+    // (matches categoryColor_'s green/red convention in daily_report.gs --
+    // high confidence should read as "act on this," not require reading the
+    // word), the two labels are bold and inline instead of narrative
+    // prose, and each suggestion gets breathing room below it.
+    const confidenceColor_ = c => {
+      const s = String(c).toLowerCase();
+      if (s === 'high') return '#1a7f37';
+      if (s === 'low') return '#888888';
+      return '#e08e0b'; // medium
+    };
     suggestions.forEach((s, idx) => {
-      body.appendParagraph('Suggestion ' + (idx + 1) + ' -- ' + String(s.confidence).toUpperCase() + ' confidence').setHeading(DocumentApp.ParagraphHeading.HEADING2);
-      body.appendParagraph('Pattern observed: ' + s.pattern_observed);
-      body.appendParagraph('Suggested change: ' + s.suggested_change);
+      const heading = body.appendParagraph('Suggestion ' + (idx + 1) + ' -- ' + String(s.confidence).toUpperCase() + ' confidence');
+      heading.setHeading(DocumentApp.ParagraphHeading.HEADING2);
+      heading.editAsText().setForegroundColor(confidenceColor_(s.confidence));
+
+      const patternPara = body.appendParagraph('Pattern observed: ' + s.pattern_observed);
+      patternPara.editAsText().setBold(0, 'Pattern observed:'.length - 1, true);
+
+      const changePara = body.appendParagraph('Suggested change: ' + s.suggested_change);
+      changePara.editAsText().setBold(0, 'Suggested change:'.length - 1, true);
+      changePara.setSpacingAfter(14);
     });
   }
 
