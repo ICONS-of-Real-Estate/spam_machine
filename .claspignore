@@ -18,3 +18,17 @@ outreach/**
 research/**
 sop_change_requests/**
 FUTURE_FEATURES.md
+
+# ADDED (28 Aug 2026, real incident): gs_tests/ is the Node-based regression
+# suite (run via `node gs_tests/run_tests.js` -- see its own header comment)
+# -- harness.js/run_tests.js use `require`, which does not exist in Apps
+# Script's runtime. Never excluded before now, so a clasp push finally
+# synced it into the live project and broke EVERY function: Apps Script
+# evaluates every file's top-level code on any invocation, so
+# harness.js/run_tests.js's `require(...)` calls threw
+# "ReferenceError: require is not defined" on every single run, not just
+# ones that touch this file. If you're reading this after it already
+# happened, check the Apps Script editor for stray harness.gs / run_tests.gs
+# files (Apps Script renames .js to .gs on push) and delete them by hand --
+# clasp push does not undo a previous push on its own.
+gs_tests/**
