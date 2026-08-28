@@ -25,6 +25,7 @@ const {
   isUnmailableAsLead_,
   isNonHumanSender,
   normalizeMessageBody_,
+  escapeHtml,
 } = context;
 
 let passed = 0;
@@ -592,6 +593,22 @@ check('[REAL] Krista: lead resolves correctly once the attachment fallback suppl
   check('categorySummaryBarHtml_: empty input returns empty string, not a divide-by-zero bar',
     ctx.categorySummaryBarHtml_({}), '');
 }
+
+// ---------------------------------------------------------------------------
+// 11. escapeHtml never crashes on a non-string input (28 Aug 2026, real
+// incident): runBounceAudit called escapeHtml(m.bounceDate), a real Date
+// object (message.getDate()), and the old implementation called .replace()
+// directly on its argument with no coercion -- Date has no such method, so
+// this threw "TypeError: text.replace is not a function" in production. A
+// shared global this widely called should never crash outright on a
+// wrong-but-plausible input type.
+// ---------------------------------------------------------------------------
+check('escapeHtml: normal string still escapes correctly', escapeHtml('<b>a & b</b>'), '&lt;b&gt;a &amp; b&lt;/b&gt;');
+check('[REAL] escapeHtml: a Date object does not throw (runBounceAudit incident)',
+  (() => { try { escapeHtml(new Date(2026, 7, 28)); return 'ok'; } catch (e) { return 'THREW: ' + e; } })(),
+  'ok');
+check('escapeHtml: null does not throw', (() => { try { escapeHtml(null); return 'ok'; } catch (e) { return 'THREW: ' + e; } })(), 'ok');
+check('escapeHtml: a number does not throw', (() => { try { escapeHtml(42); return 'ok'; } catch (e) { return 'THREW: ' + e; } })(), 'ok');
 
 // ---------------------------------------------------------------------------
 // FIX (28 Aug 2026, real risk found while adding the Lynn fallback tests):

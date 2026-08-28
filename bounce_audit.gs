@@ -297,7 +297,11 @@ function emailMisdirectedBounceAlert_(misdirected) {
           '<b>Sent to:</b> <span style="color:#c0392b; font-weight:bold;">' + escapeHtml(m.bouncedTo) + '</span> ' +
             '<span style="color:#888888; font-size:12px;">(one of OUR addresses, not the lead)</span><br>' +
           '<b>Real lead (reply here to fix it):</b> ' + realLeadHtml + '<br>' +
-          '<b>Bounced:</b> ' + escapeHtml(m.bounceDate) + '<br>' +
+          // FIX (28 Aug 2026, real incident): m.bounceDate is a real Date
+          // object (message.getDate()), not text -- format it properly
+          // rather than relying on escapeHtml's now-defensive String()
+          // coercion to paper over passing the wrong type here.
+          '<b>Bounced:</b> ' + escapeHtml(Utilities.formatDate(m.bounceDate, 'Europe/Paris', 'MMM d, yyyy HH:mm')) + '<br>' +
           '<b>Thread:</b> <a href="' + m.link + '" style="color:#2E74B5;">Open thread</a>' +
         '</div>' +
       '</div>'

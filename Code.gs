@@ -2782,8 +2782,18 @@ function stripForwardHeaderKeepHistory(plainBody) {
   return plainBody.replace(headerBlock, '').trim();
 }
 
+// FIX (28 Aug 2026, real incident -- runBounceAudit crashed with "TypeError:
+// text.replace is not a function"): called with a raw Date object
+// (bounce_audit.gs's m.bounceDate, itself message.getDate()) instead of a
+// string. String concatenation elsewhere in the same file silently
+// tolerates a Date via its own implicit toString(); calling .replace()
+// directly on one throws outright, since Date has no such method. This is
+// a shared global used across the project -- crashing on any non-string
+// input (a Date, a number, null) is the wrong failure mode for something
+// this widely called. Coerce first, same as every other text-handling
+// helper in this codebase (extractAllEmailsFrom_, linkifyPlainText_, etc.).
 function escapeHtml(text) {
-  return text
+  return String(text)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
