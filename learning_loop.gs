@@ -687,9 +687,27 @@ function generateSopSuggestionsInner(opts) {
 // still does exactly what this function always did: one call, no
 // recursion.
 const SOP_MERGE_CHUNK_SIZE = 15;
+// SAFETY NET (28 Aug 2026, real incident -- confirmed live: a real run sat
+// at exactly 21 items for 7+ straight recursive passes, each one splitting
+// into a 15-chunk that merged 15->15 (no duplicates left to find) and a
+// 6-chunk that merged 6->6, recombining back to the same 21 every time --
+// an infinite loop with no base case for "this pass made no progress,"
+// burning an LLM call roughly every 20-40 seconds for over 20 minutes
+// before a human caught it and had to stop the execution by hand. Two
+// independent guards below, either one alone would have stopped it:
+// (1) a hard depth cap, (2) a no-progress check that accepts the current
+// list rather than recursing again once a pass stops shrinking it.
+const SOP_MERGE_MAX_DEPTH = 5;
 
-function mergeDuplicateSuggestions_(suggestionLines, callerLabel) {
+function mergeDuplicateSuggestions_(suggestionLines, callerLabel, depth) {
+  depth = depth || 0;
   if (!suggestionLines || suggestionLines.length <= 1) return null;
+
+  if (depth >= SOP_MERGE_MAX_DEPTH) {
+    Logger.log(callerLabel + ' -- hit the ' + SOP_MERGE_MAX_DEPTH + '-pass merge depth cap with ' +
+      suggestionLines.length + ' item(s) still remaining -- accepting the current list rather than recursing further.');
+    return suggestionLines.map(parseSuggestionLine_);
+  }
 
   if (suggestionLines.length > SOP_MERGE_CHUNK_SIZE) {
     const chunks = [];
@@ -718,16 +736,27 @@ function mergeDuplicateSuggestions_(suggestionLines, callerLabel) {
       }
     });
 
-    // Final combining pass over the (now much smaller) per-chunk results.
-    // Recurses only if the chunked results are STILL over the chunk size --
-    // won't happen at realistic volumes (chunks / SOP_MERGE_CHUNK_SIZE
-    // chunk-results is always <= SOP_MERGE_CHUNK_SIZE for any list size that
-    // matters here), but staying recursive rather than assuming it costs
-    // nothing and keeps the guarantee true regardless of how large a future
-    // backlog gets.
+    // NO-PROGRESS CHECK (28 Aug 2026, real incident -- see SOP_MERGE_MAX_DEPTH
+    // comment above): if this pass didn't actually shrink the list -- every
+    // chunk came back the same size it went in, meaning the LLM found no
+    // more duplicates to collapse -- recursing again would just repeat the
+    // exact same chunking and get the exact same non-answer forever. That
+    // is precisely what happened live. Stop and accept the current list
+    // once a pass stops making progress, rather than assuming a smaller
+    // pass always follows a chunked one.
+    if (chunkResults.length >= suggestionLines.length) {
+      Logger.log(callerLabel + ' -- combining pass made no further progress (' + suggestionLines.length + ' in, ' +
+        chunkResults.length + ' out) -- accepting the current list instead of recursing again.');
+      return chunkResults.map(parseSuggestionLine_);
+    }
+
+    // Final combining pass over the (now smaller) per-chunk results.
+    // Recurses only if the chunked results are STILL over the chunk size
+    // AND this pass actually made progress (checked above) -- bounded by
+    // SOP_MERGE_MAX_DEPTH regardless.
     Logger.log(callerLabel + ' -- all ' + chunks.length + ' chunk(s) merged (' + chunkResults.length +
       ' item(s) total), starting final combining pass...');
-    return mergeDuplicateSuggestions_(chunkResults, callerLabel + ':final') || chunkResults.map(parseSuggestionLine_);
+    return mergeDuplicateSuggestions_(chunkResults, callerLabel + ':final', depth + 1) || chunkResults.map(parseSuggestionLine_);
   }
 
   return mergeSuggestionChunk_(suggestionLines, callerLabel);
