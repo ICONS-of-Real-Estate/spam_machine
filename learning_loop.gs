@@ -506,6 +506,19 @@ function generateSopSuggestionsInner(opts) {
   const SOP_SUGGESTIONS_RUN_TIME_BUDGET_MS = 4.5 * 60 * 1000; // leave headroom under the ~6-min execution limit
   const runStart = new Date().getTime();
 
+  // ADDED (28 Aug 2026, per direct request, after watching a real run
+  // generate 67 raw suggestions from 50 edits in one go): the time budget
+  // above bounds how LONG a run can go, but nothing bounded how MANY raw
+  // suggestions it could pile up before merging -- a big backlog (today's
+  // 107 unreviewed edits) could keep this loop running batch after batch
+  // right up to the time limit, handing the merge step (and the human
+  // reviewing the doc afterward) a huge pile at once. This stops the loop
+  // once the running total crosses SOP_SUGGESTIONS_MAX_RAW_PER_RUN, leaving
+  // the rest of the backlog for the next run(s) via the existing
+  // deferredCount mechanism -- same "smaller, more frequent batches" fix
+  // shape as SOP_SUGGESTIONS_BATCH_SIZE itself.
+  const SOP_SUGGESTIONS_MAX_RAW_PER_RUN = 10;
+
   const allBatchEdits = [];
   const allSuggestions = [];
   let remaining = unreviewedEdits.slice();
@@ -513,7 +526,8 @@ function generateSopSuggestionsInner(opts) {
 
   let batchNum = 0;
   const totalBatches = Math.ceil(unreviewedEdits.length / SOP_SUGGESTIONS_BATCH_SIZE);
-  while (remaining.length > 0 && (new Date().getTime() - runStart) < SOP_SUGGESTIONS_RUN_TIME_BUDGET_MS) {
+  while (remaining.length > 0 && allSuggestions.length < SOP_SUGGESTIONS_MAX_RAW_PER_RUN &&
+    (new Date().getTime() - runStart) < SOP_SUGGESTIONS_RUN_TIME_BUDGET_MS) {
     batchNum++;
     const batchEdits = remaining.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
     const batchRowIndexes = remainingRowIndexes.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
