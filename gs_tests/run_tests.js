@@ -406,6 +406,31 @@ check('freshReply: zero-commentary relay of OUR OWN outreach still returns empty
   })),
   '');
 
+// REGRESSION GUARD (28 Aug 2026, real incident -- 21 of 22 leads reconciled
+// by reconcileMissingDrafts this morning were bare "Stop" opt-outs that got
+// drafted anyway: the fallback above used to keep collecting past the bare
+// word into a mobile sendoff or an inline image placeholder, which defeated
+// OPT_OUT_PATTERNS' anchored `^\s*stop[.!]?\s*$` alternative downstream.
+// [REAL] shape: Austin/asmluxuryhomes.com's actual thread.
+check('freshReply: bare opt-out stops before an inline image placeholder, not the whole blob',
+  extractProspectFreshReplyText(fakeMessage({
+    body: 'On Wednesday, Aug 26, 2026 at 3:08 pm austin@asmluxuryhomes.com wrote:\nstop\n\n[data:image/png;base64,iVBORw0KGgo...]',
+  })),
+  'stop');
+// [REAL] shape: several of the other 20 (e.g. preti@poundrealtyllc.com,
+// bethany@1702realestate.com) -- "Stop" followed immediately by a mobile
+// client's sendoff line, no blank line in between.
+check('freshReply: bare opt-out stops before a "Sent from my iPhone" mobile sendoff',
+  extractProspectFreshReplyText(fakeMessage({
+    body: 'On Wednesday, Aug 26, 2026 at 9:00 am preti@poundrealtyllc.com wrote:\nStop\nSent from my iPhone',
+  })),
+  'Stop');
+check('freshReply: a genuine multi-line decline with a mobile sendoff still stops at the sendoff, keeps the real text',
+  extractProspectFreshReplyText(fakeMessage({
+    body: 'On Wednesday, Aug 26, 2026 at 9:00 am lead@example.com wrote:\nNot interested, please remove me from this list.\nSent from my iPhone',
+  })),
+  'Not interested, please remove me from this list.');
+
 // ---------------------------------------------------------------------------
 // 7b. getEffectivePlainBody_ (real incident -- Krista's thread, 28 Aug 2026):
 // getPlainBody() AND getBody() can both come back completely empty for a

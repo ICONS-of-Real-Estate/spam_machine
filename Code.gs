@@ -1559,9 +1559,20 @@ function runReplyDrafterInner() {
       }
 
       const replyBody = extractProspectFreshReplyText(lastMsg);
+      // FIX (28 Aug 2026, real incident -- see extractProspectFreshReplyText's
+      // fallback comment): the bare-word OPT_OUT_PATTERNS alternative
+      // (`^\s*stop[.!]?\s*$`) requires the ENTIRE replyBody to be just "stop",
+      // so ANY trailing junk after it -- a signature block, an image, a
+      // second quoted message -- defeats the anchor no matter what shape
+      // that junk takes. The extraction fix above closes the two shapes
+      // confirmed live (mobile sendoffs, inline images); this closes the
+      // rest by also checking just the first non-blank line, which is what
+      // a real one-word opt-out actually looks like regardless of whatever
+      // follows it.
+      const replyFirstLine = (replyBody.split('\n').find(l => l.trim() !== '') || '').trim();
 
       const alreadyLabeledStop = threadHasLabel(thread, CONFIG.LABEL_STOP);
-      if (alreadyLabeledStop || OPT_OUT_PATTERNS.test(replyBody)) {
+      if (alreadyLabeledStop || OPT_OUT_PATTERNS.test(replyBody) || OPT_OUT_PATTERNS.test(replyFirstLine)) {
         if (CONFIG.AUTO_APPLY_BUSINESS_LABELS && labelStop && !alreadyLabeledStop) thread.addLabel(labelStop);
         // CHANGED (27 Aug 2026): was thread.addLabel(labelDrafted) -- see
         // CONFIG.LABEL_SUPPRESSED_NO_DRAFT for the nightly ping-pong that caused.
@@ -2551,12 +2562,37 @@ function extractProspectFreshReplyText(message) {
   const author = firstMailableLeadIn_(extractAllEmailsFrom_(boundaryLine));
   if (!author) return '';
 
+  // FIX (28 Aug 2026, real incident -- 21 of 22 leads reconciled by
+  // reconcileMissingDrafts this morning turned out to be bare opt-outs
+  // ("Stop"/"stop"/"STOP") that got drafted anyway, all through this exact
+  // fallback. ROOT CAUSE: this loop only stopped at an attribution/forward/
+  // header line, so a bare one-word decline followed by a mobile sendoff
+  // ("Sent from my iPhone"), a signature block, or an inline image (Gmail's
+  // plain-text fallback renders these as a literal "[data:image/...;base64,
+  // <huge string>]" line -- see getEffectivePlainBody_) all got appended to
+  // the "reply." That defeated OPT_OUT_PATTERNS' bare-stop alternative
+  // (`^\s*stop[.!]?\s*$`), which requires the ENTIRE string to be just
+  // "stop" -- "stop\n\n[data:image/...]" doesn't match, so the opt-out gate
+  // silently passed threads it exists specifically to catch. Every other
+  // OPT_OUT_PATTERNS alternative is `\b...\b`-bounded, not anchored, so
+  // they still match fine buried in a longer reply -- only the bare-word
+  // case broke, which is exactly what all 21 real leads did.
+  // FIX: stop collecting at the same two signature/junk shapes seen live --
+  // a mobile "Sent from my iPhone/Android"-style sendoff, or an inline
+  // image placeholder. NOT a blank-line stop: a real multi-sentence decline
+  // legitimately contains blank lines between sentences (see the Lynn
+  // regression test below, "Not interested.\n\nThank you...") -- stopping
+  // there would truncate genuine replies, not just junk.
+  const MOBILE_SENDOFF_RE = /^(sent from my |get outlook for )/i;
+  const IMAGE_PLACEHOLDER_RE = /^\[?data:image\//i;
   const quotedLines = [];
   for (let i = quotedBlockStart; i < lines.length; i++) {
     const trimmed = stripQuoteMarkers_(lines[i]);
     if (isAttributionLine_(trimmed)) break;
     if (FORWARD_SEPARATOR_RE.test(trimmed)) break;
     if (HEADER_START.test(trimmed)) break;
+    if (MOBILE_SENDOFF_RE.test(trimmed)) break;
+    if (IMAGE_PLACEHOLDER_RE.test(trimmed)) break;
     quotedLines.push(trimmed);
   }
   return quotedLines.join('\n').trim();
