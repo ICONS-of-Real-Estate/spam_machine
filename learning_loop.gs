@@ -1000,6 +1000,53 @@ function sopApprovalStepsHtml_() {
   );
 }
 
+// ---------- DOC SHARING (28 Aug 2026, per direct request -- "make sure the
+// document is automatically open") ----------
+//
+// Every doc-building function below used to share by calling
+// file.addViewers([the four reviewers]). Two problems with that, both seen
+// live: Drive sends its OWN "Joana Peixe shared a document with you"
+// notification per recipient, so the real email this project sends arrives
+// alongside a near-identical Google one; and a viewer who is signed into a
+// different Google account first gets an access-request wall instead of the
+// document.
+//
+// Domain link-sharing fixes both: anyone at iconsofrealestate.com who clicks
+// the link opens the doc straight away, and no share-invite notifications go
+// out. This is NOT "anyone with the link" -- the original comment here
+// (correctly) refused to widen access that far, because these docs quote
+// real lead reply content. Domain-only keeps it inside the company.
+//
+// Falls back to the old addViewers behaviour if the Workspace admin has
+// link-sharing restricted, so a policy change degrades to "shared, but with
+// notifications" rather than "nobody can open it."
+function shareSopDocWithReviewers_(file) {
+  try {
+    file.setSharing(DriveApp.Access.DOMAIN_WITH_LINK, DriveApp.Permission.VIEW);
+    Logger.log('Doc shared domain-wide (view via link) -- opens directly for anyone at iconsofrealestate.com, no share-invite emails.');
+    return;
+  } catch (e) {
+    Logger.log('Could not set domain link-sharing (' + e + ') -- falling back to per-person viewer access.');
+  }
+
+  // FALLBACK, preserved from the original implementation.
+  // FIXED (23 Aug 2026, real incident): confirmed live -- this threw
+  // "Access denied: DriveApp." on every run. Root cause: the doc is created
+  // (and owned) by whichever account the trigger runs as -- Joana's -- and
+  // Drive rejects addViewers() outright if the list includes the file's own
+  // owner (you can't add an owner as a mere viewer). The whole batch call
+  // failed, not just that one entry, so nobody ever got shared. Filter the
+  // owner out of the list before sharing.
+  try {
+    const ownerEmail = file.getOwner() ? file.getOwner().getEmail() : null;
+    const viewers = ['goodness@iconsofrealestate.com', 'joana@iconsofrealestate.com', 'kris@iconsofrealestate.com', 'tomas@iconsofrealestate.com']
+      .filter(addr => addr.toLowerCase() !== (ownerEmail || '').toLowerCase());
+    if (viewers.length > 0) file.addViewers(viewers);
+  } catch (e) {
+    Logger.log('Fallback per-person sharing also failed (' + e + ') -- the doc link may not open for everyone. Doc still created and linked.');
+  }
+}
+
 function docLinkCardHtml_(url, label) {
   return (
     '<div style="margin:14px 0; padding:14px 18px; border:1px solid #e0e0e0; border-left:4px solid #1a2b4c; border-radius:6px;">' +
@@ -1057,12 +1104,7 @@ function finalizeSopSuggestionsCatchup() {
 
   doc.saveAndClose();
   const file = DriveApp.getFileById(doc.getId());
-  const ownerEmail = file.getOwner() ? file.getOwner().getEmail() : null;
-  const viewers = ['goodness@iconsofrealestate.com', 'joana@iconsofrealestate.com', 'kris@iconsofrealestate.com', 'tomas@iconsofrealestate.com']
-    .filter(addr => addr.toLowerCase() !== (ownerEmail || '').toLowerCase());
-  if (viewers.length > 0) {
-    file.addViewers(viewers);
-  }
+  shareSopDocWithReviewers_(file);
 
   MailApp.sendEmail({
     to: 'goodness@iconsofrealestate.com,joana@iconsofrealestate.com',
@@ -1146,12 +1188,7 @@ function mergeAndResendTodaysSopSuggestions() {
 
   doc.saveAndClose();
   const file = DriveApp.getFileById(doc.getId());
-  const ownerEmail = file.getOwner() ? file.getOwner().getEmail() : null;
-  const viewers = ['goodness@iconsofrealestate.com', 'joana@iconsofrealestate.com', 'kris@iconsofrealestate.com', 'tomas@iconsofrealestate.com']
-    .filter(addr => addr.toLowerCase() !== (ownerEmail || '').toLowerCase());
-  if (viewers.length > 0) {
-    file.addViewers(viewers);
-  }
+  shareSopDocWithReviewers_(file);
 
   MailApp.sendEmail({
     to: 'goodness@iconsofrealestate.com,joana@iconsofrealestate.com',
@@ -1260,25 +1297,12 @@ function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount) {
 
   doc.saveAndClose();
   const file = DriveApp.getFileById(doc.getId());
-  // Share with just the three reviewers, not "anyone with the link" --
-  // this is real lead-reply content, no reason to widen access beyond who
-  // actually needs to review it.
-  // FIXED (23 Aug 2026, real incident): confirmed live -- this threw
-  // "Access denied: DriveApp." on every run. Root cause: the doc is created
-  // (and owned) by whichever account the trigger runs as -- Joana's -- and
-  // Drive rejects addViewers() outright if the list includes the file's own
-  // owner (you can't add an owner as a mere viewer). The whole batch call
-  // failed, not just that one entry, so nobody ever got shared. Filter the
-  // owner out of the list before sharing.
-  const ownerEmail = file.getOwner() ? file.getOwner().getEmail() : null;
-  // ADDED (23 Aug 2026, per direct request): Tomás is now CC'd on the email
-  // below, so he needs view access to the doc the email links to as well --
-  // otherwise he's CC'd a link he can't open.
-  const viewers = ['goodness@iconsofrealestate.com', 'joana@iconsofrealestate.com', 'kris@iconsofrealestate.com', 'tomas@iconsofrealestate.com']
-    .filter(addr => addr.toLowerCase() !== (ownerEmail || '').toLowerCase());
-  if (viewers.length > 0) {
-    file.addViewers(viewers);
-  }
+  // Domain link-sharing, NOT "anyone with the link" -- these docs quote real
+  // lead reply content, so access stays inside iconsofrealestate.com. See
+  // shareSopDocWithReviewers_ for why this replaced per-person addViewers
+  // (Google's own duplicate share-notification emails, and the access-request
+  // wall a viewer hit when signed into another account first).
+  shareSopDocWithReviewers_(file);
   return file;
 }
 
