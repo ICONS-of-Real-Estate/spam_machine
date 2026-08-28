@@ -964,6 +964,29 @@ function registerNewHubGuestInvites(lookbackDaysOverride) {
     // no_decline classification enough to auto-enroll it. See
     // AMBIGUOUS_NO_DECLINE_SIGNALS above for why.
     const prospectReplyText = extractProspectFreshReplyText(originalReplyMsg);
+
+    // FIX (28 Aug 2026, real incident): this function trusts the AI Drafts
+    // Log's stored `category` column, which is a point-in-time snapshot from
+    // whenever classifyAndDraft() ran -- it does not mean the opt-out gate
+    // in runReplyDrafterInner() actually saw this thread. Confirmed live:
+    // this morning's opt-out-detection bug (see extractProspectFreshReplyText's
+    // fallback fix above) let 21 bare "Stop" replies through to
+    // classifyAndDraft(), which classified several of them as `no_decline`
+    // and logged that row -- the drafts themselves were deleted and the
+    // threads relabeled hours ago, but this function reads the LOG, not
+    // live thread state, so it enrolled the same 21 leads into the Hub
+    // Guest follow-up sequence anyway. The opt-out gate belongs here too,
+    // not only upstream -- a `no_decline` row is never grounds to enroll
+    // someone who told us to stop, regardless of why the row says
+    // `no_decline`. Same first-line-plus-full-text defense as the
+    // runReplyDrafterInner fix, for the same reason (trailing signature/
+    // image junk can defeat the anchored bare-word pattern).
+    const prospectReplyFirstLine = (prospectReplyText.split('\n').find(l => l.trim() !== '') || '').trim();
+    if (OPT_OUT_PATTERNS.test(prospectReplyText) || OPT_OUT_PATTERNS.test(prospectReplyFirstLine)) {
+      Logger.log('registerNewHubGuestInvites -- SKIPPED (prospect reply is actually an opt-out, not a real no_decline -- AI Drafts Log category was stale/wrong): ' + threadId + ' -- "' + prospectReplyText.slice(0, 200) + '"');
+      return;
+    }
+
     if (AMBIGUOUS_NO_DECLINE_SIGNALS.test(prospectReplyText)) {
       Logger.log('registerNewHubGuestInvites -- SKIPPED (ambiguous no_decline, looks like a scheduling constraint or info request -- flagged for human review instead): ' + threadId + ' -- "' + prospectReplyText.slice(0, 200) + '"');
       const wasNew = flagAmbiguousNoDeclineForReview(threadId, subject, realEmail, prospectReplyText);
