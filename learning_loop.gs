@@ -938,6 +938,68 @@ function runSopSuggestionsCatchup() {
 // on (the Doc) was a bare pasted URL on its own line, not a clickable link.
 // One shared card for all three so the visual language stays identical and
 // a future wording tweak to one doesn't quietly drift from the other two.
+// ---------- APPROVE / REJECT INSTRUCTIONS (28 Aug 2026, per direct request
+// -- "need to include in the email for how Joana can approve or reject") ----
+//
+// The email and doc both used to end with "Please review and decide whether
+// to add any of these to the live SOP" and nothing else -- no statement of
+// what approving actually consists of, where to do it, or what to do with a
+// suggestion being turned down. Reviewers were left to invent a process.
+//
+// WHAT APPROVAL ACTUALLY IS, and why it's manual: the SOP is a Google Doc
+// (CONFIG.SOP_DOC_ID) that the drafter fetches at runtime. Nothing in this
+// project can edit that Doc's body -- approving a suggestion means a human
+// making the edit in the Doc by hand. That is the whole mechanism; the text
+// below states it plainly rather than implying an automated approve button
+// exists.
+//
+// The "SOP Suggestions" sheet tab carries a status column (written as
+// 'pending' at creation) -- reviewers mark it approved/rejected so the tab
+// stays a real audit trail of what was decided. NOTE: nothing in the code
+// currently READS that column back; it is human bookkeeping, deliberately
+// described as such below so nobody assumes marking 'rejected' will stop a
+// pattern being re-suggested.
+const SOP_APPROVAL_STEPS = [
+  'APPROVE a suggestion: open the live SOP Doc and make the edit yourself (Find & Replace, or just type it). The drafter reads that Doc on every run, so the change takes effect on the next run -- usually within 15 minutes. Nothing else is needed.',
+  'REJECT a suggestion: do nothing to the SOP Doc. Optionally mark it "rejected" in the SOP Suggestions tab so the next reviewer knows it was already considered.',
+  'RECORD what you decided (optional but recommended): in the "SOP Suggestions" tab, change that row\'s status from "pending" to "approved" or "rejected". This is bookkeeping only -- it does not itself change the SOP, and it does not stop a pattern from being suggested again.',
+  'NOT SURE about one: leave it "pending" and reply to this email -- it stays in the tab and can be picked up later.',
+];
+
+function sopApprovalStepsText_() {
+  return 'HOW TO APPROVE OR REJECT\n\n' +
+    SOP_APPROVAL_STEPS.map((s, i) => (i + 1) + '. ' + s).join('\n\n') + '\n\n' +
+    'Live SOP Doc: https://docs.google.com/document/d/' + CONFIG.SOP_DOC_ID + '/edit\n' +
+    'SOP Suggestions tab: https://docs.google.com/spreadsheets/d/' + CONFIG.SPREADSHEET_ID + '/edit\n\n' +
+    'Nothing in this email has been applied to the SOP automatically. The AI never edits the SOP itself.';
+}
+
+function sopApprovalStepsHtml_() {
+  return (
+    '<div style="margin:16px 0; padding:14px 18px; border:1px solid #e0e0e0; border-left:4px solid #1a7f37; border-radius:6px;">' +
+      '<div style="font-weight:bold; color:#1a2b4c; font-size:15px; margin-bottom:8px;">How to approve or reject</div>' +
+      '<ol style="margin:0 0 10px 0; padding-left:20px; line-height:1.7;">' +
+        SOP_APPROVAL_STEPS.map(s => {
+          // Bold the leading "ACTION:" label so the four options are
+          // scannable without reading every word.
+          const m = String(s).match(/^([^:]+:)\s*([\s\S]*)$/);
+          return '<li style="margin-bottom:6px;">' + (m
+            ? '<b>' + escapeHtml(m[1]) + '</b> ' + escapeHtml(m[2])
+            : escapeHtml(s)) + '</li>';
+        }).join('') +
+      '</ol>' +
+      '<div style="font-size:13px;">' +
+        '<a href="https://docs.google.com/document/d/' + CONFIG.SOP_DOC_ID + '/edit" style="color:#1a2b4c; font-weight:bold;">Open the live SOP Doc</a>' +
+        ' &nbsp;&middot;&nbsp; ' +
+        '<a href="https://docs.google.com/spreadsheets/d/' + CONFIG.SPREADSHEET_ID + '/edit" style="color:#1a2b4c; font-weight:bold;">Open the SOP Suggestions tab</a>' +
+      '</div>' +
+      '<div style="font-size:12px; color:#888888; margin-top:8px;">' +
+        'Nothing here has been applied automatically. The AI never edits the SOP itself.' +
+      '</div>' +
+    '</div>'
+  );
+}
+
 function docLinkCardHtml_(url, label) {
   return (
     '<div style="margin:14px 0; padding:14px 18px; border:1px solid #e0e0e0; border-left:4px solid #1a2b4c; border-radius:6px;">' +
@@ -1132,6 +1194,27 @@ function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount) {
     (deferredCount > 0 ? ' ' + deferredCount + ' more edited example(s) are still queued and will show up in a future day\'s doc.' : '')
   );
   body.appendParagraph('PROPOSALS ONLY -- nothing here has been applied to the live SOP. Review each one below and copy anything real into the live SOP doc by hand.');
+
+  // ADDED (28 Aug 2026, same request as the email version): the doc is what
+  // a reviewer actually sits and reads -- putting the approve/reject steps
+  // only in the email meant they were gone the moment she clicked through.
+  // Same SOP_APPROVAL_STEPS source as the email, so the two can't drift.
+  const howToHeading = body.appendParagraph('How to approve or reject');
+  howToHeading.setHeading(DocumentApp.ParagraphHeading.HEADING2);
+  howToHeading.editAsText().setForegroundColor('#1a7f37');
+  SOP_APPROVAL_STEPS.forEach((s, i) => {
+    const p = body.appendParagraph((i + 1) + '. ' + s);
+    const labelMatch = String(s).match(/^([^:]+:)/);
+    if (labelMatch) {
+      // Bold through the "ACTION:" label (offset by the "N. " prefix) so the
+      // four options are scannable at a glance.
+      const start = String(i + 1).length + 2;
+      p.editAsText().setBold(start, start + labelMatch[1].length - 1, true);
+    }
+  });
+  body.appendParagraph('Live SOP Doc: https://docs.google.com/document/d/' + CONFIG.SOP_DOC_ID + '/edit');
+  body.appendParagraph('SOP Suggestions tab: https://docs.google.com/spreadsheets/d/' + CONFIG.SPREADSHEET_ID + '/edit');
+
   body.appendHorizontalRule();
 
   if (suggestions.length === 0) {
@@ -1206,7 +1289,7 @@ function emailSopSuggestionsDoc(docFile, suggestionsCount) {
     'Today\'s automated review of edited replies found ' + suggestionsCount + ' potential SOP update' + (suggestionsCount === 1 ? '' : 's') +
     ', based on real differences between what the AI drafted and what Joana actually sent:\n\n' +
     docFile.getUrl() + '\n\n' +
-    'Please review and decide whether to add any of these to the live SOP -- nothing here has been applied automatically.';
+    sopApprovalStepsText_();
 
   // CHANGED (23 Aug 2026, per direct request -- "Make sure Tomas and Kris
   // are on CC too"): Kris moved from `to` into `cc`, Tomás added to `cc`.
@@ -1218,7 +1301,7 @@ function emailSopSuggestionsDoc(docFile, suggestionsCount) {
       '<p>Today\'s automated review of edited replies found <b>' + suggestionsCount + '</b> potential SOP update' +
         (suggestionsCount === 1 ? '' : 's') + ', based on real differences between what the AI drafted and what Joana actually sent:</p>' +
       docLinkCardHtml_(docFile.getUrl(), 'SOP Suggestions -- ' + dateStr) +
-      '<p style="color:#555555; font-size:13px;">Please review and decide whether to add any of these to the live SOP &mdash; nothing here has been applied automatically.</p>' +
+      sopApprovalStepsHtml_() +
     '</div>';
 
   MailApp.sendEmail({
