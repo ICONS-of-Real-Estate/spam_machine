@@ -511,9 +511,21 @@ function generateSopSuggestionsInner(opts) {
   let remaining = unreviewedEdits.slice();
   let remainingRowIndexes = rowIndexesToMark.slice();
 
+  let batchNum = 0;
+  const totalBatches = Math.ceil(unreviewedEdits.length / SOP_SUGGESTIONS_BATCH_SIZE);
   while (remaining.length > 0 && (new Date().getTime() - runStart) < SOP_SUGGESTIONS_RUN_TIME_BUDGET_MS) {
+    batchNum++;
     const batchEdits = remaining.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
     const batchRowIndexes = remainingRowIndexes.slice(0, SOP_SUGGESTIONS_BATCH_SIZE);
+
+    // DIAGNOSTIC (28 Aug 2026, per direct request -- "look how slow the
+    // logging is"): this loop used to print NOTHING between the "found N
+    // unreviewed edits" line at the top and the "processed N across M
+    // batch(es)" summary at the bottom -- every LLM call in between (each
+    // one can take 10-20+ seconds) ran silently. Same blind spot
+    // reconcile_missing_drafts.gs's progress line was added for on 27 Aug;
+    // applying the same fix here.
+    Logger.log('generateSopSuggestions -- starting batch ' + batchNum + '/' + totalBatches + ' (' + batchEdits.length + ' edited example(s))...');
 
     const examplesText = batchEdits
       .map((e, idx) => `EXAMPLE ${idx + 1} (category: ${e.category})\n--- AI DRAFTED ---\n${e.original}\n--- JOANA ACTUALLY SENT ---\n${e.final}`)
@@ -675,6 +687,11 @@ function mergeDuplicateSuggestions_(suggestionLines, callerLabel) {
 
     const chunkResults = [];
     chunks.forEach((chunk, idx) => {
+      // DIAGNOSTIC (28 Aug 2026, per direct request -- "look how slow the
+      // logging is"): each chunk's merge call can take 15-20+ seconds, and
+      // the only log line was AFTER it finished -- same silent-stretch
+      // problem as the generation loop above.
+      Logger.log(callerLabel + ' -- merging chunk ' + (idx + 1) + '/' + chunks.length + ' (' + chunk.length + ' item(s))...');
       const mergedChunk = mergeSuggestionChunk_(chunk, callerLabel + ':chunk' + (idx + 1));
       // A chunk that fails to merge still contributes its raw entries to the
       // final pass rather than being dropped -- losing real findings to a
@@ -694,6 +711,8 @@ function mergeDuplicateSuggestions_(suggestionLines, callerLabel) {
     // matters here), but staying recursive rather than assuming it costs
     // nothing and keeps the guarantee true regardless of how large a future
     // backlog gets.
+    Logger.log(callerLabel + ' -- all ' + chunks.length + ' chunk(s) merged (' + chunkResults.length +
+      ' item(s) total), starting final combining pass...');
     return mergeDuplicateSuggestions_(chunkResults, callerLabel + ':final') || chunkResults.map(parseSuggestionLine_);
   }
 
