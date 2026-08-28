@@ -442,12 +442,22 @@ function generateSopSuggestionsInner(opts) {
 
   if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') return true;
 
+  // DIAGNOSTIC (28 Aug 2026, per direct request -- "4 minutes and nothing
+  // logged"): everything from here to the first batch-loop log line ran
+  // completely silent -- opening the spreadsheet, and especially reading
+  // the ENTIRE "Learning Log" tab via getDataRange().getValues() (every
+  // draft/edit this project has ever logged, growing daily), had no
+  // visibility at all. A genuinely slow Sheets read and a hung one looked
+  // identical from the Executions log. Same blind-spot fix as the batch/
+  // merge loops earlier today.
+  Logger.log('generateSopSuggestions -- opening spreadsheet and reading "Learning Log"...');
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const learningTab = ss.getSheetByName('Learning Log');
   const suggestionsTab = ss.getSheetByName('SOP Suggestions');
   if (!learningTab || !suggestionsTab) return true;
 
   const rows = learningTab.getDataRange().getValues();
+  Logger.log('generateSopSuggestions -- read ' + (rows.length - 1) + ' row(s) from "Learning Log", scanning for unreviewed edits...');
   const headers = rows[0];
   const wasEditedCol = headers.indexOf('Was Edited');
   const reviewedCol = headers.indexOf('Reviewed For SOP');
