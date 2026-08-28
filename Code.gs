@@ -866,12 +866,26 @@ function saveSkipCache(ss, cacheMap) {
 // draft is ever coming, and nothing about them needs a human's attention --
 // but they kept showing up unread, requiring a manual sweep to clear (see
 // the ~28 Aug session where several dozen had to be unlabeled-UNREAD by
-// hand). Every OTHER caller of this function (already-answered-by-team,
-// subject-mismatch, already-replied-once) is deliberately left alone: those
-// are cases where a human is meant to see and act on the thread, and
-// marking them read would hide exactly the threads this system exists to
-// surface. Only pass markRead: true from the two LABEL_SUPPRESSED_NO_DRAFT
-// call sites below.
+// hand).
+//
+// EXTENDED to the LABEL_ALREADY_REPLIED_ONCE call site the same day, after
+// verifying 4 real threads (Natosha, Tiffany, Kathryn, Liz) that carried the
+// label: each had a genuine prior Joana reply to the same lead address, just
+// in a DIFFERENT Gmail thread than the one being labeled. That's structural,
+// not coincidental -- if the reply had landed in THIS thread, GATE 4's
+// isRealTeamReply check above would already have caught it as
+// AI-Skipped-AlreadyAnsweredByTeam, so this path only ever fires when the
+// live, actionable conversation lives elsewhere. Marking THIS thread read
+// hides nothing a human still needs to act on, and it doesn't suppress
+// future signal either: Cassie's and Dennis's threads both surfaced unread
+// again on a real second reply despite carrying this label from an earlier
+// message -- Gmail's own unread-on-arrival behavior isn't affected by an
+// earlier markRead() call.
+//
+// AI-Skipped-AlreadyAnsweredByTeam and AI-Skipped-NotPodcastOutreach (the
+// subject-mismatch label) are still deliberately left alone: those are
+// cases where a human is meant to see and act on the thread, and marking
+// them read would hide exactly the threads this system exists to surface.
 function recordPermanentSkip_(thread, label, labelName, skipCache, threadId, messageCount, cacheReason, logReason, subject, markRead) {
   if (label) {
     thread.addLabel(label);
@@ -1526,10 +1540,21 @@ function runReplyDrafterInner() {
       // reply doesn't reliably land back in the same Gmail thread that carries
       // LABEL_AI_DRAFTED -- see CONFIG.LABEL_ALREADY_REPLIED_ONCE's comment.
       if (hasAlreadySentReplyTo_(leadEmail)) {
+        // markRead: true (28 Aug 2026, per direct request, verified against 4
+        // real threads first): this label only fires when hasAlreadySentReplyTo_
+        // found the reply in a DIFFERENT thread (if it were in THIS thread, GATE
+        // 4's isRealTeamReply check above would already have caught it as
+        // LABEL_ALREADY_ANSWERED_BY_TEAM). So the live, actionable conversation
+        // is always elsewhere, never in the thread being labeled here -- marking
+        // THIS one read hides nothing. And it doesn't suppress future signal
+        // either: if this same lead replies again later, Gmail marks the thread
+        // unread again on arrival regardless of any earlier markRead() call --
+        // confirmed by Cassie's and Dennis's threads surfacing unread on a real
+        // second reply despite carrying this label from an earlier message.
         recordPermanentSkip_(thread, labelAlreadyRepliedOnce, CONFIG.LABEL_ALREADY_REPLIED_ONCE, skipCache, threadId, messages.length,
           'already sent a reply to ' + leadEmail + ' before -- follow-up reply, left for the team',
           'already sent a reply to ' + leadEmail + ' before -- this is a follow-up reply, per policy leaving it for the team',
-          subject);
+          subject, true);
         continue;
       }
 
