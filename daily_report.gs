@@ -69,6 +69,54 @@ function categoryBarsHtml_(cats) {
   return '<table style="border-collapse:collapse; margin:4px 0 0 0;">' + rows + '</table>';
 }
 
+// ADDED (28 Aug 2026, per direct request -- "that chart doesn't tell any
+// useful information"): categoryBarsHtml_ scales each category's bar
+// against the LARGEST category, not against the total. That answers "which
+// category is biggest" -- which the number next to it already says just as
+// clearly -- but not the question a reader actually opens this section to
+// answer: what fraction of today's replies are people saying yes versus no?
+// This renders that directly as one stacked bar (green/red/gray, same
+// three-way split categoryColor_ already computes per category) plus the
+// percentages in words, same "always print the real number next to the
+// bar" rule as every other chart in this file. Placed ABOVE the per-category
+// list, which stays as-is for anyone who wants the category-level detail.
+function categorySummaryBarHtml_(cats) {
+  const keys = Object.keys(cats);
+  const total = keys.reduce((sum, k) => sum + cats[k], 0);
+  if (total === 0) return '';
+
+  const groups = { positive: 0, negative: 0, neutral: 0 };
+  keys.forEach(k => {
+    const color = categoryColor_(k);
+    if (color === '#1a7f37') groups.positive += cats[k];
+    else if (color === '#c0392b') groups.negative += cats[k];
+    else groups.neutral += cats[k];
+  });
+
+  const widthPx = 220;
+  const posPx = Math.round((groups.positive / total) * widthPx);
+  const negPx = Math.round((groups.negative / total) * widthPx);
+  const neuPx = widthPx - posPx - negPx; // remainder, so rounding never leaves a visible gap
+  const pct = n => Math.round((n / total) * 100);
+
+  const segment = (px, color) => px > 0
+    ? '<div style="background:' + color + '; width:' + px + 'px; height:12px; display:inline-block;"></div>'
+    : '';
+
+  return (
+    '<div style="margin:6px 0 12px 0;">' +
+      '<div style="width:' + widthPx + 'px; height:12px; border-radius:3px; overflow:hidden; white-space:nowrap;">' +
+        segment(posPx, '#1a7f37') + segment(negPx, '#c0392b') + segment(neuPx, '#888888') +
+      '</div>' +
+      '<div style="font-size:12px; color:#555555; margin-top:3px;">' +
+        '<span style="color:#1a7f37; font-weight:bold;">' + groups.positive + ' interested (' + pct(groups.positive) + '%)</span> &nbsp; ' +
+        '<span style="color:#c0392b; font-weight:bold;">' + groups.negative + ' declined (' + pct(groups.negative) + '%)</span>' +
+        (groups.neutral > 0 ? ' &nbsp; <span style="color:#888888;">' + groups.neutral + ' other (' + pct(groups.neutral) + '%)</span>' : '') +
+      '</div>' +
+    '</div>'
+  );
+}
+
 // A single two-segment bar (edited vs. sent-as-is) rather than a per-category
 // list -- this is a proportion of ONE whole, not a set of independent counts,
 // so one bar reads faster than a bar-per-value table would.
@@ -231,7 +279,7 @@ function runDailyReport() {
           '<b>Booked to a call</b> (penciled time or handed to Sean/Bens): <span style="color:#1a7f37; font-weight:bold;">' + booked + '</span><br>' +
           '<b>Edited by Joana before sending:</b> ' + editStatsArg.edited + ' of ' + editStatsArg.total + ' sent (' + editPct + '%)<br>' +
           editedStackedBarHtml_(editStatsArg.edited, editStatsArg.sentAsIs) +
-          '<b>By category:</b>' + categoryBarsHtml_(cats) +
+          '<b>By category:</b>' + categorySummaryBarHtml_(cats) + categoryBarsHtml_(cats) +
         '</div>' +
       '</div>'
     );
@@ -241,8 +289,15 @@ function runDailyReport() {
     'This email was written by Claude.\n\n' +
     'DAILY REPORT -- ' + now.toDateString() + '\n\n' +
     'New leads received today (raw inbound count): ' + leadsReceivedToday + '\n\n' +
+    // REORDERED (28 Aug 2026, per direct request -- "why would you put
+    // yesterday above today"): a "Daily Report" reads top-to-bottom as
+    // most-recent-first by default; YESTERDAY leading was a leftover from
+    // TODAY being nearly empty at ~7 AM (see the DST-fix comment above --
+    // TODAY only covers midnight to run time). That reasoning never
+    // appeared in the email itself, so the order just looked backwards.
+    // TODAY first now, with an explicit note when it's still a partial day.
+    formatSection('TODAY' + (now.getHours() < 12 ? ' (partial -- only since midnight)' : ''), draftsToday, editToday) + '\n\n' +
     formatSection('YESTERDAY', draftsYesterday, editYesterday) + '\n\n' +
-    formatSection('TODAY', draftsToday, editToday) + '\n\n' +
     formatSection('LAST 7 DAYS', drafts7d, edit7d) + '\n\n' +
     formatSection('LAST 30 DAYS', drafts30d, edit30d) + '\n\n' +
     formatSection('ALL TIME', draftsAllTime, editAllTime) + '\n\n' +
@@ -271,8 +326,8 @@ function runDailyReport() {
       '<h2 style="margin:0 0 4px 0; font-size:17px; color:#1a2b4c;">Daily Report &mdash; ' + escapeHtml(now.toDateString()) + '</h2>' +
       '<p><b>New leads received today</b> (raw inbound count): ' + leadsReceivedToday + '</p>' +
       '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
+      formatSectionHtml('TODAY' + (now.getHours() < 12 ? ' (partial -- only since midnight)' : ''), draftsToday, editToday) +
       formatSectionHtml('YESTERDAY', draftsYesterday, editYesterday) +
-      formatSectionHtml('TODAY', draftsToday, editToday) +
       formatSectionHtml('LAST 7 DAYS', drafts7d, edit7d) +
       formatSectionHtml('LAST 30 DAYS', drafts30d, edit30d) +
       formatSectionHtml('ALL TIME', draftsAllTime, editAllTime) +

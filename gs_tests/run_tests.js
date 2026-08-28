@@ -569,6 +569,31 @@ check('[REAL] Krista: lead resolves correctly once the attachment fallback suppl
 }
 
 // ---------------------------------------------------------------------------
+// 10. Daily Report category summary bar (28 Aug 2026, per direct request --
+// "that chart doesn't tell any useful information"). Real numbers from the
+// 27 Aug email that prompted this: 132 drafted, split yes_general 73 +
+// yes_has_own_podcast 3 (positive), no_decline 50 + no_data_error 3
+// (negative), info_request 1 + neutral_acknowledgment 1 + other 1 (neutral).
+// ---------------------------------------------------------------------------
+{
+  const { context: ctx } = buildContext(['daily_report.gs']);
+  const html = ctx.categorySummaryBarHtml_({
+    yes_general: 73, yes_has_own_podcast: 3, no_decline: 50,
+    info_request: 1, neutral_acknowledgment: 1, no_data_error: 3, other: 1,
+  });
+  check('categorySummaryBarHtml_: groups positive categories correctly (76 of 132)',
+    html.includes('76 interested'), true);
+  check('categorySummaryBarHtml_: groups negative categories correctly (53 of 132)',
+    html.includes('53 declined'), true);
+  check('categorySummaryBarHtml_: computes positive percentage (76/132 = 58%)',
+    html.includes('(58%)'), true);
+  check('categorySummaryBarHtml_: computes negative percentage (53/132 = 40%)',
+    html.includes('(40%)'), true);
+  check('categorySummaryBarHtml_: empty input returns empty string, not a divide-by-zero bar',
+    ctx.categorySummaryBarHtml_({}), '');
+}
+
+// ---------------------------------------------------------------------------
 // FIX (28 Aug 2026, real risk found while adding the Lynn fallback tests):
 // this summary used to sit right after section 7 -- every check added after
 // it (the word-wrapped-attribution test, both new fallback tests above, and
