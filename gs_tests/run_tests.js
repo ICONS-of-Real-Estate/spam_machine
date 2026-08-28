@@ -642,6 +642,46 @@ check('escapeHtml: a number does not throw', (() => { try { escapeHtml(42); retu
 }
 
 // ---------------------------------------------------------------------------
+// 13. sentMessageMatchesOurDraft_ -- (28 Aug 2026, real incident: Ryan Welch,
+// Rebecca, Richard, Mark). Both follow-up cadences used to treat ANY
+// internal reply sent after draftCreatedAt as "our drafted follow-up went
+// out" and scheduled another automated bump on top of it -- including when
+// Joana/Tomás wrote a genuine personal reply instead. This function is what
+// now tells the two apart: does the sent message actually contain our
+// drafted wording, or not.
+// ---------------------------------------------------------------------------
+{
+  const { context: ctx } = buildContext(['lead_followup_sequences.gs']);
+  const OUR_DRAFT = "Hi Ryan, Just floating this back to the top of your inbox in case it got buried! No pressure at all -- but if hosting your own podcast is still something you'd be interested in, happy to find a time that works: [book a 15-minute Zoom Call here](BOOKING_LINK). Either way, wishing you continued success!";
+
+  check('[REAL] sentMessageMatchesOurDraft_: our own draft, sent verbatim with quoting appended, IS a match',
+    ctx.sentMessageMatchesOurDraft_(
+      OUR_DRAFT + '\n\nOn Thu, Aug 27, 2026 at 2:25 PM Joana Peixe wrote:\n> ...quoted history...',
+      OUR_DRAFT
+    ), true);
+
+  check('[REAL] sentMessageMatchesOurDraft_: Joana\'s genuine personal reply is NOT a match (Rebecca/Richard incident shape)',
+    ctx.sentMessageMatchesOurDraft_(
+      "Hi Rebecca, Thanks for your reply. I'm glad you're open to exploring it! And my apologies for the delayed reply - your message somehow clipped through on my end...",
+      OUR_DRAFT
+    ), false);
+
+  check('sentMessageMatchesOurDraft_: whitespace/case differences alone do not break a real match',
+    ctx.sentMessageMatchesOurDraft_(
+      '  HI   RYAN,   just floating this   back to the top of your inbox in case it got buried!  \n\n(rest of email...)',
+      OUR_DRAFT
+    ), true);
+
+  check('sentMessageMatchesOurDraft_: no draftedText to compare against fails CLOSED (treated as not-a-match, per the header comment)',
+    ctx.sentMessageMatchesOurDraft_('anything at all', ''), false);
+  check('sentMessageMatchesOurDraft_: no draftedText, undefined variant',
+    ctx.sentMessageMatchesOurDraft_('anything at all', undefined), false);
+
+  check('sentMessageMatchesOurDraft_: unrelated short sent body is NOT a match',
+    ctx.sentMessageMatchesOurDraft_('Sounds great, talk soon!', OUR_DRAFT), false);
+}
+
+// ---------------------------------------------------------------------------
 // FIX (28 Aug 2026, real risk found while adding the Lynn fallback tests):
 // this summary used to sit right after section 7 -- every check added after
 // it (the word-wrapped-attribution test, both new fallback tests above, and

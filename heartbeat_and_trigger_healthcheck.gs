@@ -162,10 +162,31 @@ function runHeartbeatCheck() {
   Logger.log('Heartbeat check -- last AI Drafts Log entry was ' + hoursSinceLastEntry.toFixed(1) + ' hours ago.');
 
   if (hoursSinceLastEntry > HEARTBEAT_STALE_HOURS) {
+    // FIX (28 Aug 2026, real incident -- two near-identical alerts an hour
+    // apart on a stretch that was just quiet, nothing broken): elapsed time
+    // since the last draft says nothing about whether there's actually
+    // anything TO draft. Ask the same question runReplyDrafterInner asks --
+    // via the shared buildPendingReplySearchQuery_() (Code.gs) -- before
+    // alerting. Zero pending threads means the drafter has nothing to do,
+    // which isn't a failure; only alert when there's a real backlog sitting
+    // unprocessed.
+    let pendingCount;
+    try {
+      pendingCount = GmailApp.search(buildPendingReplySearchQuery_(), 0, 1).length;
+    } catch (e) {
+      Logger.log('Heartbeat check -- could not check for a pending backlog (' + e + ') -- alerting anyway, fails toward "tell a human" rather than staying silent on an unknown state.');
+      pendingCount = 1; // fail open toward alerting, not toward silence
+    }
+
+    if (pendingCount === 0) {
+      Logger.log('Heartbeat check -- last draft was ' + hoursSinceLastEntry.toFixed(1) + 'h ago, but the pending-reply search came back empty -- genuinely quiet, nothing to draft. Not alerting.');
+      return;
+    }
+
     sendOpsAlert(
       'No new drafts in over ' + HEARTBEAT_STALE_HOURS + ' hours',
-      'The last entry in AI Drafts Log was ' + hoursSinceLastEntry.toFixed(1) + ' hours ago (' + lastEntryTime + '), during business hours. ' +
-      'This does not necessarily mean anything is broken -- it could just be a quiet stretch with no new prospect replies -- but it is worth a quick manual check of the runReplyDrafter trigger and its recent execution history.'
+      'The last entry in AI Drafts Log was ' + hoursSinceLastEntry.toFixed(1) + ' hours ago (' + lastEntryTime + '), during business hours, AND there is at least one prospect reply matching the drafter\'s own search query that has NOT been drafted yet. ' +
+      'That combination is the real signal something is stuck -- worth a quick manual check of the runReplyDrafter trigger and its recent execution history.'
     );
   }
 }

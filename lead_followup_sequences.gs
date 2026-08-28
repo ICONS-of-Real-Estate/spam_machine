@@ -1557,6 +1557,44 @@ function auditActiveSalesDraftsForDeclines() {
 
 // ---------- ADVANCING ----------
 
+/**
+ * ADDED (28 Aug 2026, real incident -- Ryan Welch, Rebecca, Richard, Mark:
+ * 27/28 Aug 2026). Both advancePodcastSalesFollowUps() and
+ * advanceHubGuestFollowUps() have an "_APPROVAL" check that reads
+ * `isInternal(lastSenderEmail) && last.getDate() > draftCreatedAt` as "our
+ * drafted follow-up got sent" and schedules the NEXT automated bump
+ * FOLLOWUP_WORKING_DAYS_GAP working days later. That's only true if Joana
+ * actually sent OUR draft. If she instead wrote and sent a genuine personal
+ * reply in the same thread -- exactly what happened to these four leads,
+ * confirmed via Gmail: Joana replied personally, then 2 working days later
+ * the automation fired ANOTHER "just floating this back to the top of your
+ * inbox" nudge on top of her own message -- the old check couldn't tell the
+ * difference and scheduled the next bump anyway.
+ *
+ * The fix doesn't need a new tracker or API: the exact text we drafted is
+ * already sitting in the queue row (`draftedText`, set right after
+ * createThreadedDraft_ in both functions). If the sent message doesn't
+ * contain our own wording, it wasn't our draft going out -- it was Joana
+ * handling the lead herself, and the cadence should stop, not schedule
+ * another step on top of her.
+ *
+ * FAILS CLOSED, same philosophy as sean_contact_tracker.gs: no draftedText
+ * to compare against (blank/missing) is treated as "not a match" -- i.e.
+ * held rather than assumed-sent -- since drafting an unwanted duplicate is
+ * the worse failure mode of the two.
+ */
+function sentMessageMatchesOurDraft_(sentPlainBody, draftedText) {
+  const normalize = s => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const draft = normalize(draftedText);
+  if (!draft) return false;
+  const sent = normalize(sentPlainBody);
+  // A real send of our draft carries the drafted wording verbatim (Gmail
+  // appends quoting/signature after it, doesn't rewrite it), so matching a
+  // solid prefix is enough -- no need to require the whole body verbatim.
+  const CHECK_LEN = Math.min(60, draft.length);
+  return sent.indexOf(draft.slice(0, CHECK_LEN)) !== -1;
+}
+
 function advancePodcastSalesFollowUps() {
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const queueTab = ss.getSheetByName(PODCAST_SALES_QUEUE_TAB);
@@ -1740,6 +1778,15 @@ function advancePodcastSalesFollowUps() {
     if (String(status).indexOf('_APPROVAL') > -1) {
       const draftCreatedAt = new Date(row[5]);
       if (isInternal(lastSenderEmail) && last.getDate() > draftCreatedAt) {
+        // See sentMessageMatchesOurDraft_'s header comment (28 Aug 2026,
+        // Ryan/Rebecca/Richard/Mark incident) -- a Joana/Tomás reply after
+        // draftCreatedAt is NOT automatically "our follow-up went out."
+        if (!sentMessageMatchesOurDraft_(last.getPlainBody(), draftedText)) {
+          queueTab.getRange(r + 1, 7).setValue('STOPPED');
+          Logger.log('advancePodcastSalesFollowUps -- STOPPED (Joana/Tomás replied personally, not our drafted follow-up): ' + threadId + ' (' + name + ', ' + email + ') -- treating as human-handled, NOT scheduling another automated step on top of it.');
+          stopped++;
+          continue;
+        }
         logFollowUpLearning('Podcast Sales', name, email, currentStep, draftedText, last.getPlainBody());
         if (currentStep >= 2) {
           queueTab.getRange(r + 1, 7).setValue('COMPLETE');
@@ -1894,6 +1941,15 @@ function advanceHubGuestFollowUps() {
     if (String(status).indexOf('_APPROVAL') > -1) {
       const draftCreatedAt = new Date(row[8]);
       if (isInternal(lastSenderEmail) && last.getDate() > draftCreatedAt) {
+        // See sentMessageMatchesOurDraft_'s header comment (28 Aug 2026,
+        // Ryan/Rebecca/Richard/Mark incident) -- a Joana/Tomás reply after
+        // draftCreatedAt is NOT automatically "our follow-up went out."
+        if (!sentMessageMatchesOurDraft_(last.getPlainBody(), draftedText)) {
+          queueTab.getRange(r + 1, 10).setValue('STOPPED');
+          Logger.log('advanceHubGuestFollowUps -- STOPPED (Joana/Tomás replied personally, not our drafted follow-up): ' + threadId + ' (' + name + ', ' + email + ') -- treating as human-handled, NOT scheduling another automated step on top of it.');
+          stopped++;
+          continue;
+        }
         logFollowUpLearning('Hub Guest', name, email, currentStep, draftedText, last.getPlainBody());
         if (currentStep >= 2) {
           bensTab.appendRow([new Date(), name, email, state, showName, 'https://mail.google.com/mail/u/0/#all/' + threadId]);

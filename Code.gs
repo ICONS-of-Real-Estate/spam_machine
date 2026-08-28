@@ -1021,6 +1021,29 @@ function runReplyDrafter() {
   }
 }
 
+/**
+ * EXTRACTED (28 Aug 2026, per direct request -- the hourly "No new drafts in
+ * over 3 hours" ops alert fired twice in a row on a stretch that was just
+ * genuinely quiet, no prospect replies at all, nothing broken). Was inlined
+ * in runReplyDrafterInner only; pulling it out lets runHeartbeatCheck
+ * (heartbeat_and_trigger_healthcheck.gs) ask the exact same question --
+ * "is there actually anything waiting to be drafted?" -- using the identical
+ * definition, instead of alerting purely on elapsed time.
+ */
+function buildPendingReplySearchQuery_() {
+  const addressClauses = CONFIG.REQUIRED_CC_ADDRESSES
+    .map(addr => 'to:"' + addr + '" OR cc:"' + addr + '"')
+    .join(' OR ');
+  // WIDENED (17 Aug 2026, real incident): was newer_than:3d, which silently
+  // ignored an entire real backlog (~200 threads, confirmed by dropping the
+  // date filter and checking directly) older than 3 days -- those leads were
+  // never invisible on purpose, missed_leads_audit.gs exists for exactly this
+  // gap but only EMAILS an alert, it never drafts. 180d matches the
+  // furthest missed-leads lookback (runWeekendDeepMissedLeadsAudit), so
+  // nothing genuinely reachable by either system falls in a gap between them.
+  return '(' + addressClauses + ') newer_than:180d -label:"' + CONFIG.LABEL_AI_DRAFTED + '" -label:"' + CONFIG.LABEL_STOP + '" -label:"' + CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM + '" -label:"' + CONFIG.LABEL_SUBJECT_MISMATCH + '" -label:"' + CONFIG.LABEL_ALREADY_REPLIED_ONCE + '" -label:"' + CONFIG.LABEL_SUPPRESSED_NO_DRAFT + '"';
+}
+
 function runReplyDrafterInner() {
   // ADDED (27 Aug 2026): see CONFIG.CODE_VERSION's comment -- logged here so
   // a stale live deployment shows up in the Executions log instead of only
@@ -1085,17 +1108,7 @@ function runReplyDrafterInner() {
     const systemPrompt = buildSystemPrompt();
     const stateDirectory = loadStateDirectory();
 
-    const addressClauses = CONFIG.REQUIRED_CC_ADDRESSES
-      .map(addr => 'to:"' + addr + '" OR cc:"' + addr + '"')
-      .join(' OR ');
-    // WIDENED (17 Aug 2026, real incident): was newer_than:3d, which silently
-    // ignored an entire real backlog (~200 threads, confirmed by dropping the
-    // date filter and checking directly) older than 3 days -- those leads were
-    // never invisible on purpose, missed_leads_audit.gs exists for exactly this
-    // gap but only EMAILS an alert, it never drafts. 180d matches the
-    // furthest missed-leads lookback (runWeekendDeepMissedLeadsAudit), so
-    // nothing genuinely reachable by either system falls in a gap between them.
-    const searchQuery = '(' + addressClauses + ') newer_than:180d -label:"' + CONFIG.LABEL_AI_DRAFTED + '" -label:"' + CONFIG.LABEL_STOP + '" -label:"' + CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM + '" -label:"' + CONFIG.LABEL_SUBJECT_MISMATCH + '" -label:"' + CONFIG.LABEL_ALREADY_REPLIED_ONCE + '" -label:"' + CONFIG.LABEL_SUPPRESSED_NO_DRAFT + '"';
+    const searchQuery = buildPendingReplySearchQuery_();
 
     Logger.log('DIAGNOSTIC -- search query: ' + searchQuery);
 
