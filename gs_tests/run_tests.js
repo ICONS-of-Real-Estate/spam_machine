@@ -16,6 +16,7 @@ const {
   extractForwardedLeadInfo,
   extractProspectFreshReplyText,
   getEffectivePlainBody_,
+  matchesSubjectPattern_,
   parseForwardHeaderBlock_,
   stripQuoteMarkers_,
   isAttributionLine_,
@@ -432,6 +433,23 @@ check('getEffectivePlainBody_: falls back to a tag-stripped text/html attachment
 check('getEffectivePlainBody_: no body, no attachments -> empty string, not a crash',
   getEffectivePlainBody_(fakeMessage({ body: '' })),
   '');
+
+// REGRESSION GUARD (28 Aug 2026, real incident -- Mandy's thread, flagged
+// live: "This one is valid. Why no draft?"): a lead who composes a fresh
+// reply instead of hitting Reply starts a new Gmail thread whose "first
+// message subject" is whatever they typed -- "Arkansas real estate
+// podcast" never matched the hosting-phrase template, so a genuinely
+// interested reply got PERMANENTLY labeled AI-Skipped-NotPodcastOutreach.
+check('[REAL] Mandy: "Arkansas real estate podcast" matches via the real-estate fallback',
+  matchesSubjectPattern_('Arkansas real estate podcast'), true);
+check('matchesSubjectPattern_: still matches the primary hosting-phrase pattern',
+  matchesSubjectPattern_('Rex, open to hosting your own show in Colorado?'), true);
+check('matchesSubjectPattern_: genuine non-outreach subjects still rejected (newsletter)',
+  matchesSubjectPattern_('Baby’s first physics lesson'), false);
+check('matchesSubjectPattern_: genuine non-outreach subjects still rejected (Zoom scheduling)',
+  matchesSubjectPattern_('Bruce Henson + Podcast Qualification Zoom - ICONS of Real Estate'), false);
+check('matchesSubjectPattern_: genuine non-outreach subjects still rejected (moderator report)',
+  matchesSubjectPattern_('Moderator\'s spam report for network@ardorseo.com'), false);
 check('[REAL] Krista: lead resolves correctly once the attachment fallback supplies the real body',
   (context.extractForwardedLeadInfo(fakeMessage({
     body: '',

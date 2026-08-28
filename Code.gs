@@ -2200,8 +2200,28 @@ function firstMailableLeadIn_(candidates) {
 
 // See CONFIG.HOSTING_PHRASE_PATTERN / CONFIG.PODCAST_OR_SHOW_PATTERN for why
 // this is two independent tests ANDed together rather than one ordered regex.
+//
+// FALLBACK (28 Aug 2026, real incident -- Mandy's thread, flagged live:
+// "This one is valid. Why no draft?"): this check runs against
+// thread.getFirstMessageSubject() -- the actual first message of the GMAIL
+// THREAD, not necessarily our original outreach subject. When a lead
+// composes a fresh reply instead of hitting "Reply" (common when a mail
+// client mis-threads, or the lead just typed their own subject), Gmail
+// starts a NEW thread whose "first message" is that freely-typed subject --
+// "Arkansas real estate podcast" for Mandy, a real, interested reply
+// ("I would still love to do the podcast. I can start recording this
+// week.") that never matched the hosting-phrase template because she never
+// used our wording. This label is applied PERMANENTLY (see the call site's
+// own comment), so this false negative would have excluded her forever.
+// A subject that pairs "real estate" with podcast/show is specific enough
+// to real estate podcast outreach that it's very unlikely to false-positive
+// on genuine unrelated mail (newsletters, Zoom-scheduling threads, spam
+// reports -- audited against the live "AI-Skipped-NotPodcastOutreach" label,
+// none of which contain this combination), so this is a second, looser
+// acceptance path rather than a change to the primary check.
 function matchesSubjectPattern_(subject) {
-  return CONFIG.HOSTING_PHRASE_PATTERN.test(subject) && CONFIG.PODCAST_OR_SHOW_PATTERN.test(subject);
+  if (CONFIG.HOSTING_PHRASE_PATTERN.test(subject) && CONFIG.PODCAST_OR_SHOW_PATTERN.test(subject)) return true;
+  return /real estate (podcast|show)/i.test(subject);
 }
 
 function isInternal(email) {
