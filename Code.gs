@@ -92,7 +92,7 @@ const CONFIG = {
   // version in a live Executions log or daily report doesn't match this
   // repo's HEAD, the Apps Script editor has NOT been updated with the
   // latest code -- go paste it in before trusting any fix here is live.
-  CODE_VERSION: 'f5c8750 (28 Aug 2026)',
+  CODE_VERSION: '6e14662 (28 Aug 2026)',
 
   // FIXED (25 Jul 2026): only matched subjects containing the literal word
   // "podcast" -- but many real subjects say "show" instead ("up for hosting
