@@ -406,6 +406,24 @@ function estimateCallCostUsd_(provider, usage) {
   const outputTokens = usage.output_tokens || 0;
   const cacheReadTokens = usage.cache_read_input_tokens || 0;
   const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
+
+  // FIX (28 Aug 2026, real incident found while auditing the split test):
+  // this was `(cacheCreationTokens / 1e6) * (p.cacheWrite || 0)` -- so a
+  // provider with no configured cacheWrite price had its cache WRITES
+  // silently valued at $0.00 rather than flagged as unpriced. Kimi has no
+  // cacheWrite entry, so any write it reported would have been free in this
+  // log, in a comparison whose entire purpose is deciding which provider is
+  // cheaper. It has not bitten yet only because Moonshot reports
+  // cache_creation_input_tokens as 0 on every call (134/134 in the live log
+  // -- see the raw-usage logging added below for why that itself is
+  // suspect), but a silent zero is the wrong default for a number this
+  // decision rests on. Say so in the log instead of quietly under-counting.
+  if (cacheCreationTokens > 0 && p.cacheWrite === undefined) {
+    Logger.log('estimateCallCostUsd_ -- WARNING: ' + provider + ' reported ' + cacheCreationTokens +
+      ' cache-creation token(s) but LLM_PRICING_PER_MTOK.' + provider + ' has no cacheWrite price. ' +
+      'Those tokens are being counted as $0, so this call is UNDER-priced. Add the real write rate.');
+  }
+
   const cost =
     (inputTokens / 1e6) * p.input +
     (outputTokens / 1e6) * p.output +
@@ -422,6 +440,21 @@ const LLM_COST_LOG_HEADERS = [
   // call that came back unusable just the same as one that worked, so the log
   // has to record both or it under-reports real spend.
   'Outcome', 'Error',
+  // ADDED (28 Aug 2026, real incident): every other column here reads
+  // Moonshot's response through ANTHROPIC's field names
+  // (usage.cache_creation_input_tokens etc.) and assumes they mean the same
+  // thing. Across 134 live Kimi calls, cache_creation_input_tokens was 0
+  // EVERY time while cache_read_input_tokens was populated -- reads from a
+  // cache that was never written, which is not a coherent billing story and
+  // is exactly what a field-name mismatch looks like (an absent field reads
+  // as undefined -> 0, indistinguishable from a real zero). Meanwhile the
+  // logged Kimi spend for 24 Aug ($0.43) and Moonshot's own dashboard for
+  // the same window (~$17.58) disagree by ~40x, while Anthropic's logged
+  // and real figures broadly agree -- so the mapping is wrong for Kimi
+  // specifically and no amount of re-reading the mapped columns can show
+  // how. Dumping the provider's raw usage object settles in one run what
+  // fields Moonshot actually returns, instead of another round of guessing.
+  'Raw Usage JSON',
 ];
 
 function ensureLlmCostLogTabExists_(ss) {
@@ -443,9 +476,15 @@ function ensureLlmCostLogTabExists_(ss) {
   try {
     const width = tab.getLastColumn();
     const existing = width > 0 ? tab.getRange(1, 1, 1, width).getValues()[0] : [];
-    if (existing.indexOf('Outcome') === -1) {
+    // Re-checked against the FULL header list rather than one column name
+    // (28 Aug 2026): the old test only looked for 'Outcome', so the later
+    // 'Raw Usage JSON' addition would never have triggered a migration on a
+    // tab that already had Outcome. Comparing the whole row makes this
+    // additive for every future column too.
+    const needsMigration = LLM_COST_LOG_HEADERS.some((h, i) => existing[i] !== h);
+    if (needsMigration) {
       tab.getRange(1, 1, 1, LLM_COST_LOG_HEADERS.length).setValues([LLM_COST_LOG_HEADERS]);
-      Logger.log('ensureLlmCostLogTabExists_ -- migrated LLM Cost Log header to include Outcome/Error.');
+      Logger.log('ensureLlmCostLogTabExists_ -- migrated LLM Cost Log header to: ' + LLM_COST_LOG_HEADERS.join(', '));
     }
   } catch (e) {
     Logger.log('ensureLlmCostLogTabExists_ -- header migration failed (non-fatal, continuing): ' + e);
@@ -489,6 +528,13 @@ function logLlmCallCost_(callerLabel, provider, model, usage, outcome, errorText
       costUsd,
       outcome || 'ok',
       errorText ? String(errorText).slice(0, 500) : '',
+      // See LLM_COST_LOG_HEADERS' 'Raw Usage JSON' comment. Stringify
+      // defensively -- this is a diagnostic column and must never be the
+      // thing that throws and loses the whole cost row.
+      (function () {
+        if (!usage) return '';
+        try { return JSON.stringify(usage).slice(0, 1000); } catch (e) { return 'unstringifiable: ' + e; }
+      })(),
     ]);
   } catch (e) {
     Logger.log('logLlmCallCost_ -- failed to log (non-fatal, continuing): ' + e);
