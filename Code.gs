@@ -1389,7 +1389,7 @@ function runReplyDrafterInner() {
           // six threads that are being handled exactly right. Naming the bounce
           // explicitly keeps the operator-facing signal the old flow had.
           const bounceSender = [extractEmail(lastMsg.getFrom())]
-            .concat(extractAllEmailsFrom_((parseForwardHeaderBlock_(normalizeMessageBody_(lastMsg.getPlainBody())) || {}).from))
+            .concat(extractAllEmailsFrom_((parseForwardHeaderBlock_(normalizeMessageBody_(getEffectivePlainBody_(lastMsg))) || {}).from))
             .find(e => e && isNonHumanSender(e));
           if (bounceSender) {
             skipCache[threadId] = { reason: 'lead email looks like a bounce/system address (' + bounceSender + '), not a real lead', lastCheckedAt: new Date(), messageCount: messages.length };
@@ -1414,7 +1414,7 @@ function runReplyDrafterInner() {
           // still failed with the interesting part of the body cut off by
           // the 300-char window -- for a real lead's reply nested under a
           // quoted exchange, the relevant line can sit well past that.
-          const plainBody = lastMsg.getPlainBody();
+          const plainBody = getEffectivePlainBody_(lastMsg);
           if (plainBody.trim() === '') {
             // DIAGNOSTIC (27 Aug 2026, same request): an empty plain body
             // (confirmed on Jennifer's thread) gives extractForwardedLeadInfo
@@ -1645,7 +1645,7 @@ function runReplyDrafterInner() {
         // sending, same correction she was already making by hand.
         const bookingLinkForThisDraft = result.needsTeammateRouting ? CONFIG.SEAN_QUALIFICATION_CALL_URL : null;
         const aiReplyPlain = priorityNote + sopModeNote + llmProviderNote + sanitizeEmojiForGmail(markdownLinksToPlain(result.draftBody, bookingLinkForThisDraft));
-        const historyPlain = stripForwardHeaderKeepHistory(lastMsg.getPlainBody());
+        const historyPlain = stripForwardHeaderKeepHistory(getEffectivePlainBody_(lastMsg));
         const fullPlainBody = aiReplyPlain + '\n\n' + historyPlain;
 
         const priorityNoteHtml = escapeHtml(priorityNote).replace(/\n/g, '<br>');
@@ -2094,6 +2094,61 @@ function extractEmail(fromHeader) {
   return found.length > 0 ? found[0] : '';
 }
 
+// FIX (28 Aug 2026, real incident -- Krista's thread): confirmed live via a
+// one-off diagnostic (debugKristaBody) that a network-list-relay message can
+// have BOTH getPlainBody() AND getBody() (HTML) come back completely empty
+// -- 0 characters, not just unparseable -- while the real content (Krista's
+// actual reply, "sure send a short video...") sits in the message's own
+// text/plain + text/html ATTACHMENTS instead. This is a different failure
+// mode than every prior body-parsing fix in this file: those all assumed
+// the real text is IN getPlainBody(), just hard to find; here it plainly
+// is not there at all. Every classification/extraction path read
+// message.getPlainBody() directly, so this thread died as "network-list-
+// relay dead end -- no prior message at all" with Krista's real, genuinely
+// interested reply sitting unread in an attachment nothing was checking.
+// Root cause (why Google Groups relays a message this way for some threads
+// and not others) isn't understood -- the fix doesn't need to be, just
+// needs to look in the one other place the text can be. Falls back to the
+// first text/plain attachment, then a crude tag-stripped text/html
+// attachment as a last resort, before giving up and returning ''.
+function getEffectivePlainBody_(message) {
+  const direct = message.getPlainBody();
+  if (direct) return direct;
+
+  let attachments;
+  try {
+    attachments = message.getAttachments();
+  } catch (e) {
+    Logger.log('getEffectivePlainBody_ -- getAttachments() failed: ' + e);
+    return '';
+  }
+
+  const textAttachment = attachments.find(a => a.getContentType() === 'text/plain');
+  if (textAttachment) {
+    try {
+      return textAttachment.getDataAsString();
+    } catch (e) {
+      Logger.log('getEffectivePlainBody_ -- found a text/plain attachment but could not read it: ' + e);
+    }
+  }
+
+  const htmlAttachment = attachments.find(a => a.getContentType() === 'text/html');
+  if (htmlAttachment) {
+    try {
+      const html = htmlAttachment.getDataAsString();
+      return html.replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    } catch (e) {
+      Logger.log('getEffectivePlainBody_ -- found a text/html attachment but could not read it: ' + e);
+    }
+  }
+
+  return '';
+}
+
 // Normalization applied once, at every point a raw message body enters the
 // parsing pipeline. NFKC folds the Mathematical-Alphanumeric / fullwidth
 // lookalike characters some signature generators emit (confirmed on Maria's
@@ -2194,7 +2249,7 @@ function isForwardedFromSendingAlias_(message, senderEmail) {
   // the sending alias, the exact bounce this function exists to prevent.
   // Shares FORWARD_SEPARATOR_RE now, and normalizes first so a CRLF body
   // cannot defeat the match either.
-  return FORWARD_SEPARATOR_RE.test(normalizeMessageBody_(message.getPlainBody()));
+  return FORWARD_SEPARATOR_RE.test(normalizeMessageBody_(getEffectivePlainBody_(message)));
 }
 
 // A lead address must be a real outside human: not the team, not a sending
@@ -2384,7 +2439,7 @@ function isRealTeamReply(email) {
 // normalizes the body first so CRLF/lookalike characters cannot defeat the
 // boundary detection here either.
 function extractProspectFreshReplyText(message) {
-  const body = normalizeMessageBody_(message.getPlainBody());
+  const body = normalizeMessageBody_(getEffectivePlainBody_(message));
   const lines = body.split('\n');
 
   const HEADER_START = /^(?:From|Sent|Subject|To|Cc)\s*:\s/i;
@@ -2522,7 +2577,7 @@ function parseForwardHeaderBlock_(body) {
 // Contract unchanged -- {email, originalSubject}|null -- 8 other .gs files
 // call this.
 function extractForwardedLeadInfo(message) {
-  const body = normalizeMessageBody_(message.getPlainBody());
+  const body = normalizeMessageBody_(getEffectivePlainBody_(message));
 
   // ---- 1. Forward header block ----
   const header = parseForwardHeaderBlock_(body);
@@ -2891,7 +2946,7 @@ function buildThreadContext(messages) {
     .map(m => {
       const from = extractEmail(m.getFrom());
       const who = isInternal(from) ? 'ICONS TEAM' : 'PROSPECT';
-      return `[${who} - ${from}]\n${m.getPlainBody().slice(0, 2000)}`;
+      return `[${who} - ${from}]\n${getEffectivePlainBody_(m).slice(0, 2000)}`;
     })
     .join('\n\n---\n\n');
 }

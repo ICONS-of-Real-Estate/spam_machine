@@ -96,7 +96,12 @@ function buildContext() {
  * with the same name and return type (string), so a test body that parses
  * here is a body shape that parses in production.
  */
-function fakeMessage({ body = '', from = '', to = '', cc = '', html = null, isDraft = false } = {}) {
+// `attachments`: optional array of { contentType, data } -- simulates
+// GmailAttachment for the getEffectivePlainBody_ fallback (28 Aug 2026,
+// Krista's thread: a message whose real content sits in a text/plain
+// attachment instead of the body, which getPlainBody()/getBody() alone
+// can't see).
+function fakeMessage({ body = '', from = '', to = '', cc = '', html = null, isDraft = false, attachments = [] } = {}) {
   return {
     getPlainBody: () => body,
     getBody: () => (html === null ? body : html),
@@ -104,6 +109,10 @@ function fakeMessage({ body = '', from = '', to = '', cc = '', html = null, isDr
     getTo: () => to,
     getCc: () => cc,
     isDraft: () => isDraft,
+    getAttachments: () => attachments.map(a => ({
+      getContentType: () => a.contentType,
+      getDataAsString: () => a.data,
+    })),
   };
 }
 

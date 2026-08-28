@@ -15,6 +15,7 @@ const {
   extractEmail,
   extractForwardedLeadInfo,
   extractProspectFreshReplyText,
+  getEffectivePlainBody_,
   parseForwardHeaderBlock_,
   stripQuoteMarkers_,
   isAttributionLine_,
@@ -403,6 +404,45 @@ check('freshReply: zero-commentary relay of OUR OWN outreach still returns empty
     body: 'On Sunday, Aug 23, 2026 at 7:49 am joana@iconsofrealestate.com wrote:\n\nJust checking in!',
   })),
   '');
+
+// ---------------------------------------------------------------------------
+// 7b. getEffectivePlainBody_ (real incident -- Krista's thread, 28 Aug 2026):
+// getPlainBody() AND getBody() can both come back completely empty for a
+// network-list-relay message, with the real content sitting in a text/plain
+// (or text/html) attachment instead. Confirmed live via a one-off
+// diagnostic (debugKristaBody) before this fix existed -- her genuinely
+// interested reply ("sure send a short video...") was invisible to every
+// parsing path, and the thread died as "no prior message at all."
+// ---------------------------------------------------------------------------
+check('getEffectivePlainBody_: returns the direct body when non-empty (no attachment fallback needed)',
+  getEffectivePlainBody_(fakeMessage({ body: 'Hi there' })),
+  'Hi there');
+check('getEffectivePlainBody_: falls back to a text/plain attachment when the body is empty',
+  getEffectivePlainBody_(fakeMessage({
+    body: '',
+    attachments: [{ contentType: 'text/plain', data: 'sure send a short video. i will let you know if interested.' }],
+  })),
+  'sure send a short video. i will let you know if interested.');
+check('getEffectivePlainBody_: falls back to a tag-stripped text/html attachment when no text/plain exists',
+  getEffectivePlainBody_(fakeMessage({
+    body: '',
+    attachments: [{ contentType: 'text/html', data: '<html><body><p>Sure,&nbsp;send it over.</p></body></html>' }],
+  })),
+  'Sure, send it over.');
+check('getEffectivePlainBody_: no body, no attachments -> empty string, not a crash',
+  getEffectivePlainBody_(fakeMessage({ body: '' })),
+  '');
+check('[REAL] Krista: lead resolves correctly once the attachment fallback supplies the real body',
+  (context.extractForwardedLeadInfo(fakeMessage({
+    body: '',
+    from: "'Joana Peixe' via Network <network@ardorseo.com>",
+    to: 'network@ardorseo.com',
+    attachments: [{
+      contentType: 'text/plain',
+      data: 'On Wednesday, Aug 26, 2026 at 9:42 pm krista.coyle@bhhscaproperties.com wrote:\nsure send a short video. i will let you know if interested. thank you',
+    }],
+  })) || {}).email,
+  'krista.coyle@bhhscaproperties.com');
 
 // ---------------------------------------------------------------------------
 // 8. Blank/signature-only reply detection (feeds the LLM an "empty reply"
