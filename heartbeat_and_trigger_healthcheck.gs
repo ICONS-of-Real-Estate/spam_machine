@@ -167,25 +167,55 @@ function runHeartbeatCheck() {
     // since the last draft says nothing about whether there's actually
     // anything TO draft. Ask the same question runReplyDrafterInner asks --
     // via the shared buildPendingReplySearchQuery_() (Code.gs) -- before
-    // alerting. Zero pending threads means the drafter has nothing to do,
-    // which isn't a failure; only alert when there's a real backlog sitting
-    // unprocessed.
-    let pendingCount;
+    // alerting.
+    //
+    // FIX (28 Aug 2026, SAME NIGHT -- a real gap found before this even went
+    // live): a raw count of that search is NOT enough. Confirmed live: 8
+    // threads matched, but every single one was known mailer-daemon bounce
+    // noise (isNonHumanSender in Code.gs) that runReplyDrafterInner ALREADY
+    // recognizes and skips every run -- it just never applies a permanent
+    // Gmail label for that (see the bounce-skip comments around Code.gs:1432
+    // -- intentional, a TTL'd Skip Cache entry instead, so a thread stuck in
+    // that state gets re-checked every SKIP_CACHE_TTL_HOURS instead of never
+    // again). A raw search count alone can't tell "known noise the drafter
+    // is already correctly ignoring" from "a real backlog it's stuck on" --
+    // it would have kept alerting on that same noise forever. Cross-check
+    // each matched thread against the same Skip Cache (loadSkipCache,
+    // isSkipCacheFresh_ -- both Code.gs) the drafter itself trusts: only a
+    // thread that ISN'T already freshly cached as skipped counts as real,
+    // unprocessed backlog.
+    let pendingThreads;
     try {
-      pendingCount = GmailApp.search(buildPendingReplySearchQuery_(), 0, 1).length;
+      pendingThreads = GmailApp.search(buildPendingReplySearchQuery_(), 0, 50);
     } catch (e) {
       Logger.log('Heartbeat check -- could not check for a pending backlog (' + e + ') -- alerting anyway, fails toward "tell a human" rather than staying silent on an unknown state.');
-      pendingCount = 1; // fail open toward alerting, not toward silence
+      sendOpsAlert(
+        'No new drafts in over ' + HEARTBEAT_STALE_HOURS + ' hours',
+        'The last entry in AI Drafts Log was ' + hoursSinceLastEntry.toFixed(1) + ' hours ago (' + lastEntryTime + '), during business hours. Could not check whether a real backlog exists (the pending-reply search itself failed: ' + e + ') -- alerting rather than guessing.'
+      );
+      return;
     }
 
-    if (pendingCount === 0) {
-      Logger.log('Heartbeat check -- last draft was ' + hoursSinceLastEntry.toFixed(1) + 'h ago, but the pending-reply search came back empty -- genuinely quiet, nothing to draft. Not alerting.');
+    let genuinelyPending = pendingThreads;
+    try {
+      const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+      const skipCache = loadSkipCache(ss);
+      genuinelyPending = pendingThreads.filter(thread => {
+        const entry = skipCache[thread.getId()];
+        return !isSkipCacheFresh_(entry, thread.getMessageCount());
+      });
+    } catch (e) {
+      Logger.log('Heartbeat check -- could not read the Skip Cache to filter out known-noise threads (' + e + ') -- treating all ' + pendingThreads.length + ' matched thread(s) as real backlog rather than guessing which are noise.');
+    }
+
+    if (genuinelyPending.length === 0) {
+      Logger.log('Heartbeat check -- last draft was ' + hoursSinceLastEntry.toFixed(1) + 'h ago; pending-reply search found ' + pendingThreads.length + ' thread(s), but all are already known/cached as non-actionable (bounces, etc.) -- genuinely nothing new to draft. Not alerting.');
       return;
     }
 
     sendOpsAlert(
       'No new drafts in over ' + HEARTBEAT_STALE_HOURS + ' hours',
-      'The last entry in AI Drafts Log was ' + hoursSinceLastEntry.toFixed(1) + ' hours ago (' + lastEntryTime + '), during business hours, AND there is at least one prospect reply matching the drafter\'s own search query that has NOT been drafted yet. ' +
+      'The last entry in AI Drafts Log was ' + hoursSinceLastEntry.toFixed(1) + ' hours ago (' + lastEntryTime + '), during business hours, AND there ' + (genuinelyPending.length === 1 ? 'is 1 thread' : 'are ' + genuinelyPending.length + ' threads') + ' matching the drafter\'s own search query that ' + (genuinelyPending.length === 1 ? 'has' : 'have') + ' NOT been drafted AND ' + (genuinelyPending.length === 1 ? 'is' : 'are') + ' not already explained by a cached skip (bounce, decline, etc.). ' +
       'That combination is the real signal something is stuck -- worth a quick manual check of the runReplyDrafter trigger and its recent execution history.'
     );
   }

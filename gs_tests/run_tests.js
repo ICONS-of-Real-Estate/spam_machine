@@ -682,6 +682,43 @@ check('escapeHtml: a number does not throw', (() => { try { escapeHtml(42); retu
 }
 
 // ---------------------------------------------------------------------------
+// 14. buildQuotedHistoryForReply -- (28 Aug 2026, real incident: Krista
+// Coyle). The last message in her thread was a 2.8MB corporate-signature
+// forward; last.getPlainBody() returned ~1.3MB of base64-looking junk, and
+// the old code quoted it wholesale into the draft with zero size guard.
+// ---------------------------------------------------------------------------
+{
+  const { context: ctx } = buildContext(['lead_followup_sequences.gs']);
+
+  function fakeThreadWithLastMessage(body) {
+    const msg = {
+      getFrom: () => 'network@ardorseo.com',
+      getDate: () => new Date(2026, 7, 27, 10, 30, 0),
+      getPlainBody: () => body,
+    };
+    return { getMessages: () => [msg] };
+  }
+
+  const normalBody = 'sure send a short video. i will let you know if interested. thank you';
+  const normalResult = ctx.buildQuotedHistoryForReply(fakeThreadWithLastMessage(normalBody));
+  check('buildQuotedHistoryForReply: a normal short body is quoted in full, untruncated',
+    normalResult.indexOf(normalBody) !== -1 && normalResult.indexOf('truncated') === -1, true);
+
+  const OVERSIZED = 'A'.repeat(1300000); // shape of the real Krista Coyle incident
+  const oversizedResult = ctx.buildQuotedHistoryForReply(fakeThreadWithLastMessage(OVERSIZED));
+  check('[REAL] buildQuotedHistoryForReply: an oversized body (Krista Coyle incident shape) is truncated, not dumped wholesale',
+    oversizedResult.length < 6000, true);
+  check('buildQuotedHistoryForReply: truncated output says so',
+    oversizedResult.indexOf('truncated') !== -1, true);
+  check('buildQuotedHistoryForReply: still carries the "On ... wrote:" quote header even when truncated',
+    oversizedResult.indexOf('wrote:') !== -1, true);
+
+  const exactlyAtCap = 'B'.repeat(5000);
+  check('buildQuotedHistoryForReply: exactly at the cap is NOT truncated (boundary case)',
+    ctx.buildQuotedHistoryForReply(fakeThreadWithLastMessage(exactlyAtCap)).indexOf('truncated') === -1, true);
+}
+
+// ---------------------------------------------------------------------------
 // FIX (28 Aug 2026, real risk found while adding the Lynn fallback tests):
 // this summary used to sit right after section 7 -- every check added after
 // it (the word-wrapped-attribution test, both new fallback tests above, and

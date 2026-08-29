@@ -338,12 +338,34 @@ function reconcileFollowUpDrafts() {
 // reference to what came before -- confusing for the lead to receive.
 // This builds a standard "On [date], [sender] wrote:" quoted block from
 // the thread's last message, same convention Gmail itself uses.
+//
+// CAP ADDED (28 Aug 2026, real incident -- Krista Coyle draft): this used
+// to quote last.getPlainBody() completely unguarded. Her thread's last
+// message was a 2.8MB corporate forward (a BHHS CA Properties signature
+// block with embedded images) -- Gmail/Apps Script's plain-text extraction
+// for a message that oversized returns ~1.3MB of what looks like raw
+// base64 attachment data, not real quotable text, and this appended every
+// byte of it straight into the draft. A legitimate quoted reply is never
+// legitimately this long, so anything past QUOTED_HISTORY_MAX_CHARS is
+// truncated with a note rather than dumped wholesale -- same "cap it,
+// don't guess" philosophy as SOP_SUGGESTIONS_MAX_RAW_PER_RUN elsewhere in
+// this project.
+const QUOTED_HISTORY_MAX_CHARS = 5000;
+
 function buildQuotedHistoryForReply(thread) {
   const messages = thread.getMessages();
   const last = messages[messages.length - 1];
   const senderName = last.getFrom();
   const dateStr = last.getDate().toLocaleString();
-  const quotedLines = last.getPlainBody().split('\n').map(line => '> ' + line).join('\n');
+  let plainBody = last.getPlainBody();
+  if (plainBody.length > QUOTED_HISTORY_MAX_CHARS) {
+    Logger.log('buildQuotedHistoryForReply -- last message\'s plain body is ' + plainBody.length +
+      ' chars, over the ' + QUOTED_HISTORY_MAX_CHARS + '-char cap -- almost certainly an oversized/' +
+      'attachment-heavy message (embedded images, a corporate signature block) rather than real ' +
+      'quotable text. Truncating instead of dumping it wholesale into the draft.');
+    plainBody = plainBody.slice(0, QUOTED_HISTORY_MAX_CHARS) + '\n\n[... quoted message truncated, too long to include in full ...]';
+  }
+  const quotedLines = plainBody.split('\n').map(line => '> ' + line).join('\n');
   return '\n\nOn ' + dateStr + ', ' + senderName + ' wrote:\n' + quotedLines;
 }
 
