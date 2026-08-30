@@ -138,12 +138,29 @@ function runMissedLeadsAudit(daysBack) {
       'runMissedLeadsAudit(' + lookback + ') got exactly 500 threads back from GmailApp.search, which is that call\'s hard per-request ceiling. Older threads inside the ' + lookback + '-day window were not examined this run. If this recurs, the audit needs to paginate the same way runReplyDrafterInner does in Code.gs.');
   }
 
+  // FIX (30 Aug 2026, real risk found in code review): this list had drifted
+  // from Code.gs's actual permanent-skip label set (SELF_OWNED_TRACKING_LABELS /
+  // the labels list at line ~553), missing LABEL_NEEDS_ROUTING,
+  // LABEL_ALREADY_ANSWERED_BY_TEAM, LABEL_SUBJECT_MISMATCH,
+  // LABEL_ALREADY_REPLIED_ONCE, and LABEL_SUPPRESSED_NO_DRAFT. Any thread
+  // carrying one of those was NOT recognized as already-tracked here, so it
+  // fell through to the expensive recordGmailQuotaUsage_(1) + getMessages()
+  // path on every single audit run (now daily, plus the 180-day weekend deep
+  // audit) forever -- burning the same self-tracked Gmail quota budget this
+  // project has had real exhaustion incidents around, for zero benefit since
+  // these threads are correctly re-classified as opt-out/auto-reply/etc and
+  // never logged anyway.
   const trackingLabels = [
     CONFIG.LABEL_AI_DRAFTED,
     CONFIG.LABEL_YES,
     CONFIG.LABEL_YES_PENCILED,
     CONFIG.LABEL_NO,
-    CONFIG.LABEL_STOP
+    CONFIG.LABEL_STOP,
+    CONFIG.LABEL_NEEDS_ROUTING,
+    CONFIG.LABEL_ALREADY_ANSWERED_BY_TEAM,
+    CONFIG.LABEL_SUBJECT_MISMATCH,
+    CONFIG.LABEL_ALREADY_REPLIED_ONCE,
+    CONFIG.LABEL_SUPPRESSED_NO_DRAFT
   ];
 
   const missed = [];
