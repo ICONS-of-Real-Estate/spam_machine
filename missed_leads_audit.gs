@@ -123,19 +123,38 @@ function runMissedLeadsAudit(daysBack) {
     .map(addr => 'to:"' + addr + '" OR cc:"' + addr + '"')
     .join(' OR ');
   const query = '(' + addressClauses + ') newer_than:' + lookback + 'd';
-  const threads = GmailApp.search(query, 0, 500);
-  // FIX (27 Aug 2026, real risk found in review): GmailApp.search's third
-  // argument has a hard 500-result ceiling (Code.gs documents and paginates
-  // around this same limit) -- this call never did. On the 180-day deep
-  // audit especially, hitting exactly 500 means older threads were silently
-  // never examined, with no distinguishable trace in a normal-looking
-  // completion log. Not paginating here (unlike Code.gs) since this is a
-  // read-only audit, not a job with a draft cap to respect -- but the
-  // truncation must at least be visible.
-  if (threads.length === 500) {
-    Logger.log('WARNING -- runMissedLeadsAudit hit the 500-thread search ceiling for lookback=' + lookback + 'd. Results are TRUNCATED -- older threads within this window were NOT examined this run.');
-    sendOpsAlert('Missed leads audit hit the 500-result ceiling',
-      'runMissedLeadsAudit(' + lookback + ') got exactly 500 threads back from GmailApp.search, which is that call\'s hard per-request ceiling. Older threads inside the ' + lookback + '-day window were not examined this run. If this recurs, the audit needs to paginate the same way runReplyDrafterInner does in Code.gs.');
+
+  // FIX (30 Aug 2026, real incident -- the 500-ceiling warning below fired
+  // for real): a single GmailApp.search(query, 0, 500) call was a hard
+  // 500-thread ceiling with no pagination, so the 180-day deep audit
+  // silently never examined anything past the first 500. Now paginates the
+  // same way Code.gs's runReplyDrafterInner does -- keep pulling pages via
+  // the search start offset until a page comes back short (the real end of
+  // results) or a wall-clock budget is hit, bounded so a run that legitimately
+  // needs many pages stops cleanly instead of getting killed mid-run by
+  // Apps Script's 6-minute hard limit. Read-only audit, so there's no
+  // draft-cap-style reason to stop early otherwise -- pages just accumulate.
+  const AUDIT_RUNTIME_BUDGET_MS = 5 * 60 * 1000; // 5 min, leaving a 1-min buffer before the 6-min hard limit
+  const auditRunStartTime = Date.now();
+  const AUDIT_PAGE_SIZE = 500; // GmailApp.search's own hard per-call max
+  const threads = [];
+  let auditPageStart = 0;
+  let truncated = false;
+  while (true) {
+    const page = GmailApp.search(query, auditPageStart, AUDIT_PAGE_SIZE);
+    Logger.log('DIAGNOSTIC -- missed leads audit fetched page starting at ' + auditPageStart + ': ' + page.length + ' threads');
+    threads.push.apply(threads, page);
+    if (page.length < AUDIT_PAGE_SIZE) break; // short page -- reached the real end of results
+    auditPageStart += AUDIT_PAGE_SIZE;
+    if (Date.now() - auditRunStartTime > AUDIT_RUNTIME_BUDGET_MS) {
+      Logger.log('Missed leads audit approaching Apps Script\'s execution time limit -- stopping pagination early so this run completes cleanly. Older threads within the ' + lookback + '-day window were NOT examined this run.');
+      truncated = true;
+      break;
+    }
+  }
+  if (truncated) {
+    sendOpsAlert('Missed leads audit stopped early (time budget)',
+      'runMissedLeadsAudit(' + lookback + ') paginated through ' + threads.length + ' thread(s) but hit its ' + (AUDIT_RUNTIME_BUDGET_MS / 60000) + '-minute time budget before finishing the ' + lookback + '-day window. Older threads were not examined this run -- if this recurs, the lookback window may need to be split into more frequent, shorter runs.');
   }
 
   // FIX (30 Aug 2026, real risk found in code review): this list had drifted
