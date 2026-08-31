@@ -114,7 +114,14 @@ function setupHeartbeatTriggers() {
   Logger.log('Heartbeat triggers created: runHeartbeatCheck (hourly), runTriggerHealthCheck (daily 6 AM).');
 }
 
+// FIX (30 Aug 2026, real incident -- alert fired twice on a Sunday): this
+// only ever checked the hour of day, never the day of week, so the hourly
+// trigger kept alerting all weekend even though nobody works Saturday or
+// Sunday and a quiet AI Drafts Log then is completely expected, not a sign
+// anything is stuck.
 function isCurrentlyBusinessHoursEastern() {
+  const dayEastern = parseInt(Utilities.formatDate(new Date(), 'America/New_York', 'u'), 10); // 1=Monday .. 7=Sunday
+  if (dayEastern >= 6) return false; // Saturday or Sunday
   const hourEastern = parseInt(Utilities.formatDate(new Date(), 'America/New_York', 'H'), 10);
   return hourEastern >= BUSINESS_HOURS_START_ET && hourEastern < BUSINESS_HOURS_END_ET;
 }
