@@ -507,7 +507,18 @@ function buildSplitTestSection_(ss, draftsData, learningData, rowsSince, sinceDa
 // below. Bar width is relative to the larger of the two providers' values
 // for that metric, not to any fixed scale -- these are a head-to-head
 // comparison, not an absolute measurement.
+// ADDED (30 Aug 2026, per direct request -- "the cost also needs to have
+// what it did... if one was $10 for 10 drafts and the other was $20 for
+// 1000 drafts, which do you think I would prefer?"): the bars used to show
+// Spend and Cost per draft as two separate rows, which technically implies
+// volume but never states it -- a reader has to do spend/cost-per-draft
+// arithmetic in their head to recover it, and the raw Spend bar on its own
+// reads as "which provider cost more" rather than "which provider did
+// more." Drafts produced is now its own bar, first, so volume is read
+// before spend rather than inferred after it.
 function splitTestBarsHtml_(stats) {
+  const draftVals = stats.map(s => s.draftCount);
+  const draftMax = Math.max(draftVals[0], draftVals[1]);
   const spendMax = Math.max(stats[0].spend, stats[1].spend);
   const costVals = stats.map(s => s.costPerDraft || 0);
   const costMax = Math.max(costVals[0], costVals[1]);
@@ -524,6 +535,7 @@ function splitTestBarsHtml_(stats) {
   );
 
   return (
+    barGroup('Drafts produced', draftVals, draftMax, v => String(v)) +
     barGroup('Spend', stats.map(s => s.spend), spendMax, v => '$' + v.toFixed(4)) +
     barGroup('Cost per draft', costVals, costMax, (v, s) => s.costPerDraft !== null ? '$' + v.toFixed(4) : 'n/a') +
     barGroup('Draft survival into sent', qualityVals, qualityMax, (v, s) => s.avgSimilarity !== null ? v + '%' : 'n/a')
