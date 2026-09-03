@@ -180,6 +180,11 @@ function runDailyReport() {
   }
 
   const now = new Date();
+  // CHANGED (3 Sep 2026, per direct request -- "don't need to put the year
+  // in the title"): now.toDateString() (e.g. "Thu Sep 03 2026") was used for
+  // both the subject line and the in-body heading. This drops the year --
+  // the report is daily, nobody needs the year to know which day it's for.
+  const reportDateStr = Utilities.formatDate(now, 'Europe/Paris', 'EEE MMM dd');
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   // ADDED (25 Aug 2026, per direct request): TODAY only covers midnight to
   // whenever this runs (~7 AM), which is barely any of the day -- the
@@ -373,7 +378,7 @@ function runDailyReport() {
 
   const body =
     'This email was written by Claude.\n\n' +
-    'DAILY REPORT -- ' + now.toDateString() + '\n\n' +
+    'DAILY REPORT -- ' + reportDateStr + '\n\n' +
     'New leads received today (raw inbound count): ' + leadsReceivedToday + '\n\n' +
     formatSection('YESTERDAY', draftsYesterday, editYesterday) + '\n\n' +
     formatSection('TODAY' + (now.getHours() < 12 ? ' (partial -- only since midnight)' : ''), draftsToday, editToday) + '\n\n' +
@@ -408,7 +413,7 @@ function runDailyReport() {
   const htmlBody =
     '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' +
       '<p>This email was written by Claude.</p>' +
-      '<h2 style="margin:0 0 4px 0; font-size:17px; color:#1a2b4c;">Daily Report &mdash; ' + escapeHtml(now.toDateString()) + '</h2>' +
+      '<h2 style="margin:0 0 4px 0; font-size:17px; color:#1a2b4c;">Daily Report &mdash; ' + escapeHtml(reportDateStr) + '</h2>' +
       '<p><b>New leads received today</b> (raw inbound count): ' + leadsReceivedToday + '</p>' +
       '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
       formatSectionHtml('YESTERDAY', draftsYesterday, editYesterday) +
@@ -432,7 +437,7 @@ function runDailyReport() {
     // RENAMED (27 Aug 2026, per direct request): matches the "SPAM DRAFT --"
     // prefix convention Joana wants on this project's automated mail so it's
     // recognizable in the inbox list without opening it.
-    subject: 'SPAM DRAFT - Daily Report -- ' + now.toDateString(),
+    subject: 'SPAM DRAFT - Daily Report -- ' + reportDateStr,
     body: body,
     htmlBody: htmlBody
   });
