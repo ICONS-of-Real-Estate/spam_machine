@@ -5,18 +5,26 @@
  * Sends a daily email to Kris, Tomás, and Joana with real numbers pulled
  * from the existing log tabs -- not estimates. Covers:
  *   - New leads received today (raw inbound count from Gmail)
- *   - How many Claude actually drafted today
+ *   - How many Claude actually drafted, and how many were confirmed sent
  *   - How many Joana edited before sending (vs. sent as-is)
- *   - How many got booked to a call (penciled time, or handed to Sean/Bens)
- *   - Category breakdown (interested / declined / opted out) for today
- *   - Same numbers again for the last 7 days and last 30 days, so you can
- *     see daily vs. weekly vs. monthly trend, not just one day in isolation
+ *   - Penciled call times and teammate handoffs, tracked SEPARATELY (per
+ *     Tomás's feedback, 3 Sep 2026 -- a confirmed call and a routing
+ *     decision are two different things, not one "booked" number)
+ *   - Category breakdown (interested / declined / opted out)
+ *   - YESTERDAY leads (the one complete day at send time), then TODAY
+ *     (partial, still useful later in the day)
+ *   - LAST 7 DAYS only on Mondays, LAST 30 DAYS only on the 1st of the
+ *     month -- gated to a slower cadence per Tomás's feedback ("less
+ *     information, easier to read"); the report itself still sends daily.
  *   - All-time totals for context
+ *   - Kimi vs Anthropic split test, Mondays only (same feedback -- "not
+ *     really useful for a daily update")
  *
- * ASSUMPTION MADE EXPLICIT: "booked to a call" is defined as category =
- * yes_penciled (a specific time confirmed) OR needs_teammate_routing = true
- * (handed to Sean/Bens for a qualification call). If that definition isn't
- * quite right, it's a one-line change in bookedCount() below.
+ * ASSUMPTION MADE EXPLICIT: "booking rate" is penciledCount (category =
+ * yes_penciled, a specific time confirmed) + handoffCount (needs_teammate_
+ * routing = true, handed to Sean/Bens) as two separate numbers, not one
+ * combined count. If that split isn't quite right, it's a one-line change
+ * in penciledCount()/handoffCount() below.
  *
  * SCHEDULING: add a trigger for runDailyReport -- Time-driven -- Day timer,
  * whatever time you want the report to land each morning.
@@ -193,6 +201,18 @@ function runDailyReport() {
   const sevenDaysAgo = dayBefore_(todayStart, 7);
   const thirtyDaysAgo = dayBefore_(todayStart, 30);
 
+  // ADDED (3 Sep 2026, per Tomás's feedback on this report -- "I would leave
+  // the 7-day breakdown just every week, and the 30-day breakdown just on a
+  // monthly basis. Less information, easier to read, easier to reach
+  // conclusions"): the report itself still sends daily, as he separately
+  // asked to keep -- only the LAST 7 DAYS / LAST 30 DAYS sections (and the
+  // Kimi-vs-Anthropic split test, which he also flagged as "not really
+  // useful for a daily update") are gated to their own slower cadence now.
+  // Monday for weekly (matches runStalledBookingsAudit's existing Monday
+  // cadence), the 1st of the calendar month for monthly.
+  const isWeeklyReportDay = now.getDay() === 1; // Monday
+  const isMonthlyReportDay = now.getDate() === 1;
+
   const addressClauses = CONFIG.REQUIRED_CC_ADDRESSES
     .map(addr => 'to:"' + addr + '" OR cc:"' + addr + '"')
     .join(' OR ');
@@ -221,8 +241,20 @@ function runDailyReport() {
     return counts;
   }
 
-  function bookedCount(rows) {
-    return rows.filter(r => r[4] === 'yes_penciled' || r[5] === true).length;
+  // SPLIT (3 Sep 2026, per Tomás's feedback on this report -- "penciled time
+  // or handed to Sean/Bens are two completely different things, this should
+  // be separated"): these used to be one combined "booked" number. A
+  // penciled time is a call Joana herself confirmed; a handoff is just a
+  // routing decision -- Sean/Bens still have to actually reach the lead and
+  // get them on a call. Conflating them answered a question nobody asked
+  // ("how many either of these two very different things happened") instead
+  // of the two real questions: how many calls are actually locked in, and
+  // how many leads are sitting in the handoff queue.
+  function penciledCount(rows) {
+    return rows.filter(r => r[4] === 'yes_penciled').length;
+  }
+  function handoffCount(rows) {
+    return rows.filter(r => r[5] === true).length;
   }
 
   const draftsYesterday = rowsInRange(draftsData, yesterdayStart, todayStart);
@@ -247,14 +279,37 @@ function runDailyReport() {
   const edit30d = editStats(learningData, thirtyDaysAgo);
   const editAllTime = editStats(learningData, new Date(0));
 
+  // ADDED (3 Sep 2026, per Tomás's feedback -- "it seems it is only tracking
+  // drafts, not sends? Could it track replies? Reply rate and booking rate
+  // are what would be best to track"): editStatsArg.total already IS a real
+  // sent-confirmation count (learning_loop.gs's findSentReplyAfterDraft()
+  // only logs a Learning Log row once it has independently verified Joana
+  // actually sent something to the lead, not just that a draft exists) --
+  // it just wasn't being read as "how many replies actually went out." Reply
+  // rate = that count over how many were drafted. NOTE: the Learning Log is
+  // populated by the WEEKLY learning loop, so this lags -- a TODAY/YESTERDAY
+  // window's rate will read artificially low right after a run and is not a
+  // reliable signal that recently, only over the slower windows where the
+  // weekly loop has had time to catch up (see the reply-rate note appended
+  // to the email body/htmlBody below).
+  function replyRateLine_(rowsLength, editStatsArg) {
+    if (rowsLength === 0) return 'no drafts yet';
+    return editStatsArg.total + ' of ' + rowsLength + ' (' + Math.round((editStatsArg.total / rowsLength) * 100) + '%)';
+  }
+
   function formatSection(label, rows, editStatsArg) {
     const cats = categoryBreakdown(rows);
-    const booked = bookedCount(rows);
+    const penciled = penciledCount(rows);
+    const handoff = handoffCount(rows);
+    const bookingRate = rows.length > 0 ? Math.round(((penciled + handoff) / rows.length) * 100) : 0;
     const catLines = Object.keys(cats).map(c => '    ' + c + ': ' + cats[c]).join('\n');
     return (
       label + ':\n' +
       '  Drafted by Claude: ' + rows.length + '\n' +
-      '  Booked to a call (penciled time or handed to Sean/Bens): ' + booked + '\n' +
+      '  Replied (confirmed actually sent): ' + replyRateLine_(rows.length, editStatsArg) + '\n' +
+      '  Penciled a specific call time: ' + penciled + '\n' +
+      '  Handed to a teammate (Sean/Bens): ' + handoff + '\n' +
+      '  Booking rate (penciled + handed off, of drafted): ' + bookingRate + '%\n' +
       '  Edited by Joana before sending: ' + editStatsArg.edited + ' of ' + editStatsArg.total + ' sent (' +
         (editStatsArg.total > 0 ? Math.round((editStatsArg.edited / editStatsArg.total) * 100) : 0) + '%)\n' +
       '  By category:\n' + catLines
@@ -269,14 +324,18 @@ function runDailyReport() {
   // style already shipped for the stalled-bookings alert.
   function formatSectionHtml(label, rows, editStatsArg) {
     const cats = categoryBreakdown(rows);
-    const booked = bookedCount(rows);
+    const penciled = penciledCount(rows);
+    const handoff = handoffCount(rows);
+    const bookingRate = rows.length > 0 ? Math.round(((penciled + handoff) / rows.length) * 100) : 0;
     const editPct = editStatsArg.total > 0 ? Math.round((editStatsArg.edited / editStatsArg.total) * 100) : 0;
     return (
       '<div style="margin:0 0 14px 0; padding:10px 14px; border:1px solid #e0e0e0; border-left:4px solid #1a2b4c; border-radius:6px;">' +
         '<div style="font-weight:bold; color:#1a2b4c; font-size:15px; margin-bottom:6px;">' + escapeHtml(label) + '</div>' +
         '<div style="line-height:1.7;">' +
           '<b>Drafted by Claude:</b> <span style="color:#1a2b4c; font-weight:bold;">' + rows.length + '</span><br>' +
-          '<b>Booked to a call</b> (penciled time or handed to Sean/Bens): <span style="color:#1a7f37; font-weight:bold;">' + booked + '</span><br>' +
+          '<b>Replied</b> (confirmed actually sent): ' + escapeHtml(replyRateLine_(rows.length, editStatsArg)) + '<br>' +
+          '<b>Penciled a specific call time:</b> ' + penciled + ' &nbsp; <b>Handed to a teammate</b> (Sean/Bens): ' + handoff +
+            ' &nbsp; <b>Booking rate:</b> <span style="color:#1a7f37; font-weight:bold;">' + bookingRate + '%</span><br>' +
           '<b>Edited by Joana before sending:</b> ' + editStatsArg.edited + ' of ' + editStatsArg.total + ' sent (' + editPct + '%)<br>' +
           editedStackedBarHtml_(editStatsArg.edited, editStatsArg.sentAsIs) +
           '<b>By category:</b>' + categorySummaryBarHtml_(cats) + categoryBarsHtml_(cats) +
@@ -285,21 +344,40 @@ function runDailyReport() {
     );
   }
 
+  // REORDERED AGAIN (3 Sep 2026, per Tomás's feedback -- "this is sending
+  // the daily Sat 29 update at my 6am, so it's when midnight passes... needs
+  // to be from the PREVIOUS day, as there is information it will be able to
+  // pull up. The 'TODAY (partial -- only since midnight)' makes no sense"):
+  // the 28 Aug reorder put TODAY first per a different, now-superseded
+  // request. At the report's actual send time (~7 AM), TODAY is a few
+  // hours old and nearly empty -- YESTERDAY is the complete, meaningful
+  // number and belongs first. TODAY stays in the report (still useful if
+  // read later in the day) but no longer leads.
+  const periodicSections =
+    (isWeeklyReportDay ? formatSection('LAST 7 DAYS', drafts7d, edit7d) + '\n\n' : '') +
+    (isMonthlyReportDay ? formatSection('LAST 30 DAYS', drafts30d, edit30d) + '\n\n' : '');
+
+  // MOVED OFF DAILY (3 Sep 2026, per Tomás's feedback -- "the price matching
+  // between Kimi and Anthropic is not really useful for a daily update"):
+  // now only included in Monday's weekly report, as one LAST 7 DAYS
+  // comparison instead of three overlapping YESTERDAY/TODAY/LAST-7-DAYS
+  // blocks -- the daily fluctuation was exactly the noise he meant.
+  const splitTestSection = isWeeklyReportDay
+    ? 'KIMI vs ANTHROPIC SPLIT TEST (price and quality; ' +
+        (LLM_COST_TEST_MODE ? 'test ACTIVE -- providers alternate 50/50 by call' : 'test OFF -- Kimi first always') + ')\n' +
+      buildSplitTestSection_(ss, draftsData, learningData, rowsSince, sevenDaysAgo, 'LAST 7 DAYS') + '\n\n' +
+      'Reading this: cost-per-draft is the price answer. Edit rate and % surviving\n' +
+      'are the quality answer -- lower edit rate and higher % surviving is better.\n' +
+      'A cheap provider that gets rewritten every time is not actually cheaper.\n\n'
+    : 'KIMI vs ANTHROPIC SPLIT TEST: included in the weekly report (Mondays) instead of every day.\n\n';
+
   const body =
     'This email was written by Claude.\n\n' +
     'DAILY REPORT -- ' + now.toDateString() + '\n\n' +
     'New leads received today (raw inbound count): ' + leadsReceivedToday + '\n\n' +
-    // REORDERED (28 Aug 2026, per direct request -- "why would you put
-    // yesterday above today"): a "Daily Report" reads top-to-bottom as
-    // most-recent-first by default; YESTERDAY leading was a leftover from
-    // TODAY being nearly empty at ~7 AM (see the DST-fix comment above --
-    // TODAY only covers midnight to run time). That reasoning never
-    // appeared in the email itself, so the order just looked backwards.
-    // TODAY first now, with an explicit note when it's still a partial day.
-    formatSection('TODAY' + (now.getHours() < 12 ? ' (partial -- only since midnight)' : ''), draftsToday, editToday) + '\n\n' +
     formatSection('YESTERDAY', draftsYesterday, editYesterday) + '\n\n' +
-    formatSection('LAST 7 DAYS', drafts7d, edit7d) + '\n\n' +
-    formatSection('LAST 30 DAYS', drafts30d, edit30d) + '\n\n' +
+    formatSection('TODAY' + (now.getHours() < 12 ? ' (partial -- only since midnight)' : ''), draftsToday, editToday) + '\n\n' +
+    periodicSections +
     formatSection('ALL TIME', draftsAllTime, editAllTime) + '\n\n' +
     'Averages:\n' +
     '  Per day (last 7 days): ' + (drafts7d.length / 7).toFixed(1) + ' drafted\n' +
@@ -309,16 +387,23 @@ function runDailyReport() {
     // actually sees it day to day, instead of it only mattering silently
     // behind the scenes.
     'Gmail quota usage today (self-tracked, approximate): ' + getGmailQuotaUsageToday_() + ' / ' + GMAIL_CALL_REAL_LIMIT_ESTIMATE + ' estimated daily limit\n\n' +
-    'KIMI vs ANTHROPIC SPLIT TEST (price and quality; ' +
-      (LLM_COST_TEST_MODE ? 'test ACTIVE -- providers alternate 50/50 by call' : 'test OFF -- Kimi first always') + ')\n' +
-    buildSplitTestSection_(ss, draftsData, learningData, rowsSince, yesterdayStart, 'YESTERDAY', todayStart) + '\n\n' +
-    buildSplitTestSection_(ss, draftsData, learningData, rowsSince, todayStart, 'TODAY') + '\n\n' +
-    buildSplitTestSection_(ss, draftsData, learningData, rowsSince, sevenDaysAgo, 'LAST 7 DAYS') + '\n\n' +
-    'Reading this: cost-per-draft is the price answer. Edit rate and % surviving\n' +
-    'are the quality answer -- lower edit rate and higher % surviving is better.\n' +
-    'A cheap provider that gets rewritten every time is not actually cheaper.\n\n' +
+    splitTestSection +
     'Full detail is always available in the "AI Drafts Log" and "Learning Log" tabs: ' +
     'https://docs.google.com/spreadsheets/d/' + CONFIG.SPREADSHEET_ID + '/edit';
+
+  const periodicSectionsHtml =
+    (isWeeklyReportDay ? formatSectionHtml('LAST 7 DAYS', drafts7d, edit7d) : '') +
+    (isMonthlyReportDay ? formatSectionHtml('LAST 30 DAYS', drafts30d, edit30d) : '');
+
+  const splitTestSectionHtml = isWeeklyReportDay
+    ? '<h2 style="margin:0 0 8px 0; font-size:17px; color:#1a2b4c;">Kimi vs Anthropic split test</h2>' +
+      '<p style="color:#555;">(price and quality; ' +
+        (LLM_COST_TEST_MODE ? 'test ACTIVE -- providers alternate 50/50 by call' : 'test OFF -- Kimi first always') + ')</p>' +
+      buildSplitTestSectionHtml_(ss, draftsData, learningData, rowsSince, sevenDaysAgo, 'LAST 7 DAYS') +
+      '<p style="color:#555;">Reading this: cost-per-draft is the price answer. Edit rate and % surviving are ' +
+        'the quality answer &mdash; lower edit rate and higher % surviving is better. A cheap provider that gets ' +
+        'rewritten every time is not actually cheaper.</p>'
+    : '<p style="color:#888; font-size:13px;">Kimi vs Anthropic split test: included in the weekly report (Mondays) instead of every day.</p>';
 
   const htmlBody =
     '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' +
@@ -326,25 +411,16 @@ function runDailyReport() {
       '<h2 style="margin:0 0 4px 0; font-size:17px; color:#1a2b4c;">Daily Report &mdash; ' + escapeHtml(now.toDateString()) + '</h2>' +
       '<p><b>New leads received today</b> (raw inbound count): ' + leadsReceivedToday + '</p>' +
       '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
-      formatSectionHtml('TODAY' + (now.getHours() < 12 ? ' (partial -- only since midnight)' : ''), draftsToday, editToday) +
       formatSectionHtml('YESTERDAY', draftsYesterday, editYesterday) +
-      formatSectionHtml('LAST 7 DAYS', drafts7d, edit7d) +
-      formatSectionHtml('LAST 30 DAYS', drafts30d, edit30d) +
+      formatSectionHtml('TODAY' + (now.getHours() < 12 ? ' (partial -- only since midnight)' : ''), draftsToday, editToday) +
+      periodicSectionsHtml +
       formatSectionHtml('ALL TIME', draftsAllTime, editAllTime) +
       '<p><b>Averages:</b><br>' +
         'Per day (last 7 days): ' + (drafts7d.length / 7).toFixed(1) + ' drafted<br>' +
         'Per day (last 30 days): ' + (drafts30d.length / 30).toFixed(1) + ' drafted</p>' +
       '<p><b>Gmail quota usage today</b> (self-tracked, approximate): ' + getGmailQuotaUsageToday_() + ' / ' + GMAIL_CALL_REAL_LIMIT_ESTIMATE + ' estimated daily limit</p>' +
       '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
-      '<h2 style="margin:0 0 8px 0; font-size:17px; color:#1a2b4c;">Kimi vs Anthropic split test</h2>' +
-      '<p style="color:#555;">(price and quality; ' +
-        (LLM_COST_TEST_MODE ? 'test ACTIVE -- providers alternate 50/50 by call' : 'test OFF -- Kimi first always') + ')</p>' +
-      buildSplitTestSectionHtml_(ss, draftsData, learningData, rowsSince, yesterdayStart, 'YESTERDAY', todayStart) +
-      buildSplitTestSectionHtml_(ss, draftsData, learningData, rowsSince, todayStart, 'TODAY') +
-      buildSplitTestSectionHtml_(ss, draftsData, learningData, rowsSince, sevenDaysAgo, 'LAST 7 DAYS') +
-      '<p style="color:#555;">Reading this: cost-per-draft is the price answer. Edit rate and % surviving are ' +
-        'the quality answer &mdash; lower edit rate and higher % surviving is better. A cheap provider that gets ' +
-        'rewritten every time is not actually cheaper.</p>' +
+      splitTestSectionHtml +
       '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
       '<p style="color:#555;">Full detail is always available in the "AI Drafts Log" and "Learning Log" tabs: ' +
         '<a href="https://docs.google.com/spreadsheets/d/' + CONFIG.SPREADSHEET_ID + '/edit">open the sheet</a></p>' +
