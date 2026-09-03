@@ -426,8 +426,11 @@ function buildSchedulingNote(originalMessageDate) {
 // callLlmWithFallback() (Kimi primary, Anthropic fallback -- see
 // quota_guard_and_alerting.gs) -- no new infrastructure.
 //
-// Hub Guest only for now. Podcast Sales stays on PODCAST_SALES_TEMPLATES
-// until the Follow-Up Learning Log shows whether Joana rewrites those too.
+// UPDATE (3 Sep 2026): was Hub Guest only, with Podcast Sales staying on
+// static PODCAST_SALES_TEMPLATES "until the Follow-Up Learning Log shows
+// whether Joana rewrites those too." It does -- see
+// buildPodcastSalesFollowUpSystemPrompt() and advancePodcastSalesFollowUps()
+// below; both cadences are LLM-drafted per lead now.
 
 function buildFollowUpSystemPrompt() {
   try {
@@ -465,6 +468,32 @@ The one thing you must NEVER do is send a generic "just following up, can we boo
 When referencing the show, ALWAYS include the exact show URL given to you, verbatim, as a raw URL. STEP 2 is always the final message: short, gracious, the invite stands, no new asks.`;
 }
 
+// ADDED (3 Sep 2026, per Joana's feedback, section 5a -- "every follow-up
+// reads the same... this exact problem has already been auto-detected by
+// your own SOP suggestion job and is sitting unapplied [in the Learning
+// Log]"): the Podcast Sales cadence (leads who penciled a call or were
+// handed to a teammate about HOSTING their own show, then went quiet) was
+// still on the static PODCAST_SALES_TEMPLATES from before
+// classifyAndDraftFollowUp() existed -- see that constant's 15 Aug 2026
+// comment: "Hub Guest only for now... until the Follow-Up Learning Log
+// shows whether Joana rewrites those too." It does; her feedback doc names
+// nate.lancaster@exprealty.com as a real example, every follow-up identical.
+// This is that cadence's own system prompt, separate from
+// buildFollowUpSystemPrompt() above -- that one is explicitly scoped to the
+// Hub Guest invite ("she invited them to be a GUEST on a state-specific
+// podcast"), the wrong framing here: this lead was asked about hosting
+// their OWN show, not guesting on one of ours.
+function buildPodcastSalesFollowUpSystemPrompt() {
+  return `You are drafting follow-up emails for Joana Peixe, Podcast Network Manager at Icons of Real Estate. This lead previously expressed interest in HOSTING their own local podcast (not guesting on someone else's) and either penciled in a call or was handed off to a teammate for a qualification call -- then went quiet. You are writing the follow-up nudge. Never mention you are an AI. Warm, brief, first-name only, low-pressure. Plain text only -- no markdown; paste any link as a raw URL.
+
+The one thing you must NEVER do is send a generic "just following up, can we still get that call scheduled?" nudge to a lead who already told you something specific. Read the thread and respond to what actually happened:
+- They proposed a time or asked to reschedule: acknowledge it directly, offer to lock in the new time, don't repeat the pitch.
+- They raised a real objection or question (cost, timing, brokerage fit) that never actually got answered: answer it now, briefly, before asking again for the call.
+- They never replied to the handoff/pencil-in at all: a gentle "floating this back to the top of your inbox, no pressure" bump, offering the call again.
+- Clear hard decline / told you to stop: do not draft (return action "stop").
+STEP 2 is always the final message in this cadence: short, gracious, the offer stands, no new asks.`;
+}
+
 // One Claude call per follow-up draft. Classifies the lead's situation from
 // the actual thread, then drafts the right shape of reply for it -- counter,
 // referral-ask, empathy close, affiliate pivot, gentle bump, or nothing at all.
@@ -486,14 +515,24 @@ function classifyAndDraftFollowUp(systemPrompt, ctx) {
     }
   }
 
+  // GENERALIZED (3 Sep 2026, per Joana's feedback, section 5a): this
+  // function used to be Hub Guest-only ("the guest invite"), which is why
+  // the Podcast Sales cadence stayed on static templates instead of reusing
+  // it (see PODCAST_SALES_TEMPLATES's comment). Wording made cadence-neutral
+  // so both callers get an accurate step description; the SHOW NAME/URL
+  // block only applies (and is only included) when a caller actually passes
+  // one -- the Podcast Sales cadence has no specific show to reference, the
+  // lead is being asked about hosting their OWN.
   const stepBlock = ctx.step === 1
-    ? 'This is STEP 1 of 2 -- the first follow-up after the guest invite.'
-    : 'This is STEP 2 of 2 -- the FINAL message this lead will ever receive in this cadence. Regardless of their situation: short, gracious, no new asks, the invite stands. The only exception is a hard decline, which gets action "stop" instead.';
+    ? 'This is STEP 1 of 2 -- the first follow-up after they went quiet.'
+    : 'This is STEP 2 of 2 -- the FINAL message this lead will ever receive in this cadence. Regardless of their situation: short, gracious, no new asks, the offer stands. The only exception is a hard decline, which gets action "stop" instead.';
+
+  const showBlock = ctx.showName
+    ? `SHOW NAME: ${ctx.showName}\nSHOW URL (use verbatim, as a raw URL, whenever you reference the show or guest spot): ${ctx.showLink}\n`
+    : '';
 
   const userPrompt = `LEAD FIRST NAME: ${ctx.name || 'there'}
-SHOW NAME: ${ctx.showName}
-SHOW URL (use verbatim, as a raw URL, whenever you reference the show or guest spot): ${ctx.showLink}
-LEAD'S STATE: ${ctx.state || 'unknown'}
+${showBlock}LEAD'S STATE: ${ctx.state || 'unknown'}
 JOANA'S ZOOM LINK (only if a quick call is the natural next step, e.g. countering an objection from an engaged lead): ${CONFIG.BOOKING_LINK_URL}
 
 ${stepBlock}
@@ -584,18 +623,16 @@ function logFollowUpLearning(cadence, name, email, step, draftedText, sentText) 
   Logger.log('logFollowUpLearning -- ' + cadence + ' step ' + step + ', ' + email + ', wasEdited=' + wasEdited);
 }
 
-// ---------- TEMPLATES ----------
-
-const PODCAST_SALES_TEMPLATES = {
-  1: "Hi {{name}}, Just wanted to follow up on my last note -- were you able to take a look at hosting your own podcast? Happy to jump on a quick call whenever works for you: [book a 15-minute Zoom Call here](BOOKING_LINK)"
-};
-
 // REMOVED (15 Aug 2026): HUB_GUEST_TEMPLATES deleted. The Hub Guest cadence no
 // longer uses static {{name}}/{{show}} strings -- Joana was rewriting nearly
 // every one from scratch (7/7 real examples in Goodness's feedback doc) because
 // a fixed template has zero awareness of WHY the lead declined. Hub Guest
-// follow-up bodies are now drafted per-lead by classifyAndDraftFollowUp()
-// below. Podcast Sales keeps its static template for now.
+// follow-up bodies are drafted per-lead by classifyAndDraftFollowUp() below.
+//
+// REMOVED (3 Sep 2026, per Joana's feedback, section 5a): PODCAST_SALES_TEMPLATES
+// deleted for the same reason -- see buildPodcastSalesFollowUpSystemPrompt()
+// and advancePodcastSalesFollowUps() above, now also per-lead via
+// classifyAndDraftFollowUp().
 
 // ---------- MAIN ENTRY POINT ----------
 
@@ -1620,6 +1657,11 @@ function sentMessageMatchesOurDraft_(sentPlainBody, draftedText) {
 function advancePodcastSalesFollowUps() {
   const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const queueTab = ss.getSheetByName(PODCAST_SALES_QUEUE_TAB);
+  // CHANGED (3 Sep 2026, per Joana's feedback, section 5a): built once per
+  // run, same as advanceHubGuestFollowUps() -- see
+  // buildPodcastSalesFollowUpSystemPrompt()'s comment for why this cadence
+  // needed its own prompt rather than reusing buildFollowUpSystemPrompt().
+  const followUpSystemPrompt = buildPodcastSalesFollowUpSystemPrompt();
   const data = queueTab.getDataRange().getValues();
   let advanced = 0;
   let completed = 0;
@@ -1752,29 +1794,38 @@ function advancePodcastSalesFollowUps() {
       }
       if (nextStep > 2) continue;
 
-      const note = buildSchedulingNote(new Date(originalReplyTime));
-      let body;
+      // CHANGED (3 Sep 2026, per Joana's feedback, section 5a): was two
+      // static templates (PODCAST_SALES_TEMPLATES[1] for step 1, one
+      // hardcoded bump for step 2) -- every lead in this cadence got the
+      // identical wording regardless of what they'd actually said. Now
+      // LLM-drafted per lead, same as the Hub Guest cadence, via
+      // classifyAndDraftFollowUp() with buildPodcastSalesFollowUpSystemPrompt()'s
+      // cadence-appropriate framing (no showName/showLink -- this lead has
+      // no specific show to reference, they're being asked about hosting
+      // their own).
+      const followUp = classifyAndDraftFollowUp(followUpSystemPrompt, {
+        name: name, email: email, state: null,
+        step: nextStep, thread: thread
+      });
 
-
-      if (nextStep === 1) {
-        body = PODCAST_SALES_TEMPLATES[1].replace('{{name}}', name || 'there');
-      } else {
-        // FIXED (17 Aug 2026, real incident): this used to hardcode "Totally
-        // understand if starting your own show isn't the right fit" for
-        // EVERY step-2 lead, unconditionally assuming a decline -- but
-        // threadContainsDecline() above already stops the cadence for any
-        // real decline before this point is reached, so every lead who
-        // makes it here simply hasn't responded yet, not declined. That
-        // false assumption directly contradicted what several real leads
-        // had actually said (e.g. asking for more info, not declining).
-        // Replaced with the SOP's own "THEY NEVER REPLIED AT ALL" pattern:
-        // a gentle bump, no decline assumed, no guest-invite pivot (guest
-        // invites are the Hub Guest cadence's job, not this one).
-        body = 'Hi ' + (name || 'there') + ', Just floating this back to the top of your inbox in case it got buried! No pressure at all -- but if hosting your own podcast is still something you\'d be interested in, happy to find a time that works: [book a 15-minute Zoom Call here](BOOKING_LINK). Either way, wishing you continued success!';
+      if (!followUp) {
+        Logger.log('advancePodcastSalesFollowUps -- LLM drafting failed for ' + threadId + ' (' + name + ') -- left at _SCHEDULE, will retry on the next run.');
+        continue;
       }
-      body = substituteLinkTokens(body);
-      const plainBody = markdownLinksToPlain(body);
-      const fullDraftText = note + plainBody + buildQuotedHistoryForReply(thread);
+
+      if (followUp.action === 'stop') {
+        queueTab.getRange(r + 1, 7).setValue('STOPPED');
+        Logger.log('advancePodcastSalesFollowUps -- STOPPED (LLM read the thread as a hard decline, lead_state=' + followUp.leadState + '): ' + threadId + ' (' + name + ', ' + email + '). No follow-up drafted.');
+        stopped++;
+        continue;
+      }
+
+      Logger.log('advancePodcastSalesFollowUps -- LLM drafted for ' + threadId + ' (' + name + '), lead_state=' + followUp.leadState + ', step ' + nextStep);
+
+      const note = buildSchedulingNote(new Date(originalReplyTime));
+      const providerNote = buildLlmProviderNote(followUp.llmProvider);
+      const plainBody = followUp.draftBody;
+      const fullDraftText = note + providerNote + plainBody + buildQuotedHistoryForReply(thread);
 
       // FIX (17 Aug 2026, real incident -- Joana's top-priority, repeatedly
       // flagged complaint): GmailApp.createDraft() composed a brand-new,
