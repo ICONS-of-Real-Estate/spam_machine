@@ -135,6 +135,39 @@ function runLearningLoopInner() {
   const namedProviderCol = headers.indexOf('LLM Provider');
   const llmProviderCol = namedProviderCol !== -1 ? namedProviderCol : LLM_PROVIDER_FIXED_COL;
 
+  // PRIORITIZED (3 Sep 2026, per direct request -- "do we have enough data
+  // on Kimi/Anthropic quality"): this loop used to walk strictly oldest-
+  // first. Confirmed live: All Time has 1718 drafts but only 988 Learning
+  // Log matches -- a ~730-row backlog, most of it predating the split test
+  // (started 24 Aug). Oldest-first means that untagged backlog permanently
+  // sits in front of this week's real split-test drafts, so every weekly
+  // run spends its whole time budget on old, provider-less history before
+  // ever reaching a Kimi/Anthropic-tagged row -- the split test's quality
+  // numbers (edit rate, % surviving) stayed "no reviewed drafts yet"
+  // indefinitely regardless of real volume (336 split-test calls in the
+  // last 7 days alone, zero of them judged).
+  //
+  // Split-test rows (a real llmProviderCol value) now go first, newest
+  // first within that group, so quality signal actually starts flowing.
+  // The rest (untagged/pre-split-test backlog) follows in its original
+  // order -- nothing is dropped, only reordered; every row still gets
+  // processed eventually given enough runs, same as before. Relies on
+  // Array.prototype.sort being stable (guaranteed since ES2019, which
+  // Apps Script's V8 runtime provides) so the untagged group's relative
+  // order is preserved rather than shuffled.
+  const dataRows = draftRows.slice(1);
+  const prioritized = dataRows.slice().sort((a, b) => {
+    const aProvider = String(a[llmProviderCol] || '').toLowerCase().trim();
+    const bProvider = String(b[llmProviderCol] || '').toLowerCase().trim();
+    const aTagged = aProvider === 'kimi' || aProvider === 'anthropic';
+    const bTagged = bProvider === 'kimi' || bProvider === 'anthropic';
+    if (aTagged !== bTagged) return aTagged ? -1 : 1;
+    if (!aTagged) return 0; // preserve original order within the untagged backlog
+    const aTime = a[timestampCol] instanceof Date ? a[timestampCol].getTime() : 0;
+    const bTime = b[timestampCol] instanceof Date ? b[timestampCol].getTime() : 0;
+    return bTime - aTime; // newest split-test draft first
+  });
+
   let compared = 0;
 
   // ADDED (22 Aug 2026, per direct request): moved from a daily trigger to a
@@ -152,7 +185,7 @@ function runLearningLoopInner() {
   const RUNTIME_BUDGET_MS = 5 * 60 * 1000; // 5 min, leaving a 1-min buffer before the 6-min hard limit
   const runStartTime = Date.now();
 
-  for (let i = 1; i < draftRows.length; i++) {
+  for (let i = 0; i < prioritized.length; i++) {
     if (Date.now() - runStartTime > RUNTIME_BUDGET_MS) {
       Logger.log('Approaching Apps Script\'s execution time limit -- stopping this run early so it completes cleanly instead of getting killed mid-run. Remaining rows will be picked up next run.');
       break;
@@ -162,7 +195,7 @@ function runLearningLoopInner() {
       break;
     }
 
-    const row = draftRows[i];
+    const row = prioritized[i];
     const threadId = row[threadIdCol];
     if (!threadId || alreadyCompared.has(threadId)) continue;
 
