@@ -14,7 +14,10 @@
  *     and at the trigger below for why.
  *   - runLearningLoop          -- weekly (Saturday -- moved off daily 22 Aug 2026,
  *     see note at the trigger below)
- *   - generateSopSuggestions   -- daily (~6 PM Pacific -- see timezone note below)
+ *   - generateSopSuggestions   -- weekly (Friday, ~6 PM Pacific -- moved off
+ *     daily 3 Sep 2026, per Joana's direct feedback: daily produced a
+ *     600+ row "SOP Suggestions" tab nobody could review; see the note at
+ *     the trigger below and the fingerprint-dedup fix in learning_loop.gs)
  *   - runMissedLeadsAudit      -- daily (8 AM -- moved back from weekly 28 Aug
  *     2026 after a same-day miss sat undetected for hours; see note at the
  *     trigger below)
@@ -144,12 +147,18 @@ function setupAllTriggers() {
   // 6 PM Pacific. Not worth solving with date math for an internal digest
   // email -- if that ever actually matters, adjust atHour() by 1 during
   // those windows.
+  // MOVED to weekly (3 Sep 2026, per Joana's direct feedback -- "weekly,
+  // with more updates per email, not daily... daily is what got us here").
+  // Friday so the digest lands before the weekend, covering the week's
+  // accumulated edits in one pass. Same ~6 PM Pacific / 3 AM Paris slot as
+  // before (see the daylight-saving caveat above this trigger's old daily
+  // comment, still applicable).
   ScriptApp.newTrigger('generateSopSuggestions')
     .timeBased()
-    .everyDays(1)
+    .onWeekDay(ScriptApp.WeekDay.FRIDAY)
     .atHour(3)
     .create();
-  Logger.log('Created: generateSopSuggestions, daily around 3 AM ' + TZ + ' (~6 PM Pacific the previous day).');
+  Logger.log('Created: generateSopSuggestions, weekly on Friday around 3 AM ' + TZ + ' (~6 PM Pacific the previous day).');
 
   // MOVED BACK to daily (28 Aug 2026, real incident): a genuine first-time
   // interested lead (Krista) sat unread and undrafted for 7+ hours before

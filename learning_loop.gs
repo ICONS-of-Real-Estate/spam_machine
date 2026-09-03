@@ -405,6 +405,72 @@ function levenshteinRough(a, b) {
 
 // ---------- 2. SURFACE SOP SUGGESTIONS (proposals only, never auto-applied) ----------
 
+// ADDED (3 Sep 2026, per Joana's written feedback doc, section 6): the "SOP
+// Suggestions" tab hit 600+ rows, every single one still "pending" -- the
+// same handful of real patterns (guest-pivot wording, the dash rule, the
+// emoji rule) kept getting regenerated day after day because nothing ever
+// checked whether a pattern had already been surfaced before writing a new
+// row. Fingerprinting on the normalized "pattern observed" text and
+// suppressing anything that matches a fingerprint ALREADY in the tab --
+// regardless of its status column -- fixes this and Joana's separate
+// "make reject do something" ask in one mechanism: a suggestion that was
+// already surfaced (pending, approved, OR rejected) never comes back as if
+// it were new. Only the exact wording is deduplicated this way; genuinely
+// different wording of the same underlying pattern within one run is still
+// caught by the LLM consolidation pass below (mergeDuplicateSuggestions_).
+function fingerprintSopSuggestion_(patternObserved) {
+  return String(patternObserved || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, 200);
+}
+
+const SOP_SUGGESTIONS_FINGERPRINT_HEADER = 'Fingerprint';
+
+// One-time, idempotent migration: adds the Fingerprint column if it isn't
+// there yet, and backfills it for every pre-existing row (the 600+ row
+// backlog included) so cross-run dedup works retroactively, not just for
+// suggestions generated after this shipped. Safe to call on every run --
+// no-ops instantly once the header exists.
+function ensureSopSuggestionsFingerprintColumn_(suggestionsTab) {
+  const lastCol = suggestionsTab.getLastColumn();
+  const headerRow = lastCol > 0 ? suggestionsTab.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+  let fingerprintCol = headerRow.indexOf(SOP_SUGGESTIONS_FINGERPRINT_HEADER);
+
+  if (fingerprintCol === -1) {
+    fingerprintCol = headerRow.length; // 0-indexed position of the new column
+    suggestionsTab.getRange(1, fingerprintCol + 1).setValue(SOP_SUGGESTIONS_FINGERPRINT_HEADER);
+
+    const lastRow = suggestionsTab.getLastRow();
+    if (lastRow > 1) {
+      // Column C ("Suggested Change") holds the "[confidence] pattern -> change"
+      // line -- parse it back out to fingerprint just the pattern half, same
+      // as newly-generated suggestions below.
+      const existingLines = suggestionsTab.getRange(2, 3, lastRow - 1, 1).getValues();
+      const fingerprints = existingLines.map(r => [fingerprintSopSuggestion_(parseSuggestionLine_(r[0]).pattern_observed)]);
+      suggestionsTab.getRange(2, fingerprintCol + 1, fingerprints.length, 1).setValues(fingerprints);
+      Logger.log('ensureSopSuggestionsFingerprintColumn_ -- added Fingerprint column and backfilled ' + fingerprints.length + ' existing row(s).');
+    } else {
+      Logger.log('ensureSopSuggestionsFingerprintColumn_ -- added Fingerprint column (no existing rows to backfill).');
+    }
+  }
+
+  return fingerprintCol; // 0-indexed
+}
+
+// Loads every fingerprint currently in the tab (any status) into a Set --
+// this IS the suppression memory: a fingerprint in this set is a pattern
+// already surfaced before, in any state, and must not be re-created or
+// re-emailed as if it were new.
+function loadSopSuggestionFingerprints_(suggestionsTab, fingerprintCol) {
+  const lastRow = suggestionsTab.getLastRow();
+  if (lastRow <= 1) return new Set();
+  const values = suggestionsTab.getRange(2, fingerprintCol + 1, lastRow - 1, 1).getValues();
+  return new Set(values.map(r => r[0]).filter(v => v));
+}
+
 function generateSopSuggestions() {
   // ADDED (17 Aug 2026, real incident): without a lock, two overlapping
   // executions could both read the same unreviewed rows before either
@@ -455,6 +521,14 @@ function generateSopSuggestionsInner(opts) {
   const learningTab = ss.getSheetByName('Learning Log');
   const suggestionsTab = ss.getSheetByName('SOP Suggestions');
   if (!learningTab || !suggestionsTab) return true;
+
+  // FINGERPRINT DEDUP SETUP (3 Sep 2026, per Joana's feedback) -- see
+  // fingerprintSopSuggestion_'s comment. Loaded once per run; updated in
+  // memory as new suggestions are accepted below so duplicates rediscovered
+  // later in the SAME run are also caught, not just ones from past runs.
+  const sopFingerprintCol = ensureSopSuggestionsFingerprintColumn_(suggestionsTab);
+  const seenSopFingerprints = loadSopSuggestionFingerprints_(suggestionsTab, sopFingerprintCol);
+  let suppressedDuplicateCount = 0;
 
   const rows = learningTab.getDataRange().getValues();
   Logger.log('generateSopSuggestions -- read ' + (rows.length - 1) + ' row(s) from "Learning Log", scanning for unreviewed edits...');
@@ -535,7 +609,19 @@ function generateSopSuggestionsInner(opts) {
   // half of that fix, not just a readability nicety. Must stay comfortably
   // under SOP_MERGE_MAX_ITEMS_PER_CALL, including the overshoot bounded
   // below.
-  const SOP_SUGGESTIONS_MAX_RAW_PER_RUN = 15;
+  // RAISED 15 -> 22 (3 Sep 2026, same change that moved the trigger from
+  // daily to weekly in setup_all_triggers.gs): a run now needs to cover a
+  // full week's worth of edits, not one day's, so the old daily-sized cap
+  // would defer most of a normal week to the NEXT weekly run instead of the
+  // next day -- a much slower drain. Kept comfortably under
+  // SOP_MERGE_MAX_ITEMS_PER_CALL (25, the real hard ceiling for the
+  // single-pass consolidation call below) rather than matching it exactly,
+  // leaving headroom. The actual backstop against a runaway run is still
+  // SOP_SUGGESTIONS_RUN_TIME_BUDGET_MS, not this count. The new fingerprint
+  // dedup (see fingerprintSopSuggestion_) also reduces real volume per run
+  // going forward, since a rediscovered pattern no longer counts against
+  // this cap at all.
+  const SOP_SUGGESTIONS_MAX_RAW_PER_RUN = 22;
 
   const allBatchEdits = [];
   const allSuggestions = [];
@@ -618,12 +704,29 @@ function generateSopSuggestionsInner(opts) {
     }
 
     suggestions.forEach(s => {
-      suggestionsTab.appendRow([
-        new Date(),
-        batchEdits.length,
-        `[${s.confidence}] ${s.pattern_observed} -> ${s.suggested_change}`,
-        'pending',
-      ]);
+      // FIX (3 Sep 2026, per Joana's feedback): a suggestion whose pattern
+      // fingerprints the same as one already in the tab (any status) has
+      // already been surfaced before -- don't write a duplicate row, and
+      // don't let it back into the email/doc as if it were new. See
+      // fingerprintSopSuggestion_'s comment for why this also satisfies
+      // "make reject actually do something."
+      const fingerprint = fingerprintSopSuggestion_(s.pattern_observed);
+      if (seenSopFingerprints.has(fingerprint)) {
+        suppressedDuplicateCount++;
+        Logger.log('generateSopSuggestions -- suppressed duplicate (already surfaced before): ' + s.pattern_observed);
+        return;
+      }
+      seenSopFingerprints.add(fingerprint);
+
+      const row = [new Date(), batchEdits.length, `[${s.confidence}] ${s.pattern_observed} -> ${s.suggested_change}`, 'pending'];
+      row[sopFingerprintCol] = fingerprint; // pads with undefined->'' below if the column sits further right than index 4
+      for (let c = 0; c < row.length; c++) if (row[c] === undefined) row[c] = '';
+      suggestionsTab.appendRow(row);
+
+      // Row link for the capped email (see emailSopSuggestionsDoc) -- only
+      // suggestions that actually got a new row can be linked to one.
+      s.__sheetRow = suggestionsTab.getLastRow();
+      allSuggestions.push(s);
     });
 
     // Mark these rows as reviewed immediately -- if the run dies partway
@@ -634,7 +737,6 @@ function generateSopSuggestionsInner(opts) {
     });
 
     allBatchEdits.push(...batchEdits);
-    allSuggestions.push(...suggestions);
     remaining = remaining.slice(SOP_SUGGESTIONS_BATCH_SIZE);
     remainingRowIndexes = remainingRowIndexes.slice(SOP_SUGGESTIONS_BATCH_SIZE);
   }
@@ -644,7 +746,9 @@ function generateSopSuggestionsInner(opts) {
 
   if (allBatchEdits.length === 0) return deferredCount === 0;
 
-  Logger.log('Generated ' + allSuggestions.length + ' SOP suggestions from ' + allBatchEdits.length + ' edited examples' + (deferredCount > 0 ? ' (' + deferredCount + ' more deferred to next run).' : '.'));
+  Logger.log('Generated ' + allSuggestions.length + ' new SOP suggestion(s) from ' + allBatchEdits.length + ' edited examples' +
+    (suppressedDuplicateCount > 0 ? ' (' + suppressedDuplicateCount + ' more suppressed as already-seen duplicates)' : '') +
+    (deferredCount > 0 ? ' (' + deferredCount + ' more deferred to next run).' : '.'));
 
   // ADDED (19 Aug 2026, per direct request): the "SOP Suggestions" sheet
   // tab above is kept as the permanent structured log, but nobody reliably
@@ -686,7 +790,25 @@ function generateSopSuggestionsInner(opts) {
     const merged = mergeDuplicateSuggestions_(suggestionLines, 'generateSopSuggestions');
     const finalSuggestions = merged || rawForMerge;
     const docFile = createSopSuggestionsDoc(allBatchEdits, finalSuggestions, deferredCount);
-    emailSopSuggestionsDoc(docFile, finalSuggestions.length);
+
+    // CAPPED EMAIL (3 Sep 2026, per Joana's feedback -- "cap the daily email
+    // at the top 5-10, one-line summary each, with a direct link to that
+    // row"). Uses rawForMerge (the deduped survivors, each still tied to its
+    // own sheet row via __sheetRow) rather than the merged/consolidated
+    // finalSuggestions above -- merging can combine several raw rows into
+    // one summary, which has no single row to link to. The doc keeps the
+    // full merged detail for whoever opens it; the email is just a scannable
+    // pointer into the sheet.
+    const CONFIDENCE_RANK = { high: 0, medium: 1, low: 2 };
+    const confidenceRank_ = c => {
+      const r = CONFIDENCE_RANK[String(c).toLowerCase()];
+      return r === undefined ? 3 : r;
+    };
+    const emailCandidates = rawForMerge.slice().sort((a, b) => confidenceRank_(a.confidence) - confidenceRank_(b.confidence));
+    const SOP_SUGGESTIONS_EMAIL_CAP = 8; // "top 5 to 10" -- middle of the requested range
+    const emailTopSuggestions = emailCandidates.slice(0, SOP_SUGGESTIONS_EMAIL_CAP);
+
+    emailSopSuggestionsDoc(docFile, finalSuggestions.length, emailTopSuggestions, emailCandidates.length, suggestionsTab.getSheetId());
   }
 
   return deferredCount === 0;
@@ -955,14 +1077,23 @@ function runSopSuggestionsCatchup() {
 //
 // The "SOP Suggestions" sheet tab carries a status column (written as
 // 'pending' at creation) -- reviewers mark it approved/rejected so the tab
-// stays a real audit trail of what was decided. NOTE: nothing in the code
-// currently READS that column back; it is human bookkeeping, deliberately
-// described as such below so nobody assumes marking 'rejected' will stop a
-// pattern being re-suggested.
+// stays a real audit trail of what was decided.
+//
+// UPDATED (3 Sep 2026, per Joana's feedback -- "make reject actually do
+// something... today the email itself says marking a row does not stop the
+// pattern, which is exactly why nobody bothers"): the status column
+// (pending/approved/rejected) itself still isn't read back -- it stays pure
+// human bookkeeping, a dropdown for the record. What changed is that the
+// SUGGESTION TEXT'S FINGERPRINT is now checked on every future run
+// (fingerprintSopSuggestion_, generateSopSuggestionsInner) against
+// everything already in the tab, regardless of that row's status. So a
+// suggestion already surfaced once -- pending, approved, or rejected -- is
+// suppressed automatically and never comes back looking new. Marking a row
+// isn't what does the suppressing; simply having been suggested before is.
 const SOP_APPROVAL_STEPS = [
   'APPROVE a suggestion: open the live SOP Doc and make the edit yourself (Find & Replace, or just type it). The drafter reads that Doc on every run, so the change takes effect on the next run -- usually within 15 minutes. Nothing else is needed.',
   'REJECT a suggestion: do nothing to the SOP Doc. Optionally mark it "rejected" in the SOP Suggestions tab so the next reviewer knows it was already considered.',
-  'RECORD what you decided (optional but recommended): in the "SOP Suggestions" tab, change that row\'s status from "pending" to "approved" or "rejected". This is bookkeeping only -- it does not itself change the SOP, and it does not stop a pattern from being suggested again.',
+  'RECORD what you decided (optional but recommended): in the "SOP Suggestions" tab, change that row\'s status from "pending" to "approved" or "rejected" for the audit trail. This same pattern will not be re-suggested in a future run either way -- suppression is automatic, based on the suggestion having appeared before, not on how (or whether) you mark the row.',
   'NOT SURE about one: leave it "pending" and reply to this email -- it stays in the tab and can be picked up later.',
 ];
 
@@ -1306,13 +1437,39 @@ function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount) {
   return file;
 }
 
-function emailSopSuggestionsDoc(docFile, suggestionsCount) {
+// CHANGED (3 Sep 2026, per Joana's feedback, section 6.5 -- "cap the email
+// at the top 5-10, one-line summary each, with a direct link to that row"):
+// this used to just point at the doc and state a total count -- the doc
+// itself was the only thing anyone could actually act on, and it held every
+// merged suggestion with no cap. Now the email itself lists the top-ranked
+// NEW suggestions (already deduplicated against everything ever surfaced
+// before -- see fingerprintSopSuggestion_) as one line each with a link
+// straight to that suggestion's own row in the "SOP Suggestions" tab, so
+// acting on one doesn't require opening the doc at all. The doc link is
+// still included for the full merged detail and the underlying examples.
+//
+// topSuggestions: the capped, confidence-sorted array (each with
+// .confidence, .pattern_observed, .suggested_change, .__sheetRow -- see
+// generateSopSuggestionsInner). totalNewCount: how many distinct new
+// (deduplicated) suggestions this run found before capping, so the email can
+// say "N more in the full doc" when it's above the cap.
+function emailSopSuggestionsDoc(docFile, mergedSuggestionsCount, topSuggestions, totalNewCount, suggestionsSheetGid) {
   const dateStr = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'MMMM d, yyyy');
+  const sheetRowUrl_ = row => 'https://docs.google.com/spreadsheets/d/' + CONFIG.SPREADSHEET_ID + '/edit#gid=' + suggestionsSheetGid + '&range=A' + row;
+  const remainderCount = Math.max(0, totalNewCount - topSuggestions.length);
+
+  const oneLinerText_ = s => '[' + s.confidence + '] ' + s.pattern_observed + ' -> ' + s.suggested_change;
+
   const body =
     'This email was written by Claude.\n\n' +
-    'Today\'s automated review of edited replies found ' + suggestionsCount + ' potential SOP update' + (suggestionsCount === 1 ? '' : 's') +
-    ', based on real differences between what the AI drafted and what Joana actually sent:\n\n' +
-    docFile.getUrl() + '\n\n' +
+    'This run\'s automated review found ' + totalNewCount + ' new potential SOP update' + (totalNewCount === 1 ? '' : 's') +
+    ' not already surfaced in a past run, based on real differences between what the AI drafted and what Joana actually sent.\n\n' +
+    (topSuggestions.length === 0
+      ? 'Nothing new this time -- everything found was a duplicate of a pattern already in the SOP Suggestions tab.\n\n'
+      : 'Top ' + topSuggestions.length + ':\n\n' +
+        topSuggestions.map((s, i) => (i + 1) + '. ' + oneLinerText_(s) + '\n   ' + sheetRowUrl_(s.__sheetRow)).join('\n\n') + '\n\n' +
+        (remainderCount > 0 ? remainderCount + ' more new suggestion(s) this run, in the full doc below.\n\n' : '')) +
+    'Full doc (all ' + mergedSuggestionsCount + ' merged suggestion' + (mergedSuggestionsCount === 1 ? '' : 's') + ' plus underlying examples): ' + docFile.getUrl() + '\n\n' +
     sopApprovalStepsText_();
 
   // CHANGED (23 Aug 2026, per direct request -- "Make sure Tomas and Kris
@@ -1322,16 +1479,25 @@ function emailSopSuggestionsDoc(docFile, suggestionsCount) {
   const htmlBody =
     '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' +
       '<p>This email was written by Claude.</p>' +
-      '<p>Today\'s automated review of edited replies found <b>' + suggestionsCount + '</b> potential SOP update' +
-        (suggestionsCount === 1 ? '' : 's') + ', based on real differences between what the AI drafted and what Joana actually sent:</p>' +
-      docLinkCardHtml_(docFile.getUrl(), 'SOP Suggestions -- ' + dateStr) +
+      '<p>This run\'s automated review found <b>' + totalNewCount + '</b> new potential SOP update' + (totalNewCount === 1 ? '' : 's') +
+        ' not already surfaced in a past run, based on real differences between what the AI drafted and what Joana actually sent.</p>' +
+      (topSuggestions.length === 0
+        ? '<p style="color:#555555;">Nothing new this time &mdash; everything found was a duplicate of a pattern already in the SOP Suggestions tab.</p>'
+        : '<ol style="padding-left:20px; line-height:1.6;">' +
+            topSuggestions.map(s =>
+              '<li style="margin-bottom:8px;"><a href="' + sheetRowUrl_(s.__sheetRow) + '" style="color:#1a2b4c; text-decoration:none;">' +
+              escapeHtml(oneLinerText_(s)) + '</a></li>'
+            ).join('') +
+          '</ol>' +
+          (remainderCount > 0 ? '<p style="color:#555555; font-size:13px;">' + remainderCount + ' more new suggestion(s) this run, in the full doc below.</p>' : '')) +
+      docLinkCardHtml_(docFile.getUrl(), 'SOP Suggestions -- ' + dateStr + ' (full doc, ' + mergedSuggestionsCount + ' merged)') +
       sopApprovalStepsHtml_() +
     '</div>';
 
   MailApp.sendEmail({
     to: 'goodness@iconsofrealestate.com,joana@iconsofrealestate.com',
     cc: 'kris@iconsofrealestate.com,tomas@iconsofrealestate.com',
-    subject: '[Written by Claude] Daily SOP Suggestions -- ' + dateStr,
+    subject: '[Written by Claude] SOP Suggestions -- ' + dateStr,
     body: body,
     htmlBody: htmlBody
   });
