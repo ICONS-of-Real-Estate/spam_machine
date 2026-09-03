@@ -215,6 +215,30 @@ function runHeartbeatCheck() {
       Logger.log('Heartbeat check -- could not read the Skip Cache to filter out known-noise threads (' + e + ') -- treating all ' + pendingThreads.length + ' matched thread(s) as real backlog rather than guessing which are noise.');
     }
 
+    // FIX (3 Sep 2026, real incident -- alert fired on an ordinary Wednesday
+    // evening with zero actual backlog; runReplyDrafter's own Executions log
+    // for that whole window showed clean 15-min runs the entire time). The
+    // Skip Cache filter above only catches a bounce thread while its
+    // SKIP_CACHE_TTL_HOURS (6h) cache entry is still fresh -- runReplyDrafterInner
+    // deliberately re-checks bounces on a TTL rather than a permanent label
+    // (see its comment), so there's a recurring window, right after an entry
+    // expires and before the next runReplyDrafter run re-confirms it (up to
+    // 15 min later), where a thread that has ALWAYS been and will ALWAYS be a
+    // bounce looks like unexplained backlog here. Confirmed live: the same 6
+    // mailer-daemon@googlemail.com threads that triggered the alert were
+    // still, unsurprisingly, bounces the next morning. A sender's
+    // non-human-ness is a fact about the address, not the cache's timing --
+    // check it directly here too instead of trusting the TTL race.
+    genuinelyPending = genuinelyPending.filter(thread => {
+      try {
+        const messages = thread.getMessages();
+        const lastMsg = lastNonDraftMessage_(messages) || messages[messages.length - 1];
+        return !isNonHumanSender(extractEmail(lastMsg.getFrom()));
+      } catch (e) {
+        return true; // can't tell -- keep it counted as pending rather than silently dropping it
+      }
+    });
+
     if (genuinelyPending.length === 0) {
       Logger.log('Heartbeat check -- last draft was ' + hoursSinceLastEntry.toFixed(1) + 'h ago; pending-reply search found ' + pendingThreads.length + ' thread(s), but all are already known/cached as non-actionable (bounces, etc.) -- genuinely nothing new to draft. Not alerting.');
       return;
