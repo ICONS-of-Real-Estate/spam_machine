@@ -687,6 +687,40 @@ function migrateAddLlmColumns() {
   });
 }
 
+// ADDED (3 Sep 2026, per Joana's feedback, section 2b): same "add past the
+// existing header, only if the exact target cell is empty" pattern as
+// migrateAddLlmColumns() above -- logDraftToSheet() started writing real
+// Priority/Priority Reasoning values into L/M immediately, so this must not
+// rely on getLastColumn() (see migrateAddLlmColumns's comment for why that
+// approach breaks once data already exists past the header row). Run this
+// once, manually, after pasting the code that removed the in-body priority
+// note.
+function migrateAddPriorityColumns() {
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const tab = ss.getSheetByName('AI Drafts Log');
+  if (!tab) {
+    Logger.log('migrateAddPriorityColumns: "AI Drafts Log" sheet not found, skipping.');
+    return;
+  }
+  const labels = { 12: 'Priority', 13: 'Priority Reasoning' };
+  Object.keys(labels).forEach(colStr => {
+    const col = Number(colStr);
+    const label = labels[colStr];
+    const cell = tab.getRange(1, col);
+    const current = String(cell.getValue() || '').trim();
+    if (current === label) {
+      Logger.log('migrateAddPriorityColumns: column ' + col + ' already labeled "' + label + '", skipping.');
+      return;
+    }
+    if (current !== '') {
+      Logger.log('migrateAddPriorityColumns: column ' + col + ' already holds "' + current + '" -- NOT overwriting. Check this by hand; expected "' + label + '".');
+      return;
+    }
+    cell.setValue(label);
+    Logger.log('migrateAddPriorityColumns: labeled column ' + col + ' as "' + label + '".');
+  });
+}
+
 // ONE-OFF (24 Aug 2026, per direct request): migrateAddLlmColumns() above
 // correctly refused to touch "Learning Log" column K -- it already held
 // "Estimated Cost USD", left over from an earlier draft of this feature
@@ -1702,9 +1736,25 @@ function runReplyDrafterInner() {
       }
 
       try {
-        const priorityNote = buildPriorityCheckNote(result);
-        const sopModeNote = buildSopModeNote(sopMode);
-        const llmProviderNote = buildLlmProviderNote(result.llmProvider);
+        // REMOVED (3 Sep 2026, per Joana's feedback, section 2b -- "three
+        // separate lines to delete by hand on every draft is a real error
+        // risk, one of these will get sent to a lead eventually"): the
+        // AI-PRIORITY-CHECK, SOP-MODE, and AI-MODEL notes used to be
+        // prepended directly into the visible draft body, each marked
+        // "DELETE THIS LINE BEFORE SENDING." Her stated preference, in
+        // order: move the metadata out of the body entirely, onto a Gmail
+        // label and/or a row in the tracker sheet, so the draft body
+        // contains only the reply. SOP Mode and LLM Provider were already
+        // logged to "AI Drafts Log" (columns I/J) in addition to being
+        // shown in-body -- that in-body copy is what's gone now. Priority
+        // already had its own thread label (LABEL_PRIORITY, applied below);
+        // its reasoning text, which the label alone can't carry, now goes to
+        // the new Priority Reasoning column (see logDraftToSheet) instead of
+        // the body. buildPriorityCheckNote/buildSopModeNote/
+        // buildLlmProviderNote are kept, unused, for provider fallback and
+        // possible reuse rather than deleted outright -- see their own
+        // comments for the original incident each one addressed.
+        //
         // ADDED (25 Aug 2026, per direct request): a needsTeammateRouting draft
         // is, by definition, handing this lead to a real qualification call --
         // point the (BOOKING_LINK) token at Sean's Qualification Call link
@@ -1712,16 +1762,20 @@ function runReplyDrafterInner() {
         // auto-sent, so if it should really be Bens, Joana swaps it before
         // sending, same correction she was already making by hand.
         const bookingLinkForThisDraft = result.needsTeammateRouting ? CONFIG.SEAN_QUALIFICATION_CALL_URL : null;
-        const aiReplyPlain = priorityNote + sopModeNote + llmProviderNote + sanitizeEmojiForGmail(markdownLinksToPlain(result.draftBody, bookingLinkForThisDraft));
+        const aiReplyPlain = sanitizeEmojiForGmail(markdownLinksToPlain(result.draftBody, bookingLinkForThisDraft));
         const historyPlain = stripForwardHeaderKeepHistory(getEffectivePlainBody_(lastMsg));
         const fullPlainBody = aiReplyPlain + '\n\n' + historyPlain;
 
-        const priorityNoteHtml = escapeHtml(priorityNote).replace(/\n/g, '<br>');
-        const sopModeNoteHtml = escapeHtml(sopModeNote).replace(/\n/g, '<br>');
-        const llmProviderNoteHtml = escapeHtml(llmProviderNote).replace(/\n/g, '<br>');
-        const aiReplyHtml = priorityNoteHtml + sopModeNoteHtml + llmProviderNoteHtml + emojiToHtmlEntities(sanitizeEmojiForGmail(markdownLinksToHtml(result.draftBody, bookingLinkForThisDraft)));
+        // COLLAPSED QUOTED HISTORY (3 Sep 2026, per Joana's feedback, section
+        // 2a): the previous thread used to be appended as flat HTML, which
+        // Gmail never collapses into its native "..." block -- every sent
+        // reply showed the whole prior exchange as visible text. Gmail only
+        // collapses quoted content wrapped in its own recognized quote
+        // container; this is that exact container (her spec, verified
+        // against real Gmail-generated markup).
+        const aiReplyHtml = emojiToHtmlEntities(sanitizeEmojiForGmail(markdownLinksToHtml(result.draftBody, bookingLinkForThisDraft)));
         const historyHtml = emojiToHtmlEntities(escapeHtml(historyPlain).replace(/\n/g, '<br>'));
-        const fullHtmlBody = aiReplyHtml + '<br><br>' + historyHtml;
+        const fullHtmlBody = '<div>' + aiReplyHtml + '</div><br><div class="gmail_quote"><blockquote class="gmail_quote" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">' + historyHtml + '</blockquote></div>';
 
         const cleanSubject = (originalSubjectFromForward || subject).replace(/^(fwd:\s*)+/i, '').trim();
         // FIX (17 Aug 2026, real incident -- Joana's top-priority, repeatedly
@@ -1781,7 +1835,7 @@ function runReplyDrafterInner() {
         }
       }
 
-      logDraftToSheet(thread.getId(), subject, leadEmail, result.category, result.needsTeammateRouting, result.draftBody, draftLink, sopMode, result.llmProvider, result.llmCostUsd);
+      logDraftToSheet(thread.getId(), subject, leadEmail, result.category, result.needsTeammateRouting, result.draftBody, draftLink, sopMode, result.llmProvider, result.llmCostUsd, result.priority, result.reasoning);
 
         processed++;
       }
@@ -1807,7 +1861,7 @@ function runReplyDrafterInner() {
   Logger.log('Run complete. Threads processed: ' + processed + ', drafts created: ' + draftsCreated);
 }
 
-function logDraftToSheet(threadId, subject, prospectEmail, category, needsRouting, draftText, draftLink, sopMode, llmProvider, llmCostUsd) {
+function logDraftToSheet(threadId, subject, prospectEmail, category, needsRouting, draftText, draftLink, sopMode, llmProvider, llmCostUsd, priority, priorityReasoning) {
   if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PASTE_YOUR_SHEET_ID_HERE') return;
   try {
     const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
@@ -1835,7 +1889,16 @@ function logDraftToSheet(threadId, subject, prospectEmail, category, needsRoutin
     // rewrite of a header humans may have already customized. Add "LLM
     // Provider" and "Estimated Cost USD" as header labels for columns J/K
     // once, by hand, in the Sheet -- this code doesn't touch row 1.
-    tab.appendRow([new Date(), threadId, subject, prospectEmail, category, !!needsRouting, draftText, draftLink || '', sopMode || 'joana', llmProvider || '', llmCostUsd != null ? llmCostUsd : '']);
+    //
+    // ADDED (3 Sep 2026, per Joana's feedback, section 2b): Priority and
+    // Priority Reasoning (columns L/M), same append-past-the-header pattern.
+    // These used to be shown ONLY as an in-body "[AI PRIORITY CHECK FOR
+    // JOANA -- DELETE THIS LINE BEFORE SENDING: ...]" note (buildPriorityCheckNote,
+    // removed from the draft body below) -- her preferred fix, in order: move
+    // metadata out of the body entirely onto a label and/or a sheet row.
+    // LABEL_PRIORITY already gets applied to the thread for the true/false
+    // signal; the reasoning text has nowhere else to live but here.
+    tab.appendRow([new Date(), threadId, subject, prospectEmail, category, !!needsRouting, draftText, draftLink || '', sopMode || 'joana', llmProvider || '', llmCostUsd != null ? llmCostUsd : '', !!priority, priorityReasoning || '']);
   } catch (e) {
     Logger.log('Failed to log draft to sheet: ' + e);
   }
@@ -2379,6 +2442,24 @@ function sanitizeEmojiForGmail(text) {
   return text
     .replace(/\uFE0F/g, '')
     .replace(/\u200D/g, '');
+}
+
+// ADDED (3 Sep 2026, per Joana's written feedback, section 2c): "Never use
+// the em dash. It reads as AI-written. Also stop the double hyphen, which
+// just looks like a typo." Ask, in order of preference: a hard formatting
+// rule in the SOP doc (separate, see sop_change_requests/ -- the SOP text
+// itself is full of both, so cleaning the doc alone won't hold as long as
+// the model is copying that doc's own style), AND a post-processing replace
+// here "so it doesn't depend on the model behaving." This is the second
+// half. Collapses em dash (\u2014), en dash (\u2013), and any run of two or
+// more hyphens down to a single "-". Applied to the model's own drafted
+// reply text only (see classifyAndDraft's return below) -- never to the
+// quoted prior thread, which is someone else's real words, not ours to
+// rewrite.
+function normalizeDashesForSending_(text) {
+  return String(text || '')
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/-{2,}/g, '-');
 }
 
 // FIX (17 Aug 2026, real incident): thread.getMessages() includes UNSENT
@@ -3425,7 +3506,12 @@ IMPORTANT on no_decline (REAL INCIDENT, 17 Aug 2026): no_decline means a genuine
     // Monday work?" availability that should have been flagged and wasn't)
     // are visible immediately during review instead of only found by luck.
     reasoning: parsed.reasoning || '(no reasoning given)',
-    draftBody: parsed.draft_body,
+    // FIX (3 Sep 2026, per Joana's feedback, section 2c): normalize dashes
+    // here so every consumer of classifyAndDraft's result -- the main
+    // drafter, the Learning Log's stored "Original AI Draft" for SOP-diffing,
+    // everything -- sees the same cleaned text, not just whatever happened
+    // to be built into the final email body downstream.
+    draftBody: normalizeDashesForSending_(parsed.draft_body),
     candidateVariationIndex: candidateVariation.index,
     llmProvider: llmProvider,
     llmCostUsd: llmCostUsd,
