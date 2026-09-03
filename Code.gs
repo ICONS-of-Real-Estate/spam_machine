@@ -1279,7 +1279,7 @@ function runReplyDrafterInner() {
       // proxy, not an exact Gmail API call count, meant to self-stop BEFORE
       // Google's real daily limit throws instead of only reacting after.
       recordGmailQuotaUsage_(1);
-      const lastMsg = lastNonDraftMessage_(messages) || messages[messages.length - 1];
+      const lastMsg = lastExternallyRelevantMessage_(messages) || messages[messages.length - 1];
 
       if (!isCcdToNetworkGroupAnywhereInThread(messages)) {
         skipCache[threadId] = { reason: 'network never CC-d anywhere in this thread', lastCheckedAt: new Date(), messageCount: messages.length };
@@ -2398,6 +2398,30 @@ function lastNonDraftMessage_(messages) {
     return messages[i];
   }
   return null;
+}
+
+// FIX (3 Sep 2026, real incident -- Thomas's thread, caught live by Kris):
+// Tomas critiqued a draft internally on the SAME Gmail thread as the lead
+// (reply-all to Joana/network/Goodness/Kris, never to Thomas himself), then
+// Kris replied to Tomas the same way. Both messages are internal-only, but
+// lastNonDraftMessage_() just returns whichever message is literally last --
+// so isRealTeamReply() on Kris's internal reply would have permanently
+// labeled the thread AI-Skipped-AlreadyAnsweredByTeam, even though nobody
+// had actually answered Thomas since Joana's original reply weeks earlier.
+// That buries the thread forever with the real lead never hearing back.
+// Walk back past any message whose recipients are ALL internal/network-alias
+// addresses (isInternal() already covers both, see INTERNAL_DOMAINS) to find
+// the last message that actually went to someone outside the team, and
+// classify based on THAT one instead. A normal Joana-to-lead reply always
+// has the lead's address in there, so this is a no-op for the ordinary case.
+function lastExternallyRelevantMessage_(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.isDraft && msg.isDraft()) continue;
+    const recipients = extractAllEmailsFrom_(msg.getTo()).concat(extractAllEmailsFrom_(msg.getCc()));
+    if (recipients.some(e => !isInternal(e))) return msg;
+  }
+  return lastNonDraftMessage_(messages);
 }
 
 // ---------- THREADED DRAFT CREATION (17 Aug 2026, real incident) ----------
