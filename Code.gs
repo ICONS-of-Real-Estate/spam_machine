@@ -185,6 +185,13 @@ const CONFIG = {
 
   LABEL_YES: '1. Spam YES',
   LABEL_YES_PENCILED: '1. Spam YES/Penciled',
+  // ADDED (3 Sep 2026, per Joana's feedback, section 3): sub-labels for a
+  // handoff, matching the existing "1. Spam YES/Penciled" nesting
+  // convention. Auto-created on first use (see
+  // getOrCreateBusinessSubLabel_) since these are brand new, explicitly
+  // requested labels, not a name a typo could accidentally duplicate.
+  LABEL_YES_SEAN: '1. Spam YES/Sean',
+  LABEL_YES_BENS: '1. Spam YES/Bens',
   LABEL_NO: '2. Spam NO',
   LABEL_STOP: '3. Spam STOP',
 
@@ -2118,6 +2125,45 @@ const SELF_OWNED_TRACKING_LABELS = [
   'AI-Skipped-Suppressed'
 ];
 
+// ADDED (3 Sep 2026, per Joana's feedback, section 3 -- "the current AI-*
+// labels aren't useful to us and clutter the sidebar... question before
+// deleting: does the script use these as its own state? If yes, either (a)
+// nest them under one parent so they collapse to a single AI/ row, or (b)
+// uncheck 'Show in label list' so they still exist for the script but are
+// hidden from us"). Answer to her question: yes, load-bearing -- every
+// permanent-skip path in this file (recordPermanentSkip_,
+// buildPendingReplySearchQuery_'s exclusions, isRealTeamReply's routing)
+// depends on these exact label names existing and staying applied. Deleting
+// them would make the drafter re-process and re-draft everything they
+// currently exclude. Went with her option (b), not (a): renaming labels to
+// nest them under an "AI/" parent would mean updating every CONFIG string
+// this file compares against by exact name, for zero functional gain over
+// just hiding them -- (b) gets the same "not cluttering the sidebar"
+// outcome without touching anything load-bearing. Uses the Gmail Advanced
+// Service (labelListVisibility isn't exposed by GmailApp) to set each
+// label's sidebar visibility to hidden, WITHOUT renaming or otherwise
+// touching the label itself -- every existing thread association and every
+// string comparison in this codebase is unaffected. Run this once, manually,
+// from the editor.
+function hideAiTrackingLabelsFromSidebar_() {
+  const response = Gmail.Users.Labels.list('me');
+  const allLabels = (response && response.labels) || [];
+  SELF_OWNED_TRACKING_LABELS.forEach(name => {
+    const match = allLabels.find(l => l.name === name);
+    if (!match) {
+      Logger.log('hideAiTrackingLabelsFromSidebar_ -- label not found in Gmail, skipping: ' + name);
+      return;
+    }
+    if (match.labelListVisibility === 'labelHide') {
+      Logger.log('hideAiTrackingLabelsFromSidebar_ -- already hidden: ' + name);
+      return;
+    }
+    Gmail.Users.Labels.patch({ labelListVisibility: 'labelHide' }, 'me', match.id);
+    Logger.log('hideAiTrackingLabelsFromSidebar_ -- hid from sidebar: ' + name);
+  });
+  Logger.log('hideAiTrackingLabelsFromSidebar_ -- done. These labels still exist and are still applied by the script -- they just no longer show in the Gmail sidebar. Re-run this if a new AI-* tracking label is ever added to SELF_OWNED_TRACKING_LABELS.');
+}
+
 // FIX (27 Aug 2026, real incident): CONFIG.LABEL_ALREADY_REPLIED_ONCE was
 // added 24 Aug 2026, but the label itself only ever got created by setup(),
 // which nobody re-ran afterwards -- so it never existed in Gmail. Every run
@@ -3194,6 +3240,69 @@ function applyBusinessLabel(thread, category, labelYes, labelYesPenciled, labelN
   } else if (category === 'no_decline' && labelNo) {
     thread.addLabel(labelNo);
   }
+}
+
+// ADDED (3 Sep 2026, per Joana's feedback, section 3): "1. Spam YES/Sean"
+// and "1. Spam YES/Bens" don't exist yet -- brand new, explicitly requested
+// labels, not a name a CONFIG typo could accidentally near-duplicate, so
+// auto-creating on first use is safe (unlike getOrWarnLabel's deliberate
+// refusal to auto-create the pre-existing business labels).
+function getOrCreateBusinessSubLabel_(name) {
+  const existing = GmailApp.getUserLabelByName(name);
+  if (existing) return existing;
+  Logger.log('getOrCreateBusinessSubLabel_ -- creating new label (first use): ' + name);
+  return GmailApp.createLabel(name);
+}
+
+// ADDED (3 Sep 2026, per Joana's feedback, section 3 -- "labels should be
+// applied automatically AFTER Joana sends, based on what the sent email
+// actually contains"): applyBusinessLabel() above labels at DRAFT time off
+// the AI's PREDICTED category, and is gated behind CONFIG.AUTO_APPLY_
+// BUSINESS_LABELS (false) for exactly that reason -- a prediction can be
+// wrong, and Joana may edit or redirect before sending. This is the
+// post-send counterpart: called from runLearningLoopInner() (learning_loop.gs),
+// which already confirms the real sent reply text every run. Detects off
+// the SENT text wherever her table gives a content-based signal (the
+// handoff booking link, the "penciled in" phrasing); falls back to the
+// stored (AI-classified) category only for the general yes/no split, since
+// there's no sent-text signal that distinguishes "answering questions" from
+// "sharing the booking link" -- both just count as "1. Spam YES" per her
+// table. Never overrides a thread that already carries a business label,
+// same rule applyBusinessLabel() uses (a human's own labeling always wins).
+function applyPostSendBusinessLabel_(thread, category, needsTeammateRouting, sentText) {
+  const existingBusinessLabels = ['1. Spam YES', '1. Spam YES/Penciled', CONFIG.LABEL_YES_SEAN, CONFIG.LABEL_YES_BENS, '2. Spam NO', '3. Spam STOP'];
+  if (thread.getLabels().some(l => existingBusinessLabels.indexOf(l.getName()) !== -1)) return;
+
+  const text = String(sentText || '');
+  let label = null;
+
+  if (needsTeammateRouting) {
+    // The handoff draft points BOOKING_LINK at a specific teammate's real
+    // qualification-call URL (see runReplyDrafterInner's
+    // bookingLinkForThisDraft) -- whichever one shows up in what was
+    // actually sent tells us who this went to.
+    if (text.indexOf(CONFIG.SEAN_QUALIFICATION_CALL_URL) !== -1) {
+      label = getOrCreateBusinessSubLabel_(CONFIG.LABEL_YES_SEAN);
+    } else if (CONFIG.BENS_QUALIFICATION_CALL_URL && text.indexOf(CONFIG.BENS_QUALIFICATION_CALL_URL) !== -1) {
+      label = getOrCreateBusinessSubLabel_(CONFIG.LABEL_YES_BENS);
+    } else {
+      // Bens' real booking link isn't configured yet (CONFIG.BENS_QUALIFICATION_CALL_URL
+      // -- see her feedback doc, section 4: "Sean and Bens rows in the Email
+      // Templates sheet are empty"). Can't tell which teammate from the link
+      // alone yet -- fall back to the generic yes label rather than guess.
+      label = getOrWarnLabel(CONFIG.LABEL_YES);
+    }
+  } else if (/penciled in/i.test(text)) {
+    label = getOrWarnLabel(CONFIG.LABEL_YES_PENCILED);
+  } else if (category === 'no_decline' || category === 'no_data_error') {
+    label = getOrWarnLabel(CONFIG.LABEL_NO);
+  } else if (category && category !== 'blank_or_signature_only' && category !== 'neutral_acknowledgment') {
+    label = getOrWarnLabel(CONFIG.LABEL_YES);
+  } else {
+    return; // genuinely ambiguous (blank/neutral reply) -- don't guess
+  }
+
+  if (label) thread.addLabel(label);
 }
 
 const NO_DECLINE_VARIATIONS = [

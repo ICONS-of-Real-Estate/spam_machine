@@ -115,6 +115,7 @@ function runLearningLoopInner() {
   const subjectCol = headers.indexOf('Subject');
   const categoryCol = headers.indexOf('Category');
   const draftTextCol = headers.indexOf('Draft Text');
+  const needsRoutingCol = headers.indexOf('Needs Teammate Routing');
   const sopModeCol = headers.indexOf('SOP Mode'); // -1 for rows logged before the split test existed
 
   // ADDED (24 Aug 2026, per direct request -- the Kimi-vs-Anthropic test has
@@ -230,6 +231,16 @@ function runLearningLoopInner() {
     const draftText = row[draftTextCol];
     const sentText = sentReply.getPlainBody();
     const wasEdited = !textsRoughlyMatch(draftText, sentText);
+
+    // ADDED (3 Sep 2026, per Joana's feedback, section 3): now that this
+    // loop has already confirmed the real sent reply, apply the business
+    // label off what was ACTUALLY sent instead of the AI's predicted
+    // category. See applyPostSendBusinessLabel_'s comment (Code.gs).
+    try {
+      applyPostSendBusinessLabel_(thread, row[categoryCol], needsRoutingCol !== -1 && row[needsRoutingCol] === true, sentText);
+    } catch (e) {
+      Logger.log('runLearningLoopInner -- applyPostSendBusinessLabel_ failed for thread ' + threadId + ' (not fatal, continuing): ' + e);
+    }
 
     // Only accept a value that actually looks like one of the two providers.
     // Rows predating the cost test have nothing here, and a fixed-index read
