@@ -31,7 +31,10 @@
  * won't create duplicates.
  */
 
-const HEARTBEAT_STALE_HOURS = 3;
+// RAISED (4 Sep 2026, per direct request -- "Move it to 6 hours. 3 is too
+// short"): 3 hours was firing on ordinary quiet stretches, not just genuine
+// stuck states.
+const HEARTBEAT_STALE_HOURS = 6;
 const BUSINESS_HOURS_START_ET = 8;   // 8 AM Eastern
 const BUSINESS_HOURS_END_ET = 19;    // 7 PM Eastern
 
@@ -244,10 +247,38 @@ function runHeartbeatCheck() {
       return;
     }
 
+    // ADDED (4 Sep 2026, per direct request -- "This email should show the
+    // examples"): the alert used to state only a count, which tells Kris
+    // something is stuck but not which threads to actually go look at --
+    // he'd have to go re-run the same search himself first. List the
+    // subject/sender/link for each genuinely-pending thread directly in the
+    // alert instead. Capped at 10 (same pattern used elsewhere in this
+    // project, e.g. the SOP Suggestions email) so a large backlog doesn't
+    // produce an unreadable wall of links -- the point is "here's where to
+    // start looking," not an exhaustive dump.
+    const EXAMPLE_CAP = 10;
+    const examples = genuinelyPending.slice(0, EXAMPLE_CAP).map(thread => {
+      let subject = '(subject unavailable)';
+      let sender = '(sender unavailable)';
+      try {
+        subject = thread.getFirstMessageSubject();
+        const messages = thread.getMessages();
+        const lastMsg = lastNonDraftMessage_(messages) || messages[messages.length - 1];
+        sender = lastMsg.getFrom();
+      } catch (e) {
+        // fall back to placeholders above rather than letting one bad thread
+        // break the whole alert
+      }
+      return '- "' + subject + '" from ' + sender + ' -- https://mail.google.com/mail/u/0/#all/' + thread.getId();
+    });
+    const remainderCount = genuinelyPending.length - examples.length;
+
     sendOpsAlert(
       'No new drafts in over ' + HEARTBEAT_STALE_HOURS + ' hours',
       'The last entry in AI Drafts Log was ' + hoursSinceLastEntry.toFixed(1) + ' hours ago (' + lastEntryTime + '), during business hours, AND there ' + (genuinelyPending.length === 1 ? 'is 1 thread' : 'are ' + genuinelyPending.length + ' threads') + ' matching the drafter\'s own search query that ' + (genuinelyPending.length === 1 ? 'has' : 'have') + ' NOT been drafted AND ' + (genuinelyPending.length === 1 ? 'is' : 'are') + ' not already explained by a cached skip (bounce, decline, etc.). ' +
-      'That combination is the real signal something is stuck -- worth a quick manual check of the runReplyDrafter trigger and its recent execution history.'
+      'That combination is the real signal something is stuck -- worth a quick manual check of the runReplyDrafter trigger and its recent execution history.\n\n' +
+      examples.join('\n') +
+      (remainderCount > 0 ? '\n\n(' + remainderCount + ' more thread(s) not shown.)' : '')
     );
   }
 }
