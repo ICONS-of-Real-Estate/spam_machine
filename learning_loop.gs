@@ -504,6 +504,33 @@ function ensureSopSuggestionsFingerprintColumn_(suggestionsTab) {
   return fingerprintCol; // 0-indexed
 }
 
+// ADDED (4 Sep 2026, per Joana's feedback doc, section 6.6 -- "Add a real
+// approve/reject control. A dropdown in the Status column"): the Status
+// column (D) has always accepted any typed text, which is exactly why
+// nobody used it consistently. Suppression itself doesn't depend on this
+// (fingerprintSopSuggestion_ already suppresses a re-seen pattern
+// regardless of status), but a real dropdown makes the audit trail
+// SOP_APPROVAL_STEPS asks reviewers to keep actually easy to keep, instead
+// of relying on someone typing "approved" correctly every time. Idempotent
+// and safe to call on every run, same pattern as the Fingerprint column
+// migration above -- re-applies harmlessly if already set, and extends
+// coverage to newly-appended rows each time it runs.
+const SOP_SUGGESTIONS_STATUS_COL = 4; // column D, 1-indexed
+const SOP_SUGGESTIONS_STATUS_VALUES = ['pending', 'approved', 'rejected'];
+function ensureSopSuggestionsStatusDropdown_(suggestionsTab) {
+  const lastRow = Math.max(suggestionsTab.getLastRow(), 1);
+  // +50 rows of headroom so rows appended later in this same run (or before
+  // the next call) already have the dropdown, without needing to re-run
+  // this after every single appendRow.
+  const numRows = lastRow - 1 + 50;
+  if (numRows <= 0) return;
+  const rule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(SOP_SUGGESTIONS_STATUS_VALUES, true)
+    .setAllowInvalid(false)
+    .build();
+  suggestionsTab.getRange(2, SOP_SUGGESTIONS_STATUS_COL, numRows, 1).setDataValidation(rule);
+}
+
 // Loads every fingerprint currently in the tab (any status) into a Set --
 // this IS the suppression memory: a fingerprint in this set is a pattern
 // already surfaced before, in any state, and must not be re-created or
@@ -571,6 +598,7 @@ function generateSopSuggestionsInner(opts) {
   // memory as new suggestions are accepted below so duplicates rediscovered
   // later in the SAME run are also caught, not just ones from past runs.
   const sopFingerprintCol = ensureSopSuggestionsFingerprintColumn_(suggestionsTab);
+  ensureSopSuggestionsStatusDropdown_(suggestionsTab);
   const seenSopFingerprints = loadSopSuggestionFingerprints_(suggestionsTab, sopFingerprintCol);
   let suppressedDuplicateCount = 0;
 
