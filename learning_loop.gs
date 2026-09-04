@@ -25,7 +25,7 @@
  *    patterns and propose SPECIFIC SOP changes. These still land in the
  *    "SOP Suggestions" tab as a structured log (unchanged), but ALSO get
  *    written into a same-day Google Doc (createSopSuggestionsDoc()) and
- *    emailed to Goodness, Joana, and Kris (emailSopSuggestionsDoc()) so
+ *    emailed to Joana, CC Kris and Tomás (emailSopSuggestionsDoc()) so
  *    there's an actual daily reviewable artifact instead of a sheet tab
  *    nobody remembers to open. PROPOSALS ONLY, same as before — nothing
  *    here rewrites the live SOP file or the drafter's system prompt
@@ -1282,7 +1282,7 @@ function finalizeSopSuggestionsCatchup() {
   shareSopDocWithReviewers_(file);
 
   MailApp.sendEmail({
-    to: 'goodness@iconsofrealestate.com,joana@iconsofrealestate.com',
+    to: 'joana@iconsofrealestate.com',
     cc: 'kris@iconsofrealestate.com,tomas@iconsofrealestate.com',
     subject: '[Written by Claude] SOP Suggestions -- backlog fully processed -- ' + dateStr,
     body:
@@ -1366,7 +1366,7 @@ function mergeAndResendTodaysSopSuggestions() {
   shareSopDocWithReviewers_(file);
 
   MailApp.sendEmail({
-    to: 'goodness@iconsofrealestate.com,joana@iconsofrealestate.com',
+    to: 'joana@iconsofrealestate.com',
     cc: 'kris@iconsofrealestate.com,tomas@iconsofrealestate.com',
     subject: '[Written by Claude] SOP Suggestions -- deduplicated (supersedes earlier email) -- ' + dateStr,
     body:
@@ -1393,6 +1393,18 @@ function mergeAndResendTodaysSopSuggestions() {
 }
 
 // ---------- 3. DAILY REVIEWABLE DOC + EMAIL (added 19 Aug 2026) ----------
+
+// HOISTED (3 Sep 2026, per direct request -- "why no colour? bold? giant
+// walls of text"): was a local const inside createSopSuggestionsDoc; now
+// shared with emailSopSuggestionsDoc() too, so the capped email's
+// confidence tags get the same color coding the full doc already had,
+// instead of unstyled plain text.
+function sopConfidenceColor_(c) {
+  const s = String(c).toLowerCase();
+  if (s === 'high') return '#1a7f37';
+  if (s === 'low') return '#888888';
+  return '#e08e0b'; // medium
+}
 
 function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount) {
   const dateStr = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'MMMM d, yyyy');
@@ -1442,12 +1454,7 @@ function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount) {
     // high confidence should read as "act on this," not require reading the
     // word), the two labels are bold and inline instead of narrative
     // prose, and each suggestion gets breathing room below it.
-    const confidenceColor_ = c => {
-      const s = String(c).toLowerCase();
-      if (s === 'high') return '#1a7f37';
-      if (s === 'low') return '#888888';
-      return '#e08e0b'; // medium
-    };
+    const confidenceColor_ = sopConfidenceColor_;
     suggestions.forEach((s, idx) => {
       const heading = body.appendParagraph('Suggestion ' + (idx + 1) + ' -- ' + String(s.confidence).toUpperCase() + ' confidence');
       heading.setHeading(DocumentApp.ParagraphHeading.HEADING2);
@@ -1497,12 +1504,28 @@ function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount) {
 // generateSopSuggestionsInner). totalNewCount: how many distinct new
 // (deduplicated) suggestions this run found before capping, so the email can
 // say "N more in the full doc" when it's above the cap.
+// REWRITTEN (3 Sep 2026, per direct request -- "why no colour? bold?
+// italic? giant fucking walls of text"): the previous version's "one-line
+// summary" concatenated the FULL pattern_observed + suggested_change text
+// (both raw, verbose LLM output, easily several sentences each) into one
+// long string -- technically one list item, but nothing like the actual
+// one-line scannable summary Joana asked for (her feedback doc, section
+// 6.5: "a one-line summary rather than a paragraph"). This truncates each
+// item to a real short line (pattern only, ~120 chars) with the confidence
+// bolded and color-coded, in its own card; the untruncated pattern AND
+// suggested_change stay exactly where they belong -- one click away, in
+// the row the link points to, and in the full doc below.
 function emailSopSuggestionsDoc(docFile, mergedSuggestionsCount, topSuggestions, totalNewCount, suggestionsSheetGid) {
   const dateStr = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'MMMM d, yyyy');
   const sheetRowUrl_ = row => 'https://docs.google.com/spreadsheets/d/' + CONFIG.SPREADSHEET_ID + '/edit#gid=' + suggestionsSheetGid + '&range=A' + row;
   const remainderCount = Math.max(0, totalNewCount - topSuggestions.length);
 
-  const oneLinerText_ = s => '[' + s.confidence + '] ' + s.pattern_observed + ' -> ' + s.suggested_change;
+  const EMAIL_SUMMARY_MAX_CHARS = 120;
+  const truncate_ = (text, maxLen) => {
+    const t = String(text || '').trim();
+    return t.length > maxLen ? t.slice(0, maxLen).trim() + '…' : t;
+  };
+  const shortSummary_ = s => truncate_(s.pattern_observed, EMAIL_SUMMARY_MAX_CHARS);
 
   const body =
     'This email was written by Claude.\n\n' +
@@ -1511,15 +1534,16 @@ function emailSopSuggestionsDoc(docFile, mergedSuggestionsCount, topSuggestions,
     (topSuggestions.length === 0
       ? 'Nothing new this time -- everything found was a duplicate of a pattern already in the SOP Suggestions tab.\n\n'
       : 'Top ' + topSuggestions.length + ':\n\n' +
-        topSuggestions.map((s, i) => (i + 1) + '. ' + oneLinerText_(s) + '\n   ' + sheetRowUrl_(s.__sheetRow)).join('\n\n') + '\n\n' +
+        topSuggestions.map((s, i) => (i + 1) + '. [' + String(s.confidence).toUpperCase() + '] ' + shortSummary_(s) + '\n   ' + sheetRowUrl_(s.__sheetRow)).join('\n\n') + '\n\n' +
         (remainderCount > 0 ? remainderCount + ' more new suggestion(s) this run, in the full doc below.\n\n' : '')) +
     'Full doc (all ' + mergedSuggestionsCount + ' merged suggestion' + (mergedSuggestionsCount === 1 ? '' : 's') + ' plus underlying examples): ' + docFile.getUrl() + '\n\n' +
     sopApprovalStepsText_();
 
   // CHANGED (23 Aug 2026, per direct request -- "Make sure Tomas and Kris
   // are on CC too"): Kris moved from `to` into `cc`, Tomás added to `cc`.
-  // Joana/Goodness are the actual reviewers who'd act on this; Kris/Tomás
-  // are kept in the loop but not the primary "please review" audience.
+  // Joana is the actual reviewer who'd act on this; Kris/Tomás are kept in
+  // the loop but not the primary "please review" audience. Goodness dropped
+  // from the recipient list entirely (3 Sep 2026, per direct request).
   const htmlBody =
     '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' +
       '<p>This email was written by Claude.</p>' +
@@ -1527,24 +1551,27 @@ function emailSopSuggestionsDoc(docFile, mergedSuggestionsCount, topSuggestions,
         ' not already surfaced in a past run, based on real differences between what the AI drafted and what Joana actually sent.</p>' +
       (topSuggestions.length === 0
         ? '<p style="color:#555555;">Nothing new this time &mdash; everything found was a duplicate of a pattern already in the SOP Suggestions tab.</p>'
-        : '<ol style="padding-left:20px; line-height:1.6;">' +
-            topSuggestions.map(s =>
-              '<li style="margin-bottom:8px;"><a href="' + sheetRowUrl_(s.__sheetRow) + '" style="color:#1a2b4c; text-decoration:none;">' +
-              escapeHtml(oneLinerText_(s)) + '</a></li>'
-            ).join('') +
-          '</ol>' +
+        : topSuggestions.map(s => {
+            const color = sopConfidenceColor_(s.confidence);
+            return '<div style="margin:0 0 8px 0; padding:8px 12px; border-left:3px solid ' + color + '; background:#fafafa; border-radius:0 4px 4px 0;">' +
+              '<a href="' + sheetRowUrl_(s.__sheetRow) + '" style="text-decoration:none; color:#222;">' +
+                '<b style="color:' + color + ';">[' + escapeHtml(String(s.confidence).toUpperCase()) + ']</b> ' +
+                escapeHtml(shortSummary_(s)) +
+              '</a>' +
+            '</div>';
+          }).join('') +
           (remainderCount > 0 ? '<p style="color:#555555; font-size:13px;">' + remainderCount + ' more new suggestion(s) this run, in the full doc below.</p>' : '')) +
       docLinkCardHtml_(docFile.getUrl(), 'SOP Suggestions -- ' + dateStr + ' (full doc, ' + mergedSuggestionsCount + ' merged)') +
       sopApprovalStepsHtml_() +
     '</div>';
 
   MailApp.sendEmail({
-    to: 'goodness@iconsofrealestate.com,joana@iconsofrealestate.com',
+    to: 'joana@iconsofrealestate.com',
     cc: 'kris@iconsofrealestate.com,tomas@iconsofrealestate.com',
     subject: '[Written by Claude] SOP Suggestions -- ' + dateStr,
     body: body,
     htmlBody: htmlBody
   });
 
-  Logger.log('SOP suggestions doc emailed to Goodness and Joana, CC Kris and Tomas: ' + docFile.getUrl());
+  Logger.log('SOP suggestions doc emailed to Joana, CC Kris and Tomas: ' + docFile.getUrl());
 }
