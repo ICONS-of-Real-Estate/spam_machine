@@ -821,9 +821,46 @@ function sendOpsAlert(subject, body) {
     const asPacificDay_ = v => (v instanceof Date)
       ? Utilities.formatDate(v, 'America/Los_Angeles', 'yyyy-MM-dd')
       : String(v).trim();
-    alreadySentToday = rows.some(r => asPacificDay_(r[1]) === today && String(r[2]) === subject);
+    // HARDENED (4 Sep 2026, real incident -- confirmed live in the Ops Alert
+    // Log: 4 identical-subject rows on 3 Sep 2026 alone, same pattern on 26
+    // Aug, meaning this dedup has silently never engaged despite the 27 Aug
+    // fix above). Trim the subject side of the comparison too, not just the
+    // date -- the 27 Aug fix only handled Sheets auto-converting the DATE
+    // column to a real Date value; a similar auto-formatting quirk (a stray
+    // leading/trailing space Sheets sometimes adds/keeps on write) could
+    // silently break the SUBJECT comparison the exact same way and nothing
+    // here would have caught it.
+    const normalizeSubject_ = v => String(v).trim();
+    const todaySubjectRows = rows.filter(r => asPacificDay_(r[1]) === today);
+    alreadySentToday = todaySubjectRows.some(r => normalizeSubject_(r[2]) === normalizeSubject_(subject));
+    // DIAGNOSTIC (4 Sep 2026): log every outcome, not just exceptions -- the
+    // real incident above threw no exception at all (rows were being
+    // written successfully every time), so the exception-only Logger.log in
+    // the catch block below would never have shown this failure mode. If
+    // this ever again computes false while a same-day, same-subject row
+    // genuinely exists, this line is what will finally show WHY the
+    // comparison didn't match (e.g. a subtle character difference visible
+    // only in JSON.stringify, not in the sheet cell's rendered display).
+    if (!alreadySentToday && todaySubjectRows.length > 0) {
+      Logger.log('sendOpsAlert -- ' + todaySubjectRows.length + ' row(s) already logged today but none matched this subject after normalizing -- comparing: incoming=' +
+        JSON.stringify(normalizeSubject_(subject)) + ' vs existing=' + JSON.stringify(todaySubjectRows.map(r => normalizeSubject_(r[2]))));
+    }
   } catch (e) {
     Logger.log('sendOpsAlert -- could not check the Ops Alert Log tab for dedup (failing open, sending anyway): ' + e);
+    // ADDED (4 Sep 2026, real incident): failing open here is the right
+    // call -- a missed alert is worse than a duplicate -- but it had been
+    // failing (or silently not-matching, see the diagnostic above) without
+    // anyone finding out until manually noticing repeats in the inbox. Send
+    // one extra, separate diagnostic email the first time this exception
+    // fires each Pacific day, explaining exactly why the real dedup
+    // couldn't run. Rate-limited via PropertiesService rather than the
+    // Sheet -- if the Sheet itself is what's failing, this diagnostic can't
+    // depend on the same path to avoid spamming. This is a single rotating
+    // key (cleared implicitly by the date changing, never accumulates),
+    // not a return to the permanent per-subject Properties keys removed 25
+    // Aug -- that removal was about unbounded clutter, not about
+    // Properties as a mechanism.
+    reportOpsAlertDedupFailure_(subject, e, today);
   }
 
   if (alreadySentToday) {
@@ -869,6 +906,43 @@ function sendOpsAlert(subject, body) {
       .appendRow([new Date(), today, subject, body]);
   } catch (e) {
     Logger.log('sendOpsAlert -- alert email sent, but failed to record it in the Ops Alert Log tab (dedup may not work next time for this subject): ' + e);
+  }
+}
+
+// ADDED (4 Sep 2026, real incident -- see the dedup catch block in
+// sendOpsAlert above): a separate, minimal path for reporting that the
+// REAL dedup check just threw, independent of the Sheet access that may be
+// the very thing failing. Sends directly via MailApp with no Sheet
+// read/write anywhere in this function, so it can't fail the same way.
+// Rate-limited to once per Pacific day via a single rotating Script
+// Property key (today's date is part of the key, so nothing accumulates
+// across days the way the old permanent per-subject keys did before the 25
+// Aug move to the Sheet -- see ensureOpsAlertLogTabExists_'s comment).
+function reportOpsAlertDedupFailure_(subject, error, today) {
+  const props = PropertiesService.getScriptProperties();
+  const key = 'OPS_ALERT_DEDUP_FAILURE_REPORTED_' + today;
+  if (props.getProperty(key)) {
+    Logger.log('reportOpsAlertDedupFailure_ -- already reported once today, not sending a second diagnostic.');
+    return;
+  }
+
+  try {
+    MailApp.sendEmail({
+      to: 'kris@iconsofrealestate.com',
+      subject: '[Icons Ops Alert] Alert dedup is broken -- expect duplicates',
+      body:
+        'sendOpsAlert could not read the "Ops Alert Log" tab to check whether "' + subject + '" was already sent today, ' +
+        'so it failed open and sent the alert anyway (the right call -- a missed alert is worse than a duplicate). ' +
+        'While this stays broken, expect the same alert to repeat every time its underlying condition is checked, ' +
+        'instead of once per Pacific day as intended.\n\n' +
+        'Underlying error from the dedup check: ' + error + '\n\n' +
+        'This diagnostic email is itself rate-limited to once per Pacific day (via a script property, not the Sheet), ' +
+        'so it will not spam even while the real dedup stays broken.'
+    });
+    props.setProperty(key, 'true');
+    Logger.log('reportOpsAlertDedupFailure_ -- diagnostic sent for: ' + subject);
+  } catch (e2) {
+    Logger.log('reportOpsAlertDedupFailure_ -- even the diagnostic email failed to send: ' + e2);
   }
 }
 
