@@ -522,7 +522,15 @@ function ensureSopSuggestionsStatusDropdown_(suggestionsTab) {
   // +50 rows of headroom so rows appended later in this same run (or before
   // the next call) already have the dropdown, without needing to re-run
   // this after every single appendRow.
-  const numRows = lastRow - 1 + 50;
+  // FIX (4 Sep 2026, found in review before it ever fired): the headroom must
+  // be clamped to the sheet's actual grid height. getLastRow() is the last row
+  // with DATA; getMaxRows() is how many rows the grid physically has. Asking
+  // for 50 rows past the grid throws "Those rows are out of bounds" and, since
+  // this runs near the top of generateSopSuggestionsInner, would abort the
+  // whole weekly run before any suggestions were generated. This tab grows by
+  // appendRow (which adds grid rows only as needed), so the two converge --
+  // the failure was guaranteed eventually, not hypothetical.
+  const numRows = Math.min(lastRow - 1 + 50, suggestionsTab.getMaxRows() - 1);
   if (numRows <= 0) return;
   const rule = SpreadsheetApp.newDataValidation()
     .requireValueInList(SOP_SUGGESTIONS_STATUS_VALUES, true)
@@ -1420,105 +1428,6 @@ function mergeAndResendTodaysSopSuggestions() {
   Logger.log('mergeAndResendTodaysSopSuggestions -- done. ' + rawLines.length + ' raw -> ' + finalSuggestions.length + ' merged. Emailed: ' + file.getUrl());
 }
 
-/**
- * ONE-OFF -- 4 Sep 2026, per direct request. The Sep 3 "SOP Suggestions"
- * email went out in the old, un-fixed format (unstyled list, every
- * suggestion under its own colored heading, no counts/reasoning/next-run
- * date -- see the "big blocks of GREEN" fix a few functions up). This
- * rebuilds THAT SAME batch's suggestions in the corrected tiered layout
- * (appendSopSuggestionsByTier_) and resends.
- *
- * Reads the raw findings straight from the "SOP Suggestions" sheet tab for
- * 3 Sep 2026 (they're still there, untouched) and re-merges them the same
- * way the original run did -- so this is a reformat of the same underlying
- * findings, not a new analysis pass. The one thing NOT reconstructed here
- * is the "Underlying examples" section (the actual before/after reply text)
- * -- that's only ever written into that day's original doc, not the sheet,
- * and the original Sep 3 doc (still live, linked below) still has it.
- *
- * Run resendSep3SopSuggestionsReformatted() once from the Apps Script
- * editor, check the log, then delete this function.
- */
-function resendSep3SopSuggestionsReformatted() {
-  const TARGET_DATE_STR = '2026-09-03';
-  const ORIGINAL_DOC_URL = 'https://docs.google.com/document/d/1I012xUJi3d95A5aBgbby1rUNp-j5ZflJo8QbuEEfAQQ/edit';
-
-  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
-  const suggestionsTab = ss.getSheetByName('SOP Suggestions');
-  if (!suggestionsTab) {
-    Logger.log('resendSep3SopSuggestionsReformatted -- "SOP Suggestions" tab not found.');
-    return;
-  }
-
-  const targetRows = suggestionsTab.getDataRange().getValues().slice(1)
-    .filter(r => r[0] instanceof Date && Utilities.formatDate(r[0], 'Europe/Paris', 'yyyy-MM-dd') === TARGET_DATE_STR);
-  if (targetRows.length === 0) {
-    Logger.log('resendSep3SopSuggestionsReformatted -- no rows found dated ' + TARGET_DATE_STR + ' in "SOP Suggestions". Nothing to resend.');
-    return;
-  }
-
-  const reviewedDraftsCount = Number(targetRows[0][1]) || 0; // batchEdits.length, same value logged on every row of that run
-  const SOP_SUGGESTIONS_MAX_RAW_PER_RUN = 22; // mirrors generateSopSuggestionsInner's cap, so this matches what the original run actually merged
-  let rawForMerge = targetRows.map(r => String(r[2]));
-  if (rawForMerge.length > SOP_SUGGESTIONS_MAX_RAW_PER_RUN) rawForMerge = rawForMerge.slice(0, SOP_SUGGESTIONS_MAX_RAW_PER_RUN);
-
-  const merged = mergeDuplicateSuggestions_(rawForMerge, 'resendSep3SopSuggestionsReformatted');
-  const finalSuggestions = merged || rawForMerge.map(line => {
-    const m = line.match(/^\[(\w+)\]\s*(.*?)\s*->\s*(.*)$/s);
-    return m ? { confidence: m[1], pattern_observed: m[2], suggested_change: m[3] } : { confidence: '', pattern_observed: line, suggested_change: '' };
-  });
-
-  const dateStr = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'MMMM d, yyyy');
-  const doc = DocumentApp.create('SOP Suggestions -- September 3, 2026 (Resent, Reformatted ' + dateStr + ')');
-  const body = doc.getBody();
-  body.appendParagraph('SOP Suggestions -- September 3, 2026 (Resent)').setHeading(DocumentApp.ParagraphHeading.HEADING1);
-  body.appendParagraph(
-    finalSuggestions.length + ' suggestion' + (finalSuggestions.length === 1 ? '' : 's') + ' below, from ' +
-    reviewedDraftsCount + ' real edited repl' + (reviewedDraftsCount === 1 ? 'y' : 'ies') + ' reviewed on Sep 3 ' +
-    '(AI draft vs. what Joana actually sent). Same findings as the original Sep 3 email -- resent in the ' +
-    'corrected format (color now marks a confidence tier, not every single line). Next SOP Suggestions run: ' +
-    nextSopSuggestionsRunDateStr_() + '.'
-  );
-  body.appendParagraph('PROPOSALS ONLY -- nothing here has been applied to the live SOP. Review each one below and copy anything real into the live SOP doc by hand.');
-  body.appendParagraph('Original Sep 3 doc (has the underlying before/after example text): ' + ORIGINAL_DOC_URL);
-  body.appendHorizontalRule();
-
-  appendSopSuggestionsByTier_(body, finalSuggestions);
-
-  doc.saveAndClose();
-  const file = DriveApp.getFileById(doc.getId());
-  shareSopDocWithReviewers_(file);
-
-  const introText = finalSuggestions.length + ' suggestions, from ' + reviewedDraftsCount + ' real edited repl' +
-    (reviewedDraftsCount === 1 ? 'y' : 'ies') + ' reviewed on Sep 3. Same findings as the original Sep 3 email -- ' +
-    'resent in the corrected format. Next SOP Suggestions run: ' + nextSopSuggestionsRunDateStr_() + '.';
-
-  MailApp.sendEmail({
-    to: 'joana@iconsofrealestate.com',
-    cc: 'kris@iconsofrealestate.com,tomas@iconsofrealestate.com',
-    subject: '[Written by Claude] SOP Suggestions -- September 3, 2026 (resent, reformatted)',
-    body:
-      'This email was written by Claude.\n\n' +
-      'Resending the Sep 3 SOP Suggestions in the corrected format -- same findings, color now marks a ' +
-      'confidence tier instead of every single line.\n\n' +
-      introText + '\n\n' +
-      file.getUrl() + '\n\n' +
-      sopApprovalStepsText_(),
-    htmlBody:
-      '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' +
-        '<p>This email was written by Claude.</p>' +
-        '<p>Resending the Sep 3 SOP Suggestions in the corrected format &mdash; same findings, color now marks ' +
-          'a confidence tier instead of every single line.</p>' +
-        '<p>' + escapeHtml(introText) + '</p>' +
-        docLinkCardHtml_(file.getUrl(), 'SOP Suggestions -- September 3, 2026 (Resent)') +
-        sopApprovalStepsHtml_() +
-      '</div>'
-  });
-
-  Logger.log('resendSep3SopSuggestionsReformatted -- done. ' + finalSuggestions.length + ' suggestion(s) from ' +
-    targetRows.length + ' raw row(s). Emailed: ' + file.getUrl());
-}
-
 // ---------- 3. DAILY REVIEWABLE DOC + EMAIL (added 19 Aug 2026) ----------
 
 // HOISTED (3 Sep 2026, per direct request -- "why no colour? bold? giant
@@ -1547,17 +1456,35 @@ function nextSopSuggestionsRunDateStr_() {
   return Utilities.formatDate(d, 'Europe/Paris', 'EEEE, MMM d');
 }
 
-// HOISTED (4 Sep 2026, out of createSopSuggestionsDoc) so
-// resendSep3SopSuggestionsReformatted() below can render a doc in the exact
-// same tiered/colored layout without duplicating it.
+// HOISTED (4 Sep 2026, out of createSopSuggestionsDoc) so a one-off resend
+// could render a doc in the exact same tiered/colored layout without
+// duplicating it. That one-off (resendSep3SopSuggestionsReformatted) has
+// since done its job and been deleted; this stays hoisted because it's the
+// single definition of how a suggestion list is laid out.
 function appendSopSuggestionsByTier_(body, suggestions) {
   const TIERS = [
     { key: 'high', label: 'Act on these -- HIGH confidence' },
     { key: 'medium', label: 'Worth a look -- MEDIUM confidence' },
     { key: 'low', label: 'Probably skip -- LOW confidence' }
   ];
-  TIERS.forEach(tier => {
-    const tierSuggestions = suggestions.filter(s => String(s.confidence).toLowerCase() === tier.key);
+  const TIER_KEYS = TIERS.map(t => t.key);
+
+  // FIX (4 Sep 2026, found in review): the tier filter matched only the three
+  // exact strings, so a suggestion whose confidence came back as anything else
+  // (a capitalized variant is fine -- it's lowercased -- but "very high",
+  // "med", an empty string from a parse fallback, or a missing field) was
+  // silently dropped from the doc while the intro paragraph above still
+  // counted it. Bucket anything unrecognized into its own visible group
+  // instead: an odd confidence value is a reason to eyeball the suggestion,
+  // never a reason to hide it.
+  const tierOf_ = s => {
+    const c = String(s && s.confidence).toLowerCase().trim();
+    return TIER_KEYS.indexOf(c) === -1 ? 'unrated' : c;
+  };
+  const renderTiers = TIERS.concat([{ key: 'unrated', label: 'Unrated -- confidence missing or unrecognized' }]);
+
+  renderTiers.forEach(tier => {
+    const tierSuggestions = suggestions.filter(s => tierOf_(s) === tier.key);
     if (tierSuggestions.length === 0) return;
 
     const heading = body.appendParagraph(tier.label + ' (' + tierSuggestions.length + ')');
@@ -1565,15 +1492,29 @@ function appendSopSuggestionsByTier_(body, suggestions) {
     heading.editAsText().setForegroundColor(sopConfidenceColor_(tier.key));
 
     tierSuggestions.forEach(s => {
-      const changePara = body.appendParagraph(s.suggested_change);
-      changePara.setBold(true);
+      // FIX (4 Sep 2026, found in review): these are raw LLM-provided fields.
+      // appendParagraph() rejects a non-string, so a suggestion missing either
+      // field (undefined) threw and took the whole doc build down with it --
+      // after the Learning Log rows had already been marked reviewed, so the
+      // examples behind it would never be re-analyzed. Coerce, and skip an
+      // entry that has no usable text at all rather than appending a blank.
+      const changeText = String((s && s.suggested_change) || '').trim();
+      const patternText_ = String((s && s.pattern_observed) || '').trim();
+      if (!changeText && !patternText_) return;
+
+      // setBold(true) is a Text method, not a Paragraph one -- go through
+      // editAsText(), same as every other styling call in this file.
+      const changePara = body.appendParagraph(changeText || patternText_);
+      changePara.editAsText().setBold(true);
       changePara.setSpacingAfter(2);
 
-      const patternPara = body.appendParagraph(s.pattern_observed);
-      const patternText = patternPara.editAsText();
-      patternText.setForegroundColor('#666666');
-      patternText.setFontSize(10);
-      patternPara.setSpacingAfter(14);
+      if (changeText && patternText_) {
+        const patternPara = body.appendParagraph(patternText_);
+        const patternTextEl = patternPara.editAsText();
+        patternTextEl.setForegroundColor('#666666');
+        patternTextEl.setFontSize(10);
+        patternPara.setSpacingAfter(14);
+      }
     });
   });
 }
@@ -1595,7 +1536,7 @@ function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount, suppres
     suggestions.length + ' suggestion' + (suggestions.length === 1 ? '' : 's') + ' below, from ' +
     batchEdits.length + ' real edited repl' + (batchEdits.length === 1 ? 'y' : 'ies') +
     ' this week (AI draft vs. what Joana actually sent).' +
-    (suppressedDuplicateCount > 0 ? ' ' + suppressedDuplicateCount + ' more repeated the same pattern as one already listed, so they were merged in rather than shown twice.' : '') +
+    (suppressedDuplicateCount > 0 ? ' ' + suppressedDuplicateCount + ' more matched a pattern already surfaced in an earlier run, so they were left out rather than shown to you again.' : '') +
     (deferredCount > 0 ? ' ' + deferredCount + ' more edited example(s) are still queued and will show up in a future run\'s doc.' : '') +
     ' Next SOP Suggestions run: ' + nextSopSuggestionsRunDateStr_() + '.'
   );
@@ -1709,8 +1650,15 @@ function emailSopSuggestionsDoc(docFile, mergedSuggestionsCount, topSuggestions,
   const shortSummary_ = s => truncate_(s.pattern_observed, EMAIL_SUMMARY_MAX_CHARS);
 
   const nextRunStr = nextSopSuggestionsRunDateStr_();
+  // ACCURACY FIX (4 Sep 2026, found in review): this used to read "merged in
+  // rather than counted twice," which describes the wrong mechanism.
+  // suppressedDuplicateCount counts suggestions whose fingerprint was ALREADY
+  // in the "SOP Suggestions" tab from a previous run -- they were dropped
+  // before ever reaching this list, not folded into an item shown in it. The
+  // whole point of this sentence is explaining "why that many," so stating
+  // the wrong reason defeats it.
   const whyThatManyStr = suppressedDuplicateCount > 0
-    ? ' (' + suppressedDuplicateCount + ' more repeated a pattern already counted above, so they were merged in rather than counted twice)'
+    ? ' (' + suppressedDuplicateCount + ' more matched a pattern already surfaced in an earlier run, so they were left out rather than repeated)'
     : '';
 
   const body =
