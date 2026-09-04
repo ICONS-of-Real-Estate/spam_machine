@@ -833,7 +833,7 @@ function generateSopSuggestionsInner(opts) {
     const suggestionLines = rawForMerge.map(s => '[' + s.confidence + '] ' + s.pattern_observed + ' -> ' + s.suggested_change);
     const merged = mergeDuplicateSuggestions_(suggestionLines, 'generateSopSuggestions');
     const finalSuggestions = merged || rawForMerge;
-    const docFile = createSopSuggestionsDoc(allBatchEdits, finalSuggestions, deferredCount);
+    const docFile = createSopSuggestionsDoc(allBatchEdits, finalSuggestions, deferredCount, suppressedDuplicateCount);
 
     // CAPPED EMAIL (3 Sep 2026, per Joana's feedback -- "cap the daily email
     // at the top 5-10, one-line summary each, with a direct link to that
@@ -852,7 +852,7 @@ function generateSopSuggestionsInner(opts) {
     const SOP_SUGGESTIONS_EMAIL_CAP = 8; // "top 5 to 10" -- middle of the requested range
     const emailTopSuggestions = emailCandidates.slice(0, SOP_SUGGESTIONS_EMAIL_CAP);
 
-    emailSopSuggestionsDoc(docFile, finalSuggestions.length, emailTopSuggestions, emailCandidates.length, suggestionsTab.getSheetId());
+    emailSopSuggestionsDoc(docFile, finalSuggestions.length, emailTopSuggestions, emailCandidates.length, suggestionsTab.getSheetId(), allBatchEdits.length, suppressedDuplicateCount);
   }
 
   return deferredCount === 0;
@@ -1406,16 +1406,40 @@ function sopConfidenceColor_(c) {
   return '#e08e0b'; // medium
 }
 
-function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount) {
+// ADDED (4 Sep 2026, per direct request -- doc/email should say "when she
+// will receive the next SOP suggestions"): generateSopSuggestions runs
+// weekly on Friday (~3 AM Europe/Paris -- see setup_all_triggers.gs). If
+// today IS a Friday before that run has happened, this still reports next
+// Friday (7 days out) rather than "today" -- simplest correct answer for a
+// reader checking the doc/email at any time of day, and this function only
+// ever runs from inside that Friday job anyway.
+function nextSopSuggestionsRunDateStr_() {
+  const d = new Date();
+  const daysUntilFriday = (5 - d.getDay() + 7) % 7 || 7;
+  d.setDate(d.getDate() + daysUntilFriday);
+  return Utilities.formatDate(d, 'Europe/Paris', 'EEEE, MMM d');
+}
+
+function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount, suppressedDuplicateCount) {
   const dateStr = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'MMMM d, yyyy');
   const doc = DocumentApp.create('SOP Suggestions -- ' + dateStr);
   const body = doc.getBody();
 
   body.appendParagraph('SOP Suggestions -- ' + dateStr).setHeading(DocumentApp.ParagraphHeading.HEADING1);
+  // REWRITTEN (4 Sep 2026, per direct request -- the email now states how
+  // many suggestions, why that many, from how many drafts, and when the
+  // next batch arrives; the doc should say the same, since it's the thing a
+  // reviewer actually reads). suppressedDuplicateCount explains "why that
+  // many" -- most weeks the real number of distinct patterns is far smaller
+  // than the raw finding count because the same pattern gets rediscovered
+  // across many edited replies.
   body.appendParagraph(
-    'Generated automatically from ' + batchEdits.length + ' real edited repl' + (batchEdits.length === 1 ? 'y' : 'ies') +
-    ' found today (AI draft vs. what Joana actually sent).' +
-    (deferredCount > 0 ? ' ' + deferredCount + ' more edited example(s) are still queued and will show up in a future day\'s doc.' : '')
+    suggestions.length + ' suggestion' + (suggestions.length === 1 ? '' : 's') + ' below, from ' +
+    batchEdits.length + ' real edited repl' + (batchEdits.length === 1 ? 'y' : 'ies') +
+    ' this week (AI draft vs. what Joana actually sent).' +
+    (suppressedDuplicateCount > 0 ? ' ' + suppressedDuplicateCount + ' more repeated the same pattern as one already listed, so they were merged in rather than shown twice.' : '') +
+    (deferredCount > 0 ? ' ' + deferredCount + ' more edited example(s) are still queued and will show up in a future run\'s doc.' : '') +
+    ' Next SOP Suggestions run: ' + nextSopSuggestionsRunDateStr_() + '.'
   );
   body.appendParagraph('PROPOSALS ONLY -- nothing here has been applied to the live SOP. Review each one below and copy anything real into the live SOP doc by hand.');
 
@@ -1444,28 +1468,42 @@ function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount) {
   if (suggestions.length === 0) {
     body.appendParagraph('No clear repeated pattern found in today\'s edits -- nothing to propose.');
   } else {
-    // READABILITY (28 Aug 2026, per direct request -- "blocks of text like
-    // this is very hard to read... bold, highlight, spacing makes it
-    // easier"): every line here used to be one plain, unstyled paragraph --
-    // a heading followed by two dense sentences with no visual separation
-    // from the confidence level, the "Pattern observed"/"Suggested change"
-    // labels, or the next suggestion. Confidence now gets a colored heading
-    // (matches categoryColor_'s green/red convention in daily_report.gs --
-    // high confidence should read as "act on this," not require reading the
-    // word), the two labels are bold and inline instead of narrative
-    // prose, and each suggestion gets breathing room below it.
-    const confidenceColor_ = sopConfidenceColor_;
-    suggestions.forEach((s, idx) => {
-      const heading = body.appendParagraph('Suggestion ' + (idx + 1) + ' -- ' + String(s.confidence).toUpperCase() + ' confidence');
+    // REDESIGNED (4 Sep 2026, per direct request -- "big blocks of GREEN
+    // isn't adding colour! You need to make this easy for Joana or she will
+    // ignore it!"): the previous layout gave every single suggestion its own
+    // colored HEADING2. Confidence in this project skews heavily HIGH (7 of
+    // 10 in a real run) so that read as one long wall of identical green
+    // headings -- color that repeats on every line stops functioning as
+    // color. Fix: color is now a section-level signal (one heading per
+    // confidence tier, colored once, with a count), not a per-item one.
+    // Within a tier, suggestions lead with the actionable "Suggested
+    // change" in plain bold text -- what to go do -- with "Pattern
+    // observed" underneath in smaller, gray, non-bold text as the
+    // supporting evidence, not co-equal with the action.
+    const TIERS = [
+      { key: 'high', label: 'Act on these -- HIGH confidence' },
+      { key: 'medium', label: 'Worth a look -- MEDIUM confidence' },
+      { key: 'low', label: 'Probably skip -- LOW confidence' }
+    ];
+    TIERS.forEach(tier => {
+      const tierSuggestions = suggestions.filter(s => String(s.confidence).toLowerCase() === tier.key);
+      if (tierSuggestions.length === 0) return;
+
+      const heading = body.appendParagraph(tier.label + ' (' + tierSuggestions.length + ')');
       heading.setHeading(DocumentApp.ParagraphHeading.HEADING2);
-      heading.editAsText().setForegroundColor(confidenceColor_(s.confidence));
+      heading.editAsText().setForegroundColor(sopConfidenceColor_(tier.key));
 
-      const patternPara = body.appendParagraph('Pattern observed: ' + s.pattern_observed);
-      patternPara.editAsText().setBold(0, 'Pattern observed:'.length - 1, true);
+      tierSuggestions.forEach(s => {
+        const changePara = body.appendParagraph(s.suggested_change);
+        changePara.setBold(true);
+        changePara.setSpacingAfter(2);
 
-      const changePara = body.appendParagraph('Suggested change: ' + s.suggested_change);
-      changePara.editAsText().setBold(0, 'Suggested change:'.length - 1, true);
-      changePara.setSpacingAfter(14);
+        const patternPara = body.appendParagraph(s.pattern_observed);
+        const patternText = patternPara.editAsText();
+        patternText.setForegroundColor('#666666');
+        patternText.setFontSize(10);
+        patternPara.setSpacingAfter(14);
+      });
     });
   }
 
@@ -1515,7 +1553,15 @@ function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount) {
 // bolded and color-coded, in its own card; the untruncated pattern AND
 // suggested_change stay exactly where they belong -- one click away, in
 // the row the link points to, and in the full doc below.
-function emailSopSuggestionsDoc(docFile, mergedSuggestionsCount, topSuggestions, totalNewCount, suggestionsSheetGid) {
+// CHANGED (4 Sep 2026, per direct request -- "In the email, it should say
+// how many suggestions, why that many, from how many drafts and when she
+// will receive the next SOP suggestions"): added reviewedDraftsCount (how
+// many real edited replies were reviewed to produce this run's suggestions)
+// and suppressedDuplicateCount (the "why that many" reasoning -- most raw
+// findings are the same handful of real patterns rediscovered repeatedly;
+// see the merge-before-send note above generateSopSuggestionsInner's
+// createSopSuggestionsDoc call).
+function emailSopSuggestionsDoc(docFile, mergedSuggestionsCount, topSuggestions, totalNewCount, suggestionsSheetGid, reviewedDraftsCount, suppressedDuplicateCount) {
   const dateStr = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'MMMM d, yyyy');
   const sheetRowUrl_ = row => 'https://docs.google.com/spreadsheets/d/' + CONFIG.SPREADSHEET_ID + '/edit#gid=' + suggestionsSheetGid + '&range=A' + row;
   const remainderCount = Math.max(0, totalNewCount - topSuggestions.length);
@@ -1527,10 +1573,17 @@ function emailSopSuggestionsDoc(docFile, mergedSuggestionsCount, topSuggestions,
   };
   const shortSummary_ = s => truncate_(s.pattern_observed, EMAIL_SUMMARY_MAX_CHARS);
 
+  const nextRunStr = nextSopSuggestionsRunDateStr_();
+  const whyThatManyStr = suppressedDuplicateCount > 0
+    ? ' (' + suppressedDuplicateCount + ' more repeated a pattern already counted above, so they were merged in rather than counted twice)'
+    : '';
+
   const body =
     'This email was written by Claude.\n\n' +
-    'This run\'s automated review found ' + totalNewCount + ' new potential SOP update' + (totalNewCount === 1 ? '' : 's') +
-    ' not already surfaced in a past run, based on real differences between what the AI drafted and what Joana actually sent.\n\n' +
+    totalNewCount + ' new suggestion' + (totalNewCount === 1 ? '' : 's') + ' this run, from ' +
+    reviewedDraftsCount + ' real edited repl' + (reviewedDraftsCount === 1 ? 'y' : 'ies') +
+    ' reviewed (AI draft vs. what Joana actually sent)' + whyThatManyStr + '.\n\n' +
+    'Next SOP Suggestions run: ' + nextRunStr + '.\n\n' +
     (topSuggestions.length === 0
       ? 'Nothing new this time -- everything found was a duplicate of a pattern already in the SOP Suggestions tab.\n\n'
       : 'Top ' + topSuggestions.length + ':\n\n' +
@@ -1547,8 +1600,10 @@ function emailSopSuggestionsDoc(docFile, mergedSuggestionsCount, topSuggestions,
   const htmlBody =
     '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' +
       '<p>This email was written by Claude.</p>' +
-      '<p>This run\'s automated review found <b>' + totalNewCount + '</b> new potential SOP update' + (totalNewCount === 1 ? '' : 's') +
-        ' not already surfaced in a past run, based on real differences between what the AI drafted and what Joana actually sent.</p>' +
+      '<p><b>' + totalNewCount + '</b> new suggestion' + (totalNewCount === 1 ? '' : 's') + ' this run, from <b>' +
+        reviewedDraftsCount + '</b> real edited repl' + (reviewedDraftsCount === 1 ? 'y' : 'ies') +
+        ' reviewed (AI draft vs. what Joana actually sent)' + escapeHtml(whyThatManyStr) + '.</p>' +
+      '<p style="color:#555555;">Next SOP Suggestions run: <b>' + nextRunStr + '</b>.</p>' +
       (topSuggestions.length === 0
         ? '<p style="color:#555555;">Nothing new this time &mdash; everything found was a duplicate of a pattern already in the SOP Suggestions tab.</p>'
         : topSuggestions.map(s => {
