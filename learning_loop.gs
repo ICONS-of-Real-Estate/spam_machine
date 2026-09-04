@@ -1392,6 +1392,105 @@ function mergeAndResendTodaysSopSuggestions() {
   Logger.log('mergeAndResendTodaysSopSuggestions -- done. ' + rawLines.length + ' raw -> ' + finalSuggestions.length + ' merged. Emailed: ' + file.getUrl());
 }
 
+/**
+ * ONE-OFF -- 4 Sep 2026, per direct request. The Sep 3 "SOP Suggestions"
+ * email went out in the old, un-fixed format (unstyled list, every
+ * suggestion under its own colored heading, no counts/reasoning/next-run
+ * date -- see the "big blocks of GREEN" fix a few functions up). This
+ * rebuilds THAT SAME batch's suggestions in the corrected tiered layout
+ * (appendSopSuggestionsByTier_) and resends.
+ *
+ * Reads the raw findings straight from the "SOP Suggestions" sheet tab for
+ * 3 Sep 2026 (they're still there, untouched) and re-merges them the same
+ * way the original run did -- so this is a reformat of the same underlying
+ * findings, not a new analysis pass. The one thing NOT reconstructed here
+ * is the "Underlying examples" section (the actual before/after reply text)
+ * -- that's only ever written into that day's original doc, not the sheet,
+ * and the original Sep 3 doc (still live, linked below) still has it.
+ *
+ * Run resendSep3SopSuggestionsReformatted() once from the Apps Script
+ * editor, check the log, then delete this function.
+ */
+function resendSep3SopSuggestionsReformatted() {
+  const TARGET_DATE_STR = '2026-09-03';
+  const ORIGINAL_DOC_URL = 'https://docs.google.com/document/d/1I012xUJi3d95A5aBgbby1rUNp-j5ZflJo8QbuEEfAQQ/edit';
+
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const suggestionsTab = ss.getSheetByName('SOP Suggestions');
+  if (!suggestionsTab) {
+    Logger.log('resendSep3SopSuggestionsReformatted -- "SOP Suggestions" tab not found.');
+    return;
+  }
+
+  const targetRows = suggestionsTab.getDataRange().getValues().slice(1)
+    .filter(r => r[0] instanceof Date && Utilities.formatDate(r[0], 'Europe/Paris', 'yyyy-MM-dd') === TARGET_DATE_STR);
+  if (targetRows.length === 0) {
+    Logger.log('resendSep3SopSuggestionsReformatted -- no rows found dated ' + TARGET_DATE_STR + ' in "SOP Suggestions". Nothing to resend.');
+    return;
+  }
+
+  const reviewedDraftsCount = Number(targetRows[0][1]) || 0; // batchEdits.length, same value logged on every row of that run
+  const SOP_SUGGESTIONS_MAX_RAW_PER_RUN = 22; // mirrors generateSopSuggestionsInner's cap, so this matches what the original run actually merged
+  let rawForMerge = targetRows.map(r => String(r[2]));
+  if (rawForMerge.length > SOP_SUGGESTIONS_MAX_RAW_PER_RUN) rawForMerge = rawForMerge.slice(0, SOP_SUGGESTIONS_MAX_RAW_PER_RUN);
+
+  const merged = mergeDuplicateSuggestions_(rawForMerge, 'resendSep3SopSuggestionsReformatted');
+  const finalSuggestions = merged || rawForMerge.map(line => {
+    const m = line.match(/^\[(\w+)\]\s*(.*?)\s*->\s*(.*)$/s);
+    return m ? { confidence: m[1], pattern_observed: m[2], suggested_change: m[3] } : { confidence: '', pattern_observed: line, suggested_change: '' };
+  });
+
+  const dateStr = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'MMMM d, yyyy');
+  const doc = DocumentApp.create('SOP Suggestions -- September 3, 2026 (Resent, Reformatted ' + dateStr + ')');
+  const body = doc.getBody();
+  body.appendParagraph('SOP Suggestions -- September 3, 2026 (Resent)').setHeading(DocumentApp.ParagraphHeading.HEADING1);
+  body.appendParagraph(
+    finalSuggestions.length + ' suggestion' + (finalSuggestions.length === 1 ? '' : 's') + ' below, from ' +
+    reviewedDraftsCount + ' real edited repl' + (reviewedDraftsCount === 1 ? 'y' : 'ies') + ' reviewed on Sep 3 ' +
+    '(AI draft vs. what Joana actually sent). Same findings as the original Sep 3 email -- resent in the ' +
+    'corrected format (color now marks a confidence tier, not every single line). Next SOP Suggestions run: ' +
+    nextSopSuggestionsRunDateStr_() + '.'
+  );
+  body.appendParagraph('PROPOSALS ONLY -- nothing here has been applied to the live SOP. Review each one below and copy anything real into the live SOP doc by hand.');
+  body.appendParagraph('Original Sep 3 doc (has the underlying before/after example text): ' + ORIGINAL_DOC_URL);
+  body.appendHorizontalRule();
+
+  appendSopSuggestionsByTier_(body, finalSuggestions);
+
+  doc.saveAndClose();
+  const file = DriveApp.getFileById(doc.getId());
+  shareSopDocWithReviewers_(file);
+
+  const introText = finalSuggestions.length + ' suggestions, from ' + reviewedDraftsCount + ' real edited repl' +
+    (reviewedDraftsCount === 1 ? 'y' : 'ies') + ' reviewed on Sep 3. Same findings as the original Sep 3 email -- ' +
+    'resent in the corrected format. Next SOP Suggestions run: ' + nextSopSuggestionsRunDateStr_() + '.';
+
+  MailApp.sendEmail({
+    to: 'joana@iconsofrealestate.com',
+    cc: 'kris@iconsofrealestate.com,tomas@iconsofrealestate.com',
+    subject: '[Written by Claude] SOP Suggestions -- September 3, 2026 (resent, reformatted)',
+    body:
+      'This email was written by Claude.\n\n' +
+      'Resending the Sep 3 SOP Suggestions in the corrected format -- same findings, color now marks a ' +
+      'confidence tier instead of every single line.\n\n' +
+      introText + '\n\n' +
+      file.getUrl() + '\n\n' +
+      sopApprovalStepsText_(),
+    htmlBody:
+      '<div style="font-family:Arial,sans-serif; font-size:14px; color:#222;">' +
+        '<p>This email was written by Claude.</p>' +
+        '<p>Resending the Sep 3 SOP Suggestions in the corrected format &mdash; same findings, color now marks ' +
+          'a confidence tier instead of every single line.</p>' +
+        '<p>' + escapeHtml(introText) + '</p>' +
+        docLinkCardHtml_(file.getUrl(), 'SOP Suggestions -- September 3, 2026 (Resent)') +
+        sopApprovalStepsHtml_() +
+      '</div>'
+  });
+
+  Logger.log('resendSep3SopSuggestionsReformatted -- done. ' + finalSuggestions.length + ' suggestion(s) from ' +
+    targetRows.length + ' raw row(s). Emailed: ' + file.getUrl());
+}
+
 // ---------- 3. DAILY REVIEWABLE DOC + EMAIL (added 19 Aug 2026) ----------
 
 // HOISTED (3 Sep 2026, per direct request -- "why no colour? bold? giant
@@ -1418,6 +1517,37 @@ function nextSopSuggestionsRunDateStr_() {
   const daysUntilFriday = (5 - d.getDay() + 7) % 7 || 7;
   d.setDate(d.getDate() + daysUntilFriday);
   return Utilities.formatDate(d, 'Europe/Paris', 'EEEE, MMM d');
+}
+
+// HOISTED (4 Sep 2026, out of createSopSuggestionsDoc) so
+// resendSep3SopSuggestionsReformatted() below can render a doc in the exact
+// same tiered/colored layout without duplicating it.
+function appendSopSuggestionsByTier_(body, suggestions) {
+  const TIERS = [
+    { key: 'high', label: 'Act on these -- HIGH confidence' },
+    { key: 'medium', label: 'Worth a look -- MEDIUM confidence' },
+    { key: 'low', label: 'Probably skip -- LOW confidence' }
+  ];
+  TIERS.forEach(tier => {
+    const tierSuggestions = suggestions.filter(s => String(s.confidence).toLowerCase() === tier.key);
+    if (tierSuggestions.length === 0) return;
+
+    const heading = body.appendParagraph(tier.label + ' (' + tierSuggestions.length + ')');
+    heading.setHeading(DocumentApp.ParagraphHeading.HEADING2);
+    heading.editAsText().setForegroundColor(sopConfidenceColor_(tier.key));
+
+    tierSuggestions.forEach(s => {
+      const changePara = body.appendParagraph(s.suggested_change);
+      changePara.setBold(true);
+      changePara.setSpacingAfter(2);
+
+      const patternPara = body.appendParagraph(s.pattern_observed);
+      const patternText = patternPara.editAsText();
+      patternText.setForegroundColor('#666666');
+      patternText.setFontSize(10);
+      patternPara.setSpacingAfter(14);
+    });
+  });
 }
 
 function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount, suppressedDuplicateCount) {
@@ -1479,32 +1609,9 @@ function createSopSuggestionsDoc(batchEdits, suggestions, deferredCount, suppres
     // Within a tier, suggestions lead with the actionable "Suggested
     // change" in plain bold text -- what to go do -- with "Pattern
     // observed" underneath in smaller, gray, non-bold text as the
-    // supporting evidence, not co-equal with the action.
-    const TIERS = [
-      { key: 'high', label: 'Act on these -- HIGH confidence' },
-      { key: 'medium', label: 'Worth a look -- MEDIUM confidence' },
-      { key: 'low', label: 'Probably skip -- LOW confidence' }
-    ];
-    TIERS.forEach(tier => {
-      const tierSuggestions = suggestions.filter(s => String(s.confidence).toLowerCase() === tier.key);
-      if (tierSuggestions.length === 0) return;
-
-      const heading = body.appendParagraph(tier.label + ' (' + tierSuggestions.length + ')');
-      heading.setHeading(DocumentApp.ParagraphHeading.HEADING2);
-      heading.editAsText().setForegroundColor(sopConfidenceColor_(tier.key));
-
-      tierSuggestions.forEach(s => {
-        const changePara = body.appendParagraph(s.suggested_change);
-        changePara.setBold(true);
-        changePara.setSpacingAfter(2);
-
-        const patternPara = body.appendParagraph(s.pattern_observed);
-        const patternText = patternPara.editAsText();
-        patternText.setForegroundColor('#666666');
-        patternText.setFontSize(10);
-        patternPara.setSpacingAfter(14);
-      });
-    });
+    // supporting evidence, not co-equal with the action. See
+    // appendSopSuggestionsByTier_ above.
+    appendSopSuggestionsByTier_(body, suggestions);
   }
 
   body.appendHorizontalRule();
