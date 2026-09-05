@@ -349,15 +349,20 @@ function runDailyReport() {
     );
   }
 
-  // REORDERED AGAIN (3 Sep 2026, per Tomás's feedback -- "this is sending
-  // the daily Sat 29 update at my 6am, so it's when midnight passes... needs
-  // to be from the PREVIOUS day, as there is information it will be able to
-  // pull up. The 'TODAY (partial -- only since midnight)' makes no sense"):
-  // the 28 Aug reorder put TODAY first per a different, now-superseded
-  // request. At the report's actual send time (~7 AM), TODAY is a few
-  // hours old and nearly empty -- YESTERDAY is the complete, meaningful
-  // number and belongs first. TODAY stays in the report (still useful if
-  // read later in the day) but no longer leads.
+  // REORDERED (3 Sep 2026, per Tomás's feedback -- "this is sending the
+  // daily Sat 29 update at my 6am, so it's when midnight passes... needs to
+  // be from the PREVIOUS day... The 'TODAY (partial -- only since
+  // midnight)' makes no sense"): moved YESTERDAY first, TODAY second,
+  // reasoning TODAY would "still be useful if read later in the day."
+  //
+  // REMOVED entirely (4 Sep 2026, per direct request): that reasoning never
+  // held up in practice -- the report always sends at the same early-morning
+  // time, so TODAY is unconditionally near-empty for every reader, and
+  // nobody reopens the email later in the day to catch it filling in. Same
+  // complaint as 3 Sep, taken to its actual conclusion instead of just
+  // reordering around it. draftsToday/editToday are still computed above
+  // (used in the final Logger.log summary line) but no longer rendered in
+  // either email body.
   const periodicSections =
     (isWeeklyReportDay ? formatSection('LAST 7 DAYS', drafts7d, edit7d) + '\n\n' : '') +
     (isMonthlyReportDay ? formatSection('LAST 30 DAYS', drafts30d, edit30d) + '\n\n' : '');
@@ -381,7 +386,6 @@ function runDailyReport() {
     'DAILY REPORT -- ' + reportDateStr + '\n\n' +
     'New leads received today (raw inbound count): ' + leadsReceivedToday + '\n\n' +
     formatSection('YESTERDAY', draftsYesterday, editYesterday) + '\n\n' +
-    formatSection('TODAY' + (now.getHours() < 12 ? ' (partial -- only since midnight)' : ''), draftsToday, editToday) + '\n\n' +
     periodicSections +
     formatSection('ALL TIME', draftsAllTime, editAllTime) + '\n\n' +
     'Averages:\n' +
@@ -417,7 +421,6 @@ function runDailyReport() {
       '<p><b>New leads received today</b> (raw inbound count): ' + leadsReceivedToday + '</p>' +
       '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
       formatSectionHtml('YESTERDAY', draftsYesterday, editYesterday) +
-      formatSectionHtml('TODAY' + (now.getHours() < 12 ? ' (partial -- only since midnight)' : ''), draftsToday, editToday) +
       periodicSectionsHtml +
       formatSectionHtml('ALL TIME', draftsAllTime, editAllTime) +
       '<p><b>Averages:</b><br>' +

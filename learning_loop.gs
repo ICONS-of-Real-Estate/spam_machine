@@ -729,9 +729,22 @@ function generateSopSuggestionsInner(opts) {
       .map((e, idx) => `EXAMPLE ${idx + 1} (category: ${e.category})\n--- AI DRAFTED ---\n${e.original}\n--- JOANA ACTUALLY SENT ---\n${e.final}`)
       .join('\n\n');
 
-    const systemPrompt = `You review edited email drafts to find patterns in how a human editor (Joana) changes AI-drafted sales replies, and propose specific, concrete updates to the SOP that produced the drafts. You are NOT rewriting the SOP yourself — you are proposing changes for a human to review and approve. Be specific: quote the actual phrasing pattern you see repeated across edits, don't generalize vaguely. If the edits don't show a clear repeated pattern (e.g. they're all one-off stylistic tweaks with no common thread), say so plainly rather than inventing a pattern.`;
+    // TIGHTENED (4 Sep 2026, per direct request -- Joana rechecked the
+    // redesigned doc and said "the walls of text are hard to read"): the
+    // 3 Sep fix grouped suggestions by confidence tier instead of coloring
+    // every line, which fixed the COLOR problem -- but never touched the
+    // PROSE itself. Nothing here ever capped length, and "quote the actual
+    // phrasing pattern you see repeated" was actively inviting the model to
+    // paste multi-sentence excerpts verbatim into both pattern_observed and
+    // suggested_change. Grouping five dense paragraphs under a green
+    // heading instead of five separately-colored dense paragraphs is still
+    // a wall of text. Cap each field at one concise sentence -- specificity
+    // stays (quote the actual short phrase that changed), but a pattern
+    // that needs more than one sentence to state is a sign it's really
+    // multiple distinct patterns, not a reason to write a longer sentence.
+    const systemPrompt = `You review edited email drafts to find patterns in how a human editor (Joana) changes AI-drafted sales replies, and propose specific, concrete updates to the SOP that produced the drafts. You are NOT rewriting the SOP yourself — you are proposing changes for a human to review and approve. Be specific: quote the actual short phrase you see repeated across edits, don't generalize vaguely -- but keep each field to ONE concise sentence, never a multi-sentence paragraph. If a pattern genuinely needs more than one sentence to state precisely, that means it's actually two or more distinct patterns -- return them as separate suggestions instead of one long one. If the edits don't show a clear repeated pattern (e.g. they're all one-off stylistic tweaks with no common thread), say so plainly rather than inventing a pattern.`;
 
-    const userPrompt = `Here are ${batchEdits.length} examples of AI-drafted replies versus what Joana actually sent instead:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested SOP changes. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
+    const userPrompt = `Here are ${batchEdits.length} examples of AI-drafted replies versus what Joana actually sent instead:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested SOP changes. Each item: {"pattern_observed": "one concise sentence describing what Joana consistently changes", "suggested_change": "one concise, actionable sentence -- what to actually change in the SOP", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
 
     // RAISED (23 Aug 2026, real incident): confirmed live -- 2000 was too
     // small. A single 5-example batch produced 9 detailed suggestions and
@@ -1006,10 +1019,17 @@ function mergeSuggestionsOnce_(suggestionLines, callerLabel, startedAt) {
   // Log under the same top-level caller name.
   const llmCallerLabel = callerLabel + ':merge';
 
-  const systemPrompt = `You consolidate a list of proposed SOP changes that may contain duplicate or near-duplicate entries -- the same underlying behavioral pattern independently discovered multiple times and worded slightly differently. Merge duplicates/near-duplicates into a single clear entry each. Keep genuinely distinct suggestions separate. When merging, keep the clearest wording and the highest confidence level seen among the merged entries. Do not invent new suggestions -- only consolidate what is given.`;
+  // TIGHTENED (4 Sep 2026, same request as generateSopSuggestionsInner's
+  // prompt above -- "walls of text are hard to read"): "keep the clearest
+  // wording" on its own invites picking whichever merged-in entry happened
+  // to be the longest/most detailed, which defeats the one-sentence cap
+  // upstream the moment two verbose duplicates get merged into one. State
+  // the length rule here too, independently -- this call has no way to
+  // know the generation prompt already tried to keep things short.
+  const systemPrompt = `You consolidate a list of proposed SOP changes that may contain duplicate or near-duplicate entries -- the same underlying behavioral pattern independently discovered multiple times and worded slightly differently. Merge duplicates/near-duplicates into a single clear entry each. Keep genuinely distinct suggestions separate. When merging, write the clearest, most concise version -- ONE sentence per field, never a multi-sentence paragraph, even if every merged-in entry was longer than that. Keep the highest confidence level seen among the merged entries. Do not invent new suggestions -- only consolidate what is given.`;
 
   const listText = suggestionLines.map((t, i) => (i + 1) + '. ' + t).join('\n');
-  const userPrompt = `Here are ${suggestionLines.length} proposed SOP changes, which may contain duplicates or near-duplicates describing the same underlying pattern:\n\n${listText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble -- the consolidated, deduplicated list. Each item: {"pattern_observed": "...", "suggested_change": "...", "confidence": "high | medium | low"}.`;
+  const userPrompt = `Here are ${suggestionLines.length} proposed SOP changes, which may contain duplicates or near-duplicates describing the same underlying pattern:\n\n${listText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble -- the consolidated, deduplicated list. Each item: {"pattern_observed": "one concise sentence describing what Joana consistently changes", "suggested_change": "one concise, actionable sentence -- what to actually change in the SOP", "confidence": "high | medium | low"}.`;
 
   // TIME GUARD (28 Aug 2026): checked BEFORE spending the call, so a run
   // that has already burned its budget in the generation loop doesn't start
@@ -1461,6 +1481,23 @@ function nextSopSuggestionsRunDateStr_() {
 // duplicating it. That one-off (resendSep3SopSuggestionsReformatted) has
 // since done its job and been deleted; this stays hoisted because it's the
 // single definition of how a suggestion list is laid out.
+// ADDED (4 Sep 2026, per direct request -- Joana rechecked the doc after the
+// tier redesign and said "the walls of text are hard to read"): the tier
+// grouping fixed the COLOR problem, and the generation/merge prompts above
+// now ask the model for one concise sentence per field -- but a prompt
+// instruction is not a guarantee, and this doc is exactly where a model
+// that ignored it would show up as a wall of text again. Same
+// belt-and-suspenders the email already applies (EMAIL_SUMMARY_MAX_CHARS
+// below) — a hard cap here means a verbose response degrades to "readable,
+// slightly truncated" instead of silently reproducing the original
+// complaint. Doc gets more room than the email's 120 chars since it's the
+// place meant to hold real detail, just not unlimited detail.
+const SOP_DOC_FIELD_MAX_CHARS = 220;
+function truncateSopField_(text, maxLen) {
+  const t = String(text || '').trim();
+  return t.length > maxLen ? t.slice(0, maxLen).trim() + '…' : t;
+}
+
 function appendSopSuggestionsByTier_(body, suggestions) {
   const TIERS = [
     { key: 'high', label: 'Act on these -- HIGH confidence' },
@@ -1498,8 +1535,8 @@ function appendSopSuggestionsByTier_(body, suggestions) {
       // after the Learning Log rows had already been marked reviewed, so the
       // examples behind it would never be re-analyzed. Coerce, and skip an
       // entry that has no usable text at all rather than appending a blank.
-      const changeText = String((s && s.suggested_change) || '').trim();
-      const patternText_ = String((s && s.pattern_observed) || '').trim();
+      const changeText = truncateSopField_(s && s.suggested_change, SOP_DOC_FIELD_MAX_CHARS);
+      const patternText_ = truncateSopField_(s && s.pattern_observed, SOP_DOC_FIELD_MAX_CHARS);
       if (!changeText && !patternText_) return;
 
       // setBold(true) is a Text method, not a Paragraph one -- go through
