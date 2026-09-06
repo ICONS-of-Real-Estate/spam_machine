@@ -1780,9 +1780,25 @@ function runReplyDrafterInner() {
         // collapses quoted content wrapped in its own recognized quote
         // container; this is that exact container (her spec, verified
         // against real Gmail-generated markup).
+        // FIX (4 Sep 2026, real incident -- Joana: "This is still happening.
+        // The drafts become useless because I need to delete them and
+        // create a new reply."): the blockquote/gmail_quote wrapper alone is
+        // NOT what real Gmail-generated markup looks like -- every reply
+        // Gmail's own compose UI produces precedes that blockquote with an
+        // attribution line ("On [date], [Name] <email> wrote:") in a
+        // `class="gmail_attr"` div. The original 3 Sep fix skipped that
+        // line, which is very likely why collapsing wasn't reliably
+        // triggering: Gmail's own parser appears to key off the attribution
+        // + blockquote pair together, not the blockquote alone. Added here
+        // to match the real structure exactly, not an approximation of it.
         const aiReplyHtml = emojiToHtmlEntities(sanitizeEmojiForGmail(markdownLinksToHtml(result.draftBody, bookingLinkForThisDraft)));
         const historyHtml = emojiToHtmlEntities(escapeHtml(historyPlain).replace(/\n/g, '<br>'));
-        const fullHtmlBody = '<div>' + aiReplyHtml + '</div><br><div class="gmail_quote"><blockquote class="gmail_quote" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">' + historyHtml + '</blockquote></div>';
+        const lastMsgFromEmail = extractEmail(lastMsg.getFrom());
+        const lastMsgFromDisplay = String(lastMsg.getFrom() || '').replace(/<[^>]*>/g, '').replace(/["']/g, '').trim() || lastMsgFromEmail;
+        const lastMsgDateStr = Utilities.formatDate(lastMsg.getDate(), 'Europe/Paris', "EEE, MMM d, yyyy 'at' h:mm a");
+        const attributionHtml = '<div class="gmail_attr" dir="ltr">On ' + escapeHtml(lastMsgDateStr) + ', ' + escapeHtml(lastMsgFromDisplay) +
+          ' &lt;<a href="mailto:' + encodeURIComponent(lastMsgFromEmail) + '">' + escapeHtml(lastMsgFromEmail) + '</a>&gt; wrote:</div>';
+        const fullHtmlBody = '<div>' + aiReplyHtml + '</div><br>' + attributionHtml + '<div class="gmail_quote"><blockquote class="gmail_quote" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">' + historyHtml + '</blockquote></div>';
 
         const cleanSubject = (originalSubjectFromForward || subject).replace(/^(fwd:\s*)+/i, '').trim();
         // FIX (17 Aug 2026, real incident -- Joana's top-priority, repeatedly
