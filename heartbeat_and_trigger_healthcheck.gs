@@ -256,20 +256,36 @@ function runHeartbeatCheck() {
     // project, e.g. the SOP Suggestions email) so a large backlog doesn't
     // produce an unreadable wall of links -- the point is "here's where to
     // start looking," not an exhaustive dump.
+    // ADDED (4 Sep 2026, per direct request -- "show more of the email so we
+    // can tell"): a real incident showed exactly why subject/sender/link
+    // wasn't enough -- a thread from Sean Church (a teammate) looked
+    // identical in the alert to a genuine stuck prospect reply, and neither
+    // Kris nor whoever reads this can tell an internal forward from a real
+    // backlog item without opening Gmail separately, which defeats the
+    // point of an alert that's supposed to be actionable on its own. Add a
+    // short excerpt of the actual message body under each example -- enough
+    // to judge "prospect awaiting a reply" vs. "teammate forwarding for
+    // visibility" without leaving the email.
+    const BODY_EXCERPT_MAX_CHARS = 300;
     const EXAMPLE_CAP = 10;
     const examples = genuinelyPending.slice(0, EXAMPLE_CAP).map(thread => {
       let subject = '(subject unavailable)';
       let sender = '(sender unavailable)';
+      let excerpt = '(body unavailable)';
       try {
         subject = thread.getFirstMessageSubject();
         const messages = thread.getMessages();
         const lastMsg = lastNonDraftMessage_(messages) || messages[messages.length - 1];
         sender = lastMsg.getFrom();
+        const bodyText = String(lastMsg.getPlainBody() || '').replace(/\s+/g, ' ').trim();
+        excerpt = bodyText.length > BODY_EXCERPT_MAX_CHARS
+          ? bodyText.slice(0, BODY_EXCERPT_MAX_CHARS).trim() + '…'
+          : (bodyText || '(empty body)');
       } catch (e) {
         // fall back to placeholders above rather than letting one bad thread
         // break the whole alert
       }
-      return '- "' + subject + '" from ' + sender + ' -- https://mail.google.com/mail/u/0/#all/' + thread.getId();
+      return '- "' + subject + '" from ' + sender + ' -- https://mail.google.com/mail/u/0/#all/' + thread.getId() + '\n  "' + excerpt + '"';
     });
     const remainderCount = genuinelyPending.length - examples.length;
 

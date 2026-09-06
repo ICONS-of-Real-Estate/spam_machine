@@ -152,6 +152,18 @@ function providerColor_(provider) {
   return provider === 'kimi' ? '#6c3fc5' : '#d35400';
 }
 
+// ADDED (4 Sep 2026, per direct request -- "should say 50,000 and have the
+// percentage"): shared by both the plain-text and HTML report bodies so the
+// two can't drift. GMAIL_CALL_REAL_LIMIT_ESTIMATE is a small integer
+// constant (quota_guard_and_alerting.gs) -- toLocaleString() is safe here
+// with no locale/rounding surprises to guard against.
+function gmailQuotaUsageLine_() {
+  const used = getGmailQuotaUsageToday_();
+  const limit = GMAIL_CALL_REAL_LIMIT_ESTIMATE;
+  const pct = limit > 0 ? (used / limit * 100) : 0;
+  return used.toLocaleString() + ' / ' + limit.toLocaleString() + ' (' + pct.toFixed(1) + '%) estimated daily limit';
+}
+
 function runDailyReport() {
   // ADDED (17 Aug 2026, real incident): confirmed live that a different
   // account than Joana's has its own trigger firing this function -- see
@@ -395,7 +407,11 @@ function runDailyReport() {
     // Gmail quota counter (see quota_guard_and_alerting.gs) so someone
     // actually sees it day to day, instead of it only mattering silently
     // behind the scenes.
-    'Gmail quota usage today (self-tracked, approximate): ' + getGmailQuotaUsageToday_() + ' / ' + GMAIL_CALL_REAL_LIMIT_ESTIMATE + ' estimated daily limit\n\n' +
+    // FORMATTED (4 Sep 2026, per direct request -- "should say 50,000 and
+    // have the percentage"): raw 50000 read as an odd, hard-to-parse number
+    // next to a small one like 3111 -- comma-formatted and with a computed
+    // percentage, both numbers are actually easy to compare at a glance.
+    'Gmail quota usage today (self-tracked, approximate): ' + gmailQuotaUsageLine_() + '\n\n' +
     splitTestSection +
     'Full detail is always available in the "AI Drafts Log" and "Learning Log" tabs: ' +
     'https://docs.google.com/spreadsheets/d/' + CONFIG.SPREADSHEET_ID + '/edit';
@@ -426,7 +442,7 @@ function runDailyReport() {
       '<p><b>Averages:</b><br>' +
         'Per day (last 7 days): ' + (drafts7d.length / 7).toFixed(1) + ' drafted<br>' +
         'Per day (last 30 days): ' + (drafts30d.length / 30).toFixed(1) + ' drafted</p>' +
-      '<p><b>Gmail quota usage today</b> (self-tracked, approximate): ' + getGmailQuotaUsageToday_() + ' / ' + GMAIL_CALL_REAL_LIMIT_ESTIMATE + ' estimated daily limit</p>' +
+      '<p><b>Gmail quota usage today</b> (self-tracked, approximate): ' + gmailQuotaUsageLine_() + '</p>' +
       '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
       splitTestSectionHtml +
       '<hr style="border:none; border-top:1px solid #ccc; margin:16px 0;">' +
