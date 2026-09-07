@@ -36,9 +36,40 @@
  * teammate). Emails Kris + Joana + Tomas ONLY when something NEW is found
  * -- no daily "all clear."
  *
- * NOT WIRED TO A TRIGGER. Run manually (runStalledBookingsAudit()) for now
- * -- add to setupAllTriggers() once draft quality is proven out.
+ * RETIRED (4 Sep 2026, per direct request -- "You can turn this off. We are
+ * moving to another project that directly connects with CRM"): was wired to
+ * a real weekly trigger (Mondays, 8 AM) from 24 Aug 2026 until now. That
+ * trigger has been removed from setup_all_triggers.gs and
+ * heartbeat_and_trigger_healthcheck.gs's EXPECTED_TRIGGER_FUNCTIONS. Left in
+ * the project, unscheduled, for reference against the CRM-connected
+ * replacement -- runStalledBookingsAudit() can still be run manually.
+ *
+ * KNOWN BUG, not worth fixing now it's retired: time-driven Apps Script
+ * triggers call their handler with an event object as the first argument.
+ * runStalledBookingsAudit(daysThresholdOverride) was never written to expect
+ * that -- `daysThresholdOverride || STALLED_DAYS_THRESHOLD` took the truthy
+ * event object over the numeric default, which is why live alert subjects
+ * read "[object Object]+ days" instead of "7+ days".
  */
+
+/**
+ * ONE-OFF -- 4 Sep 2026. Removing 'runStalledBookingsAudit' from
+ * setup_all_triggers.gs's functionsToSchedule list stops it from being
+ * RECREATED, but the trigger already live from 24 Aug 2026 keeps firing
+ * every Monday until it's actually deleted -- the two are independent.
+ * Run this once from the Apps Script editor to delete it, check the log,
+ * then delete this function (or leave it -- it's a no-op once the trigger
+ * is gone).
+ */
+function removeStalledBookingsAuditTrigger() {
+  const triggers = ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'runStalledBookingsAudit');
+  if (triggers.length === 0) {
+    Logger.log('removeStalledBookingsAuditTrigger -- no live trigger found for runStalledBookingsAudit. Nothing to do.');
+    return;
+  }
+  triggers.forEach(t => ScriptApp.deleteTrigger(t));
+  Logger.log('removeStalledBookingsAuditTrigger -- deleted ' + triggers.length + ' trigger(s) for runStalledBookingsAudit.');
+}
 
 const STALLED_BOOKINGS_TAB = 'Stalled Bookings Audit';
 const STALLED_DAYS_THRESHOLD = 7;

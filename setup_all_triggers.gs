@@ -48,17 +48,20 @@ function setupAllTriggers() {
     'runDailyReport',
     'runWeekendDeepMissedLeadsAudit',
     'reconcileMissingDrafts',
-    // WIRED UP (24 Aug 2026, per direct request). History: this was listed
-    // here on 17 Aug before the function existed (so it errored on every
-    // fire) and was removed; stalled_bookings_audit.gs then landed 23 Aug
-    // but was left unscheduled pending "until draft quality is proven out."
-    // That caveat was inherited from the other audits and never actually
-    // applied here -- runStalledBookingsAudit creates NO drafts (verified:
-    // no createDraft, no createThreadedDraft_, no LLM call anywhere in that
-    // file). It reads the AI Drafts Log, checks each thread's real last
-    // message age, writes the "Stalled Bookings Audit" tab, and emails only
-    // when it finds something NEW. There was no draft quality to prove.
-    'runStalledBookingsAudit',
+    // REMOVED AGAIN (4 Sep 2026, per direct request -- "You can turn this
+    // off. We are moving to another project that directly connects with
+    // CRM"): was wired up 24 Aug 2026 (see stalled_bookings_audit.gs's own
+    // header, still describing the old "not wired to a trigger, run
+    // manually" state that stopped being true that day -- update that too
+    // if you revisit this). Also flagged separately, same day: time-driven
+    // triggers call their handler with an event object as the first
+    // argument, which runStalledBookingsAudit(daysThresholdOverride) was
+    // never written to expect -- daysThresholdOverride || STALLED_DAYS_THRESHOLD
+    // took the truthy event object over the numeric default, producing the
+    // "[object Object]+ days" subject line seen live. Not worth fixing now
+    // that this audit is being retired in favor of a CRM-connected
+    // replacement -- the file itself is left in place for reference.
+    // 'runStalledBookingsAudit',
     // ADDED (27 Aug 2026, per direct request): see bounce_audit.gs. Creates
     // no drafts and sends no mail to leads -- it reads delivery failures and
     // emails the internal team only when one was addressed to one of our own
@@ -222,19 +225,10 @@ function setupAllTriggers() {
     .create();
   Logger.log('Created: reconcileMissingDrafts, daily around 5 AM ' + TZ + '.');
 
-  // ADDED (24 Aug 2026, per direct request): this audit answers "did a lead
-  // get as far as a penciled call time or a teammate handoff and then just
-  // go quiet with nobody chasing it," which is only actionable on a day
-  // someone is actually working -- so Monday morning rather than joining the
-  // weekend audit block. It emails ONLY on new findings (dedup by Thread ID
-  // against its own tab), so a quiet week produces no email at all rather
-  // than a weekly "all clear" nobody reads.
-  ScriptApp.newTrigger('runStalledBookingsAudit')
-    .timeBased()
-    .onWeekDay(ScriptApp.WeekDay.MONDAY)
-    .atHour(8)
-    .create();
-  Logger.log('Created: runStalledBookingsAudit, weekly Monday around 8 AM ' + TZ + '.');
+  // REMOVED (4 Sep 2026, per direct request -- retiring this audit in favor
+  // of a CRM-connected replacement project). See the functionsToSchedule
+  // comment above for the full note, including the real "[object Object]"
+  // bug this trigger was hitting on every fire.
 
   // ADDED (27 Aug 2026, per direct request -- "anytime we get one, check back
   // that it was sent to correct email of the lead"). 10 AM deliberately: it

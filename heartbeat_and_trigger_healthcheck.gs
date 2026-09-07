@@ -70,16 +70,11 @@ const EXPECTED_TRIGGER_FUNCTIONS = [
   'runDailyReport',
   'runWeekendDeepMissedLeadsAudit',
   'reconcileMissingDrafts',
-  // ADDED (24 Aug 2026, per direct request): runStalledBookingsAudit is now
-  // wired to a real weekly trigger in setupAllTriggers(). The previous note
-  // here claimed it "is not defined anywhere in the project" -- that stopped
-  // being true on 23 Aug 2026 when stalled_bookings_audit.gs landed. It was
-  // held back from a trigger on the grounds of "prove draft quality first,"
-  // but that caveat never actually applied: the audit creates no drafts at
-  // all (verified -- no createDraft/createThreadedDraft_/LLM call anywhere in
-  // that file). It reads the AI Drafts Log, checks thread recency, writes a
-  // sheet tab, and emails ONLY when it finds something new.
-  'runStalledBookingsAudit',
+  // REMOVED (4 Sep 2026, per direct request -- retiring this audit for a
+  // CRM-connected replacement project). Un-scheduled in setup_all_triggers.gs
+  // in the same change; removed here too so this health check doesn't start
+  // reporting a trigger that was deliberately taken away as "missing."
+  // 'runStalledBookingsAudit',
   // ADDED (27 Aug 2026, per direct request): bounce_audit.gs. Added here in
   // the same change that schedules it -- the drift check at the end of
   // setupAllTriggers() compares these two lists and emails an ops alert when
