@@ -742,7 +742,40 @@ function generateSopSuggestionsInner(opts) {
     // stays (quote the actual short phrase that changed), but a pattern
     // that needs more than one sentence to state is a sign it's really
     // multiple distinct patterns, not a reason to write a longer sentence.
-    const systemPrompt = `You review edited email drafts to find patterns in how a human editor (Joana) changes AI-drafted sales replies, and propose specific, concrete updates to the SOP that produced the drafts. You are NOT rewriting the SOP yourself — you are proposing changes for a human to review and approve. Be specific: quote the actual short phrase you see repeated across edits, don't generalize vaguely -- but keep each field to ONE concise sentence, never a multi-sentence paragraph. If a pattern genuinely needs more than one sentence to state precisely, that means it's actually two or more distinct patterns -- return them as separate suggestions instead of one long one. If the edits don't show a clear repeated pattern (e.g. they're all one-off stylistic tweaks with no common thread), say so plainly rather than inventing a pattern.`;
+    // FIX (4 Sep 2026, real incident -- Joana: "Some of those suggestions
+    // don't make sense and aren't aligned with the replies I gave last
+    // week. Not even once I said sorry for the delayed reply."): traced to
+    // a real, confirmable case. Suggestion 1 from the Sep 3 batch claimed
+    // "Joana always adds a delay apology" and proposed making it "a default
+    // include (not conditional...), or at minimum triggered whenever more
+    // than 24 hours have passed" -- but the live SOP doc ALREADY has this
+    // exact rule, correctly conditional: add the apology only when replying
+    // after a REAL delay (a "couple of days"), never same-day. The model
+    // had no visibility into that existing rule -- it only ever saw 5 raw
+    // edited examples, which apparently all happened to involve a delay, so
+    // it generalized a correctly-conditional existing behavior into a
+    // false "always" pattern and proposed loosening the real threshold.
+    // Every other batch this run is exposed to the same blind spot. Feeding
+    // the current live SOP in as context (reusing buildSystemPrompt() --
+    // Code.gs -- so this can never see a DIFFERENT SOP snapshot than the
+    // drafter itself is actually running on) lets the model check "is this
+    // already correctly handled, just conditionally?" before proposing a
+    // change, instead of pattern-matching a small sample in a vacuum.
+    let liveSopContext = '';
+    try {
+      liveSopContext = String(buildSystemPrompt() || '').trim();
+    } catch (e) {
+      Logger.log('generateSopSuggestions -- could not load the live SOP for context (' + e + ') -- proceeding without it; suggestions this batch may re-propose rules that already exist.');
+    }
+    const sopContextBlock = liveSopContext
+      ? `\n\nFor reference, here is the CURRENT live SOP the drafter is already running on:\n\n${liveSopContext}\n\n---\n`
+      : '';
+
+    const systemPrompt = `You review edited email drafts to find patterns in how a human editor (Joana) changes AI-drafted sales replies, and propose specific, concrete updates to the SOP that produced the drafts. You are NOT rewriting the SOP yourself — you are proposing changes for a human to review and approve.${sopContextBlock}
+
+Before proposing a change, check whether the SOP above already covers it -- often correctly, and often CONDITIONALLY (e.g. "only when X," "unless Y"). If the edits you're given happen to all be cases where that condition was true, do NOT generalize the existing conditional behavior into an unconditional "always do this" rule -- that is not a new pattern, it's the existing rule working as designed on a sample that happened to all trigger it. Only propose a change when the edits show something genuinely missing from the SOP, or a case where the SOP's existing conditional logic produced the WRONG result (state clearly what condition was met and why the SOP's current handling of it was wrong).
+
+Be specific: quote the actual short phrase you see repeated across edits, don't generalize vaguely -- but keep each field to ONE concise sentence, never a multi-sentence paragraph. If a pattern genuinely needs more than one sentence to state precisely, that means it's actually two or more distinct patterns -- return them as separate suggestions instead of one long one. If the edits don't show a clear repeated pattern (e.g. they're all one-off stylistic tweaks, or already correctly handled by existing conditional SOP logic), say so plainly rather than inventing a pattern.`;
 
     const userPrompt = `Here are ${batchEdits.length} examples of AI-drafted replies versus what Joana actually sent instead:\n\n${examplesText}\n\nReturn ONLY a JSON array, no markdown fences, no preamble, of specific suggested SOP changes. Each item: {"pattern_observed": "one concise sentence describing what Joana consistently changes", "suggested_change": "one concise, actionable sentence -- what to actually change in the SOP", "confidence": "high | medium | low"}. If there's truly no pattern worth acting on, return an empty array.`;
 
