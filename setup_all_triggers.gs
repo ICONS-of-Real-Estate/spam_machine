@@ -3,8 +3,9 @@
  * this project needs in one shot, instead of adding each one by hand
  * through the Triggers UI.
  * ---------------------------------------------------------------------------
- * Deletes any existing trigger for these same functions first (so running
- * this twice doesn't create duplicates), then creates:
+ * Deletes EVERY existing trigger this account owns first (4 Sep 2026 change
+ * -- see the note above the deletion loop below for why this used to be
+ * narrower and why that left orphaned triggers behind), then creates:
  *   - runReplyDrafter          -- every 15 minutes weekdays, effectively
  *     hourly on weekends (dropped to 5 min for a few hours on 27 Aug 2026
  *     while chasing the unparseable-forward-info rate, reverted back to 15
@@ -69,17 +70,29 @@ function setupAllTriggers() {
     'runBounceAudit'
   ];
 
-  // Delete any existing triggers for these functions first, so re-running
-  // this doesn't create duplicates alongside ones already set up manually.
+  // CHANGED (4 Sep 2026, per direct request -- "Remove all shoult be done
+  // before set all"): this used to delete only existing triggers whose
+  // handler function was still IN functionsToSchedule -- safe against
+  // duplicates for functions that stayed on the list, but it meant a
+  // function REMOVED from the list (like runStalledBookingsAudit, same
+  // change) left its old trigger behind as a silent orphan, still firing on
+  // its original schedule forever. Confirmed live: removing it from this
+  // list and re-running setupAllTriggers() did not stop it -- a separate
+  // one-off (removeStalledBookingsAuditTrigger()) had to be run by hand to
+  // actually delete it. Wiping every trigger this account owns first, same
+  // as deleteAllMyTriggers() below, then recreating the current full set
+  // makes this self-cleaning: whatever WAS scheduled that no longer should
+  // be is gone the moment this runs, with no separate cleanup step to
+  // remember. Same account-safety logging as deleteAllMyTriggers() for
+  // visibility into what's actually being wiped.
+  const account = getRunningAccountEmail();
+  Logger.log('setupAllTriggers -- running as: ' + (account || 'UNKNOWN'));
   const existingTriggers = ScriptApp.getProjectTriggers();
-  let deletedCount = 0;
   existingTriggers.forEach(trigger => {
-    if (functionsToSchedule.indexOf(trigger.getHandlerFunction()) !== -1) {
-      ScriptApp.deleteTrigger(trigger);
-      deletedCount++;
-    }
+    Logger.log('setupAllTriggers -- deleting existing trigger for: ' + trigger.getHandlerFunction() + ' (' + trigger.getEventType() + ')');
+    ScriptApp.deleteTrigger(trigger);
   });
-  Logger.log('Removed ' + deletedCount + ' existing trigger(s) for these functions before recreating.');
+  Logger.log('Removed all ' + existingTriggers.length + ' existing trigger(s) owned by this account before recreating the current set.');
 
   // NOTE ON TIMEZONES: every .atHour()/.everyDays() trigger fires in the
   // SCRIPT's timezone, which is Europe/Paris (see "timeZone" in
