@@ -1791,6 +1791,17 @@ function runReplyDrafterInner() {
         // triggering: Gmail's own parser appears to key off the attribution
         // + blockquote pair together, not the blockquote alone. Added here
         // to match the real structure exactly, not an approximation of it.
+        //
+        // STILL BROKEN, FIX 2 (7 Sep 2026, real incident, confirmed via a
+        // fresh draft from that same day -- the attribution line from the
+        // fix above WAS present and correctly worded, but still no
+        // collapse): the attribution div was placed as a SIBLING before
+        // `<div class="gmail_quote">`, not nested INSIDE it. Real
+        // Gmail-generated markup puts gmail_attr as the FIRST CHILD of the
+        // gmail_quote div, immediately before the blockquote -- not before
+        // the div entirely. That nesting is very likely what Gmail's parser
+        // actually keys off, not just the class names being present
+        // somewhere in the DOM. Restructured to nest it correctly.
         const aiReplyHtml = emojiToHtmlEntities(sanitizeEmojiForGmail(markdownLinksToHtml(result.draftBody, bookingLinkForThisDraft)));
         const historyHtml = emojiToHtmlEntities(escapeHtml(historyPlain).replace(/\n/g, '<br>'));
         const lastMsgFromEmail = extractEmail(lastMsg.getFrom());
@@ -1798,7 +1809,7 @@ function runReplyDrafterInner() {
         const lastMsgDateStr = Utilities.formatDate(lastMsg.getDate(), 'Europe/Paris', "EEE, MMM d, yyyy 'at' h:mm a");
         const attributionHtml = '<div class="gmail_attr" dir="ltr">On ' + escapeHtml(lastMsgDateStr) + ', ' + escapeHtml(lastMsgFromDisplay) +
           ' &lt;<a href="mailto:' + encodeURIComponent(lastMsgFromEmail) + '">' + escapeHtml(lastMsgFromEmail) + '</a>&gt; wrote:</div>';
-        const fullHtmlBody = '<div>' + aiReplyHtml + '</div><br>' + attributionHtml + '<div class="gmail_quote"><blockquote class="gmail_quote" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">' + historyHtml + '</blockquote></div>';
+        const fullHtmlBody = '<div>' + aiReplyHtml + '</div><br><div class="gmail_quote">' + attributionHtml + '<blockquote class="gmail_quote" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">' + historyHtml + '</blockquote></div>';
 
         const cleanSubject = (originalSubjectFromForward || subject).replace(/^(fwd:\s*)+/i, '').trim();
         // FIX (17 Aug 2026, real incident -- Joana's top-priority, repeatedly
