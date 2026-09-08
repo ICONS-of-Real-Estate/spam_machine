@@ -237,6 +237,61 @@ function runHeartbeatCheck() {
       }
     });
 
+    // FIX (8 Sep 2026, real incident -- Kris: "You expect me to read this?"
+    // after the body-excerpt fix made it obvious most of a 50-thread alert
+    // was a newsletter ("Entrepreneur Daily via Network"), internal
+    // scheduling threads from Tomas, and threads Joana had already
+    // personally answered herself): this filter never replicated the check
+    // runReplyDrafterInner() itself uses to decide the exact same question.
+    // There, right after computing the last message's sender,
+    // isRealTeamReply(lastSenderEmail) catches "the last reply in this
+    // thread came from one of OUR OWN people, not the lead" and the thread
+    // gets a permanent AI-Skipped-AlreadyAnsweredByTeam label so it's never
+    // reconsidered. That label is exactly what the search query in this
+    // file already excludes (-label:"...AlreadyAnsweredByTeam") -- but a
+    // thread only GETS that label once runReplyDrafterInner() actually
+    // processes it. Until then (including during the exact "something's
+    // stuck" window this alert exists to catch), an internal reply or a
+    // newsletter sent to the campaign alias sits unlabeled and reads as
+    // unexplained backlog here, when the real drafter would immediately
+    // recognize and skip it the moment it runs. Applying the identical
+    // check here means the count and the examples reflect what's ACTUALLY
+    // stuck, not everything that merely hasn't been triaged yet.
+    genuinelyPending = genuinelyPending.filter(thread => {
+      try {
+        const messages = thread.getMessages();
+        const lastMsg = lastExternallyRelevantMessage_(messages) || lastNonDraftMessage_(messages) || messages[messages.length - 1];
+        return !isRealTeamReply(extractEmail(lastMsg.getFrom()));
+      } catch (e) {
+        return true; // can't tell -- keep it counted as pending rather than silently dropping it
+      }
+    });
+
+    // FIX (8 Sep 2026, same incident as above -- the screenshot's other
+    // noise category was newsletters like "Entrepreneur Daily via Network"
+    // and "The Daily Skimm via Network"): isRealTeamReply() deliberately
+    // does NOT flag the campaign alias itself (network@ardorseo.com /
+    // network@iconsofrealestate.com) as a team reply, because real leads
+    // legitimately land there too -- so a newsletter routed through that
+    // same alias sails through the filter above with a clean bill as
+    // "not internal." Sender address alone can't distinguish a newsletter
+    // from a real lead here, since both arrive from/through the same alias.
+    // A List-Unsubscribe header is the one signal that's true of bulk mail
+    // and essentially never true of an actual person replying to Joana --
+    // check it directly instead of trying to pattern-match sender names
+    // ("Entrepreneur Daily", "The Daily Skimm", etc.) that will just keep
+    // changing.
+    genuinelyPending = genuinelyPending.filter(thread => {
+      try {
+        const messages = thread.getMessages();
+        const lastMsg = lastExternallyRelevantMessage_(messages) || lastNonDraftMessage_(messages) || messages[messages.length - 1];
+        const listUnsubscribe = lastMsg.getHeader('List-Unsubscribe');
+        return !listUnsubscribe;
+      } catch (e) {
+        return true; // can't tell -- keep it counted as pending rather than silently dropping it
+      }
+    });
+
     if (genuinelyPending.length === 0) {
       Logger.log('Heartbeat check -- last draft was ' + hoursSinceLastEntry.toFixed(1) + 'h ago; pending-reply search found ' + pendingThreads.length + ' thread(s), but all are already known/cached as non-actionable (bounces, etc.) -- genuinely nothing new to draft. Not alerting.');
       return;
