@@ -1802,14 +1802,32 @@ function runReplyDrafterInner() {
         // the div entirely. That nesting is very likely what Gmail's parser
         // actually keys off, not just the class names being present
         // somewhere in the DOM. Restructured to nest it correctly.
+        //
+        // FIX 3 (8 Sep 2026, ground truth this time -- Kris pulled a real
+        // Gmail-composed reply's raw MIME via "Show original" instead of us
+        // reasoning about it again): four concrete, confirmed differences
+        // from the real markup, all fixed here instead of approximated:
+        // (1) the outer wrapper carries TWO classes, "gmail_quote
+        // gmail_quote_container", not just "gmail_quote" -- we were missing
+        // gmail_quote_container entirely; (2) the reply's own top-level div
+        // is `dir="ltr"`, ours was a bare <div>; (3) there is NO comma
+        // between the formatted date and the sender's name ("On [date]
+        // [Name] <email> wrote:") -- we had one; (4) the attribution div's
+        // text ends with a trailing <br> before the closing </div>, which
+        // we didn't have. Real captured example: `<div dir="ltr">Trish
+        // N/I</div><br><div class="gmail_quote gmail_quote_container"><div
+        // dir="ltr" class="gmail_attr">On Tue, Aug 25, 2026 at 11:24 PM
+        // Joana Peixe &lt;<a href="mailto:...">...</a>&gt; wrote:<br></div>
+        // <blockquote class="gmail_quote" style="margin:0px 0px 0px
+        // 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex">`.
         const aiReplyHtml = emojiToHtmlEntities(sanitizeEmojiForGmail(markdownLinksToHtml(result.draftBody, bookingLinkForThisDraft)));
         const historyHtml = emojiToHtmlEntities(escapeHtml(historyPlain).replace(/\n/g, '<br>'));
         const lastMsgFromEmail = extractEmail(lastMsg.getFrom());
         const lastMsgFromDisplay = String(lastMsg.getFrom() || '').replace(/<[^>]*>/g, '').replace(/["']/g, '').trim() || lastMsgFromEmail;
         const lastMsgDateStr = Utilities.formatDate(lastMsg.getDate(), 'Europe/Paris', "EEE, MMM d, yyyy 'at' h:mm a");
-        const attributionHtml = '<div class="gmail_attr" dir="ltr">On ' + escapeHtml(lastMsgDateStr) + ', ' + escapeHtml(lastMsgFromDisplay) +
-          ' &lt;<a href="mailto:' + encodeURIComponent(lastMsgFromEmail) + '">' + escapeHtml(lastMsgFromEmail) + '</a>&gt; wrote:</div>';
-        const fullHtmlBody = '<div>' + aiReplyHtml + '</div><br><div class="gmail_quote">' + attributionHtml + '<blockquote class="gmail_quote" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">' + historyHtml + '</blockquote></div>';
+        const attributionHtml = '<div dir="ltr" class="gmail_attr">On ' + escapeHtml(lastMsgDateStr) + ' ' + escapeHtml(lastMsgFromDisplay) +
+          ' &lt;<a href="mailto:' + encodeURIComponent(lastMsgFromEmail) + '">' + escapeHtml(lastMsgFromEmail) + '</a>&gt; wrote:<br></div>';
+        const fullHtmlBody = '<div dir="ltr">' + aiReplyHtml + '</div><br><div class="gmail_quote gmail_quote_container">' + attributionHtml + '<blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex">' + historyHtml + '</blockquote></div>';
 
         const cleanSubject = (originalSubjectFromForward || subject).replace(/^(fwd:\s*)+/i, '').trim();
         // FIX (17 Aug 2026, real incident -- Joana's top-priority, repeatedly
