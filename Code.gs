@@ -315,13 +315,24 @@ const CONFIG = {
   NETWORK_CC_ON_REPLY: 'network@iconsofrealestate.com',
 
   // NEW in v5 -- the live SOP Doc and the state->show lookup Sheet.
-  // UPDATED (9 Sep 2026): swapped to the 7-tab restructured doc (Joana's
-  // feedback doc section 6 -- "effectively unreadable right now"). The old
-  // single-body doc is archived at 15SwaYCEXGshe_8eZ2ZzADa0fk_SkdcvuDgjgajPEhag
-  // (renamed "ARCHIVED..." so it can't be confused for the live one). Reading
-  // this doc's tabs requires getDocFullText_() (see buildSystemPrompt() below),
-  // not a plain doc.getBody().getText() -- see that function's comment for why.
-  SOP_DOC_ID: '1uX5QFAH32FvUe2waMh67HAHlwGp24mOkRmL_e0KdDVg',
+  // REVERTED (9 Sep 2026, real incident -- production down for ~9h): swapped
+  // to the 7-tab restructured doc earlier today, but the new doc was created
+  // under Kris's Drive account and never got shared with joana@iconsofrealestate.com
+  // (the account this script runs as -- see assertRunningAsJoana()). Every
+  // DocumentApp.openById() call failed with a permission error, silently
+  // downgrading every draft to the ~60-word fallback stub in buildSystemPrompt()
+  // and firing "SOP Doc unreadable" alerts every 15 min (until Kris deleted
+  // ALL triggers to stop the spam -- see setup_all_triggers.gs, that's now a
+  // separate open item: automation is fully down until setupAllTriggers() is
+  // re-run). Reverting to the old, correctly-shared ("anyone with the link can
+  // edit", matching how Joana's own script identity could always open it)
+  // single-body doc immediately rather than waiting on a manual sharing fix.
+  // The restructured doc (1uX5QFAH32FvUe2waMh67HAHlwGp24mOkRmL_e0KdDVg) is not
+  // gone -- once it's properly shared with joana@iconsofrealestate.com AND
+  // that's been verified (not just assumed), it can be swapped back in. Do
+  // NOT re-attempt that swap without first confirming sharing via
+  // get_file_permissions or an actual successful buildSystemPrompt() run.
+  SOP_DOC_ID: '15SwaYCEXGshe_8eZ2ZzADa0fk_SkdcvuDgjgajPEhag',
   STATE_DIRECTORY_SHEET_ID: '1ULIpgYPJEhK68OespSm7yO8fzSP0OU8Y_cStb4sUHKM',
 
   // RAISED (17 Aug 2026, real incident): the search's own newer_than window
