@@ -434,8 +434,7 @@ function buildSchedulingNote(originalMessageDate) {
 
 function buildFollowUpSystemPrompt() {
   try {
-    const doc = DocumentApp.openById(CONFIG.SOP_DOC_ID);
-    const fullText = doc.getBody().getText();
+    const fullText = getDocFullText_(CONFIG.SOP_DOC_ID);
     // Match the heading even if it has trailing parenthetical text, matching
     // the Doc's real style (e.g. "## Tone (confirmed from real usage)"). The
     // heading still must START with exactly "## FOLLOW-UP DRAFTING".

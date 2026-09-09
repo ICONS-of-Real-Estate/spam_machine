@@ -3710,6 +3710,42 @@ function clearSopCache() {
   Logger.log('SOP cache cleared -- next buildSystemPrompt() call re-fetches the Doc fresh.');
 }
 
+// ADDED (9 Sep 2026, real risk found BEFORE it fired live -- the SOP doc
+// restructuring plan (sop_change_requests/2026-09-04_sop-doc-restructuring-plan.md)
+// splits the SOP into 7 real Google Docs tabs). Both places that read the SOP
+// (this function and buildFollowUpSystemPrompt() in lead_followup_sequences.gs)
+// used to call doc.getBody().getText() directly -- but getBody() only returns
+// the document's DEFAULT tab. On a multi-tab Doc, that silently drops every
+// other tab's content. Swapping CONFIG.SOP_DOC_ID to a tabbed doc (or adding
+// tabs to the live one) without this fix would have collapsed the entire SOP
+// down to whatever fits in the first tab -- every category, hard rule, and
+// the whole FOLLOW-UP DRAFTING section gone, with drafts still looking
+// completely normal in the Drafts folder. Reads every tab (and any nested
+// child tabs, though this project doesn't use those) and concatenates their
+// body text in tab order. Falls back to plain getBody().getText() when
+// getTabs() is unavailable or returns nothing, so this is a no-op on a
+// single-body (non-tabbed) doc like the current live one.
+function getDocFullText_(docId) {
+  const doc = DocumentApp.openById(docId);
+  if (typeof doc.getTabs !== 'function') {
+    return doc.getBody().getText();
+  }
+  const tabs = doc.getTabs();
+  if (!tabs || tabs.length === 0) {
+    return doc.getBody().getText();
+  }
+  const parts = [];
+  const collect = (tab) => {
+    if (typeof tab.asDocumentTab === 'function') {
+      parts.push(tab.asDocumentTab().getBody().getText());
+    }
+    const children = typeof tab.getChildTabs === 'function' ? tab.getChildTabs() : [];
+    children.forEach(collect);
+  };
+  tabs.forEach(collect);
+  return parts.join('\n\n').trim();
+}
+
 function buildSystemPrompt() {
   const cache = CacheService.getScriptCache();
   const cached = cache.get(SOP_CACHE_KEY);
@@ -3738,8 +3774,7 @@ function buildSystemPrompt() {
   }
 
   try {
-    const doc = DocumentApp.openById(CONFIG.SOP_DOC_ID);
-    const rawText = doc.getBody().getText();
+    const rawText = getDocFullText_(CONFIG.SOP_DOC_ID);
     // TRIMMED (25 Aug 2026, per direct request): buildSystemPrompt() used to
     // return the ENTIRE Doc body, including the "## FOLLOW-UP DRAFTING" and
     // "## Change log" sections -- real, sizeable chunks of the Doc (roughly a
