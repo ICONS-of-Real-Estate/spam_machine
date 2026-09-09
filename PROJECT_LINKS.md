@@ -7,8 +7,13 @@ file rather than re-discovering links by search each session.
 ## Core, code-referenced (also in `Code.gs` CONFIG)
 
 - **Live SOP doc** (`CONFIG.SOP_DOC_ID`, read by the script every run):
+  `1uX5QFAH32FvUe2waMh67HAHlwGp24mOkRmL_e0KdDVg`
+  https://docs.google.com/document/d/1uX5QFAH32FvUe2waMh67HAHlwGp24mOkRmL_e0KdDVg/edit
+  UPDATED (9 Sep 2026): restructured into 7 tabs per Joana's feedback doc
+  section 6. Reading it requires `getDocFullText_()` (Code.gs) to walk all
+  tabs, not a plain `doc.getBody().getText()` -- see that helper's comment.
+  Old single-body doc archived (do not point CONFIG.SOP_DOC_ID back at it):
   `15SwaYCEXGshe_8eZ2ZzADa0fk_SkdcvuDgjgajPEhag`
-  https://docs.google.com/document/d/15SwaYCEXGshe_8eZ2ZzADa0fk_SkdcvuDgjgajPEhag/edit
 - **Main spreadsheet** (`CONFIG.SPREADSHEET_ID` — AI Drafts Log, Learning Log,
   SOP Suggestions tabs): `1uDrt3WAPZR90iaPgM6wZcfN9rOXzkkuFHJ6tg_XMHHs`
   https://docs.google.com/spreadsheets/d/1uDrt3WAPZR90iaPgM6wZcfN9rOXzkkuFHJ6tg_XMHHs/edit

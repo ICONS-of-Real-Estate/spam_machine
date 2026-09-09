@@ -315,7 +315,13 @@ const CONFIG = {
   NETWORK_CC_ON_REPLY: 'network@iconsofrealestate.com',
 
   // NEW in v5 -- the live SOP Doc and the state->show lookup Sheet.
-  SOP_DOC_ID: '15SwaYCEXGshe_8eZ2ZzADa0fk_SkdcvuDgjgajPEhag',
+  // UPDATED (9 Sep 2026): swapped to the 7-tab restructured doc (Joana's
+  // feedback doc section 6 -- "effectively unreadable right now"). The old
+  // single-body doc is archived at 15SwaYCEXGshe_8eZ2ZzADa0fk_SkdcvuDgjgajPEhag
+  // (renamed "ARCHIVED..." so it can't be confused for the live one). Reading
+  // this doc's tabs requires getDocFullText_() (see buildSystemPrompt() below),
+  // not a plain doc.getBody().getText() -- see that function's comment for why.
+  SOP_DOC_ID: '1uX5QFAH32FvUe2waMh67HAHlwGp24mOkRmL_e0KdDVg',
   STATE_DIRECTORY_SHEET_ID: '1ULIpgYPJEhK68OespSm7yO8fzSP0OU8Y_cStb4sUHKM',
 
   // RAISED (17 Aug 2026, real incident): the search's own newer_than window
